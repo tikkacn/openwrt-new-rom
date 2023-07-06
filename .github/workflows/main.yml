@@ -1,0 +1,21 @@
+name: Run some script in Kunpeng env
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: self-hosted
+
+    steps:
+    # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+    - uses: actions/checkout@v2
+
+    - name: Run `uname -a` in Kunpeng env
+      run: |
+        uname -a
+        cat /etc/os-release
+        lscpu | grep -E "Architecture|Model name|CPU\(s\):"
