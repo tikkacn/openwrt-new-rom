@@ -36,6 +36,7 @@ env:
 jobs:
   build:
     runs-on: [self-hosted]
+    timeout-minutes: 360
 
     steps:
     - name: Checkout
