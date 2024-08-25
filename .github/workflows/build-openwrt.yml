@@ -33,6 +33,11 @@ env:
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: 0 */18 * * *
+
 jobs:
   build:
     runs-on: ubuntu-20.04
