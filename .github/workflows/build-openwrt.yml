@@ -11,13 +11,14 @@
 name: Build OpenWrt
 
 on:
-  repository_dispatch:
   workflow_dispatch:
     inputs:
       ssh:
         description: 'SSH connection to Actions'
         required: false
         default: 'false'
+  schedule:
+    - cron: '0 16 * * *'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
@@ -32,11 +33,6 @@ env:
   UPLOAD_WETRANSFER: false
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: 0 16 * * *
 
 jobs:
   build:
