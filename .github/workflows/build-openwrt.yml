@@ -97,9 +97,6 @@ jobs:
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
 
-    - name: Install Clang
-      run: sudo apt update && sudo apt install -y clang
-
     - name: Clone source code
       working-directory: /workdir
       run: |
@@ -131,7 +128,6 @@ jobs:
       run: |
         [ -e files ] && mv files openwrt/files
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        sed -i 's/-Wno-cast-function-type/-Wno-bad-function-cast/g' openwrt/.config
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
