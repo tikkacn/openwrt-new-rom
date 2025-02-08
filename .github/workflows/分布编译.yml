@@ -146,11 +146,20 @@ jobs:
       run: |
         sudo mkdir -p /workdir
         sudo chown -R $USER:$GROUPS /workdir
-        if ! /usr/bin/tar -xz -f /home/runner/.cache/actions/cache/openwrt-source-${{ github.sha }}.tar.gz -C /workdir; then
-          echo "Cache restoration failed, using prepared source."
-          cd /workdir
-          git fetch origin $REPO_BRANCH
-          git reset --hard FETCH_HEAD
+        # 尝试恢复缓存，如果失败则尝试更新现有的仓库
+        if ! /usr/bin/tar -xz -f $(find /home/runner/.cache/actions/cache -name "openwrt-source-${{ github.sha }}.tar.gz") -C /workdir; then
+          echo "Cache restoration failed, checking for existing repository."
+          if [ -d "/workdir/openwrt/.git" ]; then
+            cd /workdir/openwrt
+            git fetch origin $REPO_BRANCH
+            git reset --hard FETCH_HEAD
+            echo "Repository updated"
+          else
+            echo "No Git repository found, attempting to clone..."
+            git clone --depth=1 $REPO_URL -b $REPO_BRANCH /workdir/openwrt || { echo "Failed to clone OpenWrt"; exit 1; }
+            sudo chown -R $USER:$GROUPS /workdir/openwrt
+            echo "Repository cloned"
+          fi
         fi
 
     - name: Prepare source code
@@ -159,7 +168,7 @@ jobs:
           echo "OpenWrt source code directory not found, critical error!"
           exit 1
         fi
-        echo "OpenWrt source code already in /workdir/"
+        echo "OpenWrt source code ready in /workdir/"
 
     - name: Update feeds
       working-directory: /workdir/openwrt
