@@ -88,7 +88,7 @@ jobs:
           mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 \
           python3 python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools \
           subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev \
-          python3-setuptools
+          python3-setuptools bc lm-sensors pciutils wget libpam0g-dev libkmod-dev
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
@@ -121,6 +121,12 @@ jobs:
           echo "diy-part1.sh not found, skipping..."
         fi
 
+    - name: Update and install feeds
+      working-directory: /workdir/openwrt
+      run: |
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
     - name: Cache Source Code
       uses: actions/cache@v3
       with:
@@ -146,7 +152,6 @@ jobs:
       run: |
         sudo mkdir -p /workdir
         sudo chown -R $USER:$GROUPS /workdir
-        # 尝试恢复缓存，如果失败则尝试更新现有的仓库
         if ! /usr/bin/tar -xz -f $(find /home/runner/.cache/actions/cache -name "openwrt-source-${{ github.sha }}.tar.gz") -C /workdir; then
           echo "Cache restoration failed, checking for existing repository."
           if [ -d "/workdir/openwrt/.git" ]; then
@@ -170,34 +175,34 @@ jobs:
         fi
         echo "OpenWrt source code ready in /workdir/"
 
-    - name: Update feeds
-      working-directory: /workdir/openwrt
-      run: ./scripts/feeds update -a || { echo "Failed to update feeds"; exit 1; }
-
-    - name: Install feeds
-      working-directory: /workdir/openwrt
-      run: ./scripts/feeds install -a || { echo "Failed to install feeds"; exit 1; }
-
     - name: Load custom configuration
       working-directory: /workdir/openwrt
       run: |
-        # 检查并移动 files 目录
-        [ -e files ] && mv files files || echo "files directory not found"
-
-        # 检查并移动 .config 文件
-        if [ -e "$CONFIG_FILE" ]; then
-          mv "$CONFIG_FILE" .config
+        if [ -e "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
         else
           echo ".config not found, exiting..."
           exit 1
         fi
 
-        # 检查 diy-part2.sh 文件是否存在并执行
-        if [ -f "$DIY_P2_SH" ]; then
-          chmod +x "$DIY_P2_SH"
-          $GITHUB_WORKSPACE/$DIY_P2_SH || { echo "Failed to run diy-part2.sh"; exit 1; }
+        if [ -f "$GITHUB_WORKSPACE/$DIY_P2_SH" ]; then
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          "$GITHUB_WORKSPACE/$DIY_P2_SH" || { echo "Failed to run diy-part2.sh"; exit 1; }
         else
           echo "diy-part2.sh not found, skipping..."
+        fi
+
+    - name: Update feeds
+      working-directory: /workdir/openwrt
+      run: ./scripts/feeds update -a || { echo "Failed to update feeds"; exit 1; }
+
+    - name: Install feeds if necessary
+      working-directory: /workdir/openwrt
+      run: |
+        if [ ! -d "feeds" ] || [ ! -f "feeds/.installed" ]; then
+          ./scripts/feeds install -a || { echo "Failed to install feeds"; exit 1; }
+        else
+          echo "Feeds already installed."
         fi
 
     - name: Download package
