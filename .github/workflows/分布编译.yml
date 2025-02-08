@@ -143,10 +143,12 @@ jobs:
       uses: actions/checkout@main
 
     - name: Restore Source Cache
-      uses: actions/cache@v3
-      with:
-        path: /workdir/openwrt
-        key: openwrt-source-${{ github.sha }}
+      run: |
+        sudo mkdir -p /workdir
+        sudo chown -R $USER:$GROUPS /workdir
+        if ! /usr/bin/tar -xz -f /home/runner/.cache/actions/cache/openwrt-source-${{ github.sha }}.tar.gz -C /workdir; then
+          echo "Failed to restore cache. Continuing without cache."
+        fi
 
     - name: Prepare source code
       run: |
