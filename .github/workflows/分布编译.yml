@@ -79,13 +79,16 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
-        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-        vim wget xmlto xxd zlib1g-dev python3-setuptools
+        sudo -E apt-get -qq install \
+          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext \
+          gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 \
+          libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+          libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 \
+          python3 python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools \
+          subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev \
+          python3-setuptools
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
@@ -95,30 +98,25 @@ jobs:
     - name: Clone source code
       working-directory: /workdir
       run: |
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-        # 确认 openwrt 目录是否存在
-        if [ -d "openwrt" ]; then
-          echo "OpenWrt source code cloned successfully."
-        else
-          echo "Failed to clone OpenWrt source code."
-          exit 1
-        fi
+        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || { echo "Failed to clone OpenWrt"; exit 1; }
+        echo "OpenWrt source code cloned successfully."
 
     - name: Load custom feeds
       working-directory: /workdir/openwrt
       run: |
-        # 检查 feeds.conf.default 文件
         if [ -e "$FEEDS_CONF" ]; then
-          mv "$FEEDS_CONF" feeds.conf.default
+          if [ "$FEEDS_CONF" != "feeds.conf.default" ]; then
+            mv "$FEEDS_CONF" feeds.conf.default || { echo "Failed to rename feeds.conf.default"; exit 1; }
+          else
+            echo "feeds.conf.default is already set, skipping..."
+          fi
         else
-          echo "feeds.conf.default not found, skipping..."
+          echo "$FEEDS_CONF not found, skipping..."
         fi
 
-        # 检查 diy-part1.sh 文件是否存在并执行
         if [ -f "$DIY_P1_SH" ]; then
           chmod +x "$DIY_P1_SH"
-          $GITHUB_WORKSPACE/$DIY_P1_SH
+          $GITHUB_WORKSPACE/$DIY_P1_SH || { echo "Failed to run diy-part1.sh"; exit 1; }
         else
           echo "diy-part1.sh not found, skipping..."
         fi
@@ -149,11 +147,11 @@ jobs:
 
     - name: Update feeds
       working-directory: /workdir/openwrt
-      run: ./scripts/feeds update -a
+      run: ./scripts/feeds update -a || { echo "Failed to update feeds"; exit 1; }
 
     - name: Install feeds
       working-directory: /workdir/openwrt
-      run: ./scripts/feeds install -a
+      run: ./scripts/feeds install -a || { echo "Failed to install feeds"; exit 1; }
 
     - name: Load custom configuration
       working-directory: /workdir/openwrt
@@ -172,7 +170,7 @@ jobs:
         # 检查 diy-part2.sh 文件是否存在并执行
         if [ -f "$DIY_P2_SH" ]; then
           chmod +x "$DIY_P2_SH"
-          $GITHUB_WORKSPACE/$DIY_P2_SH
+          $GITHUB_WORKSPACE/$DIY_P2_SH || { echo "Failed to run diy-part2.sh"; exit 1; }
         else
           echo "diy-part2.sh not found, skipping..."
         fi
@@ -181,8 +179,8 @@ jobs:
       working-directory: /workdir/openwrt
       id: package
       run: |
-        make defconfig
-        make download -j8
+        make defconfig || { echo "Failed to run defconfig"; exit 1; }
+        make download -j8 || { echo "Failed to download packages"; exit 1; }
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
