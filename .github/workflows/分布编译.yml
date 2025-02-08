@@ -1,4 +1,4 @@
-name: 分布式编译op
+name: 分布编译OpenWrt
 
 on:
   repository_dispatch:
@@ -17,14 +17,23 @@ env:
   UPLOAD_WETRANSFER: false
   UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
-  PACKAGES_PER_BATCH: 50  # 每个批次包含的包数量
 
 jobs:
   prepare:
     runs-on: ubuntu-22.04
+    outputs:
+      status: ${{ steps.prepare.outputs.status }}
+    
     steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
     - name: Before freeing up disk space
-      run: df -hT
+      run: |
+        echo "Before freeing up disk space"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
 
     - name: "Optimize Disk Space"
       uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
@@ -59,17 +68,18 @@ jobs:
         remove-docker-images: 'true'
 
     - name: Free up disk space complete
-      run: df -hT
-
-    - name: Checkout
-      uses: actions/checkout@v2
+      run: |
+        echo "Free up disk space complete"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
 
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
         libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
@@ -78,14 +88,15 @@ jobs:
         vim wget xmlto xxd zlib1g-dev python3-setuptools
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
-        /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
         sudo timedatectl set-timezone "$TZ"
-        sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
 
     - name: Clone source code
+      working-directory: /workdir
       run: |
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
     - name: Load custom feeds
       run: |
@@ -93,6 +104,30 @@ jobs:
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Cache Source Code
+      uses: actions/cache@v3
+      with:
+        path: openwrt
+        key: openwrt-source-${{ github.sha }}
+
+    - name: Set prepare status
+      id: prepare
+      run: echo "status=success" >> $GITHUB_OUTPUT
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        part: [1, 2]  # 分成两部分并行编译
+    
+    steps:
+    - name: Restore Source Cache
+      uses: actions/cache@v3
+      with:
+        path: openwrt
+        key: openwrt-source-${{ github.sha }}
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
@@ -108,70 +143,28 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
-    - name: Setup package selection
-      id: pkg_selection
-      run: |
-        # 读取 .config 文件，提取所有要编译的包
-        packages=($(grep "CONFIG_PACKAGE_" "$CONFIG_FILE" | grep "=y" | sed -e 's/CONFIG_PACKAGE_//' -e 's/=y//'))
-        
-        batch_num=1
-        batch_packages=""
-        
-        for i in "${packages[@]}"; do
-          if [[ $(echo "$batch_packages" | wc -w) -eq $PACKAGES_PER_BATCH ]]; then
-            echo "BATCH_${batch_num}=${batch_packages}" >> $GITHUB_ENV
-            echo "BATCH_${batch_num}_COUNT=${PACKAGES_PER_BATCH}" >> $GITHUB_ENV
-            batch_num=$((batch_num + 1))
-            batch_packages="$i"
-          else
-            batch_packages+=" $i"
-          fi
-        done
-        
-        # 添加最后一个批次
-        if [ ! -z "$batch_packages" ]; then
-          echo "BATCH_${batch_num}=${batch_packages}" >> $GITHUB_ENV
-          echo "BATCH_${batch_num}_COUNT=$(echo "$batch_packages" | wc -w)" >> $GITHUB_ENV
-        fi
-        
-        echo "BATCH_COUNT=${batch_num}" >> $GITHUB_ENV
-
-  compile_base:
-    needs: prepare
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - name: Compile Base Firmware
+    - name: Download package
+      id: package
       run: |
         cd openwrt
         make defconfig
         make download -j8
-        make -j$(nproc) kernel_prepare
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
 
-  compile_packages:
-    needs: compile_base
-    strategy:
-      matrix:
-        batch: ${{ fromJSON(needs.prepare.outputs.BATCH_COUNT) }}
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - name: Compile Packages Batch ${{ matrix.batch }}
-      run: |
-        cd openwrt
-        BATCH_VAR="BATCH_${{ matrix.batch }}"
-        make package/compile -j$(nproc) PACKAGES="${!BATCH_VAR}" V=s
-
-  build_firmware:
-    needs: compile_packages
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - name: Compile Firmware
+    - name: Compile the firmware (Part ${{ matrix.part }})
       id: compile
       run: |
         cd openwrt
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo -e "$(nproc) thread compile"
+        # 计算每部分应该编译的线程数
+        total_threads=$(nproc)
+        threads_per_part=$((total_threads / 2))
+        start_thread=$(( (matrix.part - 1) * threads_per_part + 1 ))
+        end_thread=$((matrix.part * threads_per_part))
+        
+        # 使用指定的线程范围进行编译
+        make -j$threads_per_part || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
@@ -181,24 +174,38 @@ jobs:
       if: (!cancelled())
       run: df -hT
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@v2
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+    - name: Upload partial build result
+      uses: actions/upload-artifact@v3
       with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: build-part-${{ matrix.part }}
         path: openwrt/bin
+
+  merge:
+    needs: build
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts
+
+    - name: Merge build parts
+      run: |
+        mkdir -p firmware
+        cp -r artifacts/build-part-*/* firmware/
 
     - name: Organize files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        cd openwrt/bin/targets/*/*
+        cd firmware/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
@@ -242,17 +249,21 @@ jobs:
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 1
-        keep_minimum_runs: 3
+  cleanup:
+    needs: merge
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          retain_days: 1
+          keep_minimum_runs: 3
 
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Remove old Releases
+        uses: dev-drprasad/delete-older-releases@v0.1.0
+        if: env.UPLOAD_RELEASE == 'true'
+        with:
+          keep_latest: 3
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
