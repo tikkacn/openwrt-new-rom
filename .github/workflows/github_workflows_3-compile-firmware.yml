@@ -23,22 +23,35 @@ jobs:
     - name: Checkout
       uses: actions/checkout@main
 
-    - name: Restore OpenWrt Caches
+    # 恢复第二个工作流的缓存
+    - name: Restore OpenWrt Build Cache
       uses: actions/cache@v3
       with:
         path: |
           openwrt
           openwrt/dl
           openwrt/build_dir
-        key: openwrt-all-${{ github.sha }}
+          openwrt/staging_dir
+        key: openwrt-build-${{ github.sha }}
+        restore-keys: |
+          openwrt-build-
 
-    - name: Set up ccache
+    # 验证目录存在
+    - name: Verify OpenWrt directory
+      run: |
+        if [ ! -d "openwrt" ]; then
+          echo "Error: OpenWrt directory not found!"
+          exit 1
+        fi
+        ls -la openwrt
+
+    - name: Setup ccache
       uses: hendrikmuhs/ccache-action@v1.2
       with:
         key: openwrt-ccache-${{ github.sha }}
-        max-size: 2G
+        max-size: 4G
 
-    - name: Compile the firmware
+    - name: Compile firmware
       id: compile
       run: |
         cd openwrt
@@ -49,6 +62,15 @@ jobs:
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Check compilation result
+      run: |
+        cd openwrt
+        if [ ! -d "bin/targets" ]; then
+          echo "Error: Compilation failed! No targets directory found."
+          exit 1
+        fi
+        ls -la bin/targets
 
     - name: Organize files
       id: organize
@@ -65,6 +87,7 @@ jobs:
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
+        retention-days: 7
 
     - name: Generate release tag
       id: tag
@@ -89,3 +112,12 @@ jobs:
       with:
         retain_days: 1
         keep_minimum_runs: 3
+
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@v0.1.0
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
