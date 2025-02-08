@@ -139,6 +139,9 @@ jobs:
         part: [1, 2]  # 分成两部分并行编译
     
     steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
     - name: Restore Source Cache
       uses: actions/cache@v3
       with:
@@ -148,6 +151,7 @@ jobs:
     - name: Update feeds
       working-directory: /workdir/openwrt
       run: ./scripts/feeds update -a || { echo "Failed to update feeds"; exit 1; }
+
 
     - name: Install feeds
       working-directory: /workdir/openwrt
