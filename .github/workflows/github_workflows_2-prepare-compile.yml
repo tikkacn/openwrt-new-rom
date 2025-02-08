@@ -15,6 +15,7 @@ env:
 jobs:
   prepare-compile:
     runs-on: ubuntu-22.04
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
     - name: Checkout
@@ -46,15 +47,14 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    # 保存编译准备阶段的缓存
-    - name: Cache OpenWrt Build Files
-      uses: actions/cache@v3
+    # 上传编译准备文件为 artifacts，设置 24 小时有效期
+    - name: Upload Build Files
+      uses: actions/upload-artifact@v3
       with:
+        name: openwrt-build-files
         path: |
           openwrt
           openwrt/dl
           openwrt/build_dir
           openwrt/staging_dir
-        key: openwrt-build-${{ github.sha }}
-        restore-keys: |
-          openwrt-build-
+        retention-days: 1  # 设置为 1 天
