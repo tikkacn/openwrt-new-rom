@@ -87,7 +87,7 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /etc/mysql /etc/php
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
         sudo add-apt-repository ppa:ubuntu-toolchain-r/test
         sudo add-apt-repository ppa:ubuntu-toolchain-r/ppa
         sudo -E apt-get -qq update
