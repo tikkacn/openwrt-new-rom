@@ -1,4 +1,4 @@
-name: 分布式编译OpenWrt
+name: 分布式编译op
 
 on:
   repository_dispatch:
@@ -159,7 +159,8 @@ jobs:
     - name: Compile Packages Batch ${{ matrix.batch }}
       run: |
         cd openwrt
-        make package/compile -j$(nproc) PACKAGES="${{ env['BATCH_' + matrix.batch] }}" V=s
+        BATCH_VAR="BATCH_${{ matrix.batch }}"
+        make package/compile -j$(nproc) PACKAGES="${!BATCH_VAR}" V=s
 
   build_firmware:
     needs: compile_packages
