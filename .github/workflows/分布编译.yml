@@ -1,4 +1,4 @@
-name: Build X86_64 OpenWrt
+name: 分布编译OpenWrt
 
 on:
   repository_dispatch:
@@ -19,8 +19,39 @@ env:
   TZ: Asia/Shanghai
 
 jobs:
-  build:
+  check-prepared:
     runs-on: ubuntu-22.04
+    outputs:
+      should_prepare: ${{ steps.check.outputs.should_prepare }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Check if openwrt-prepared exists
+      id: check
+      run: |
+        if actions/download-artifact@v4 download openwrt-prepared --path ./ 2>/dev/null; then
+          if [ -d "openwrt-prepared" ]; then
+            LAST_MODIFIED=$(date -r openwrt-prepared +%s)
+            NOW=$(date +%s)
+            TIME_DIFF=$((NOW - LAST_MODIFIED))
+            if [ $TIME_DIFF -gt 259200 ]; then  # 3 days in seconds
+              echo "should_prepare=true" >> $GITHUB_OUTPUT
+            else
+              echo "should_prepare=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "should_prepare=true" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "should_prepare=true" >> $GITHUB_OUTPUT
+        fi
+
+  prepare:
+    runs-on: ubuntu-22.04
+    if: needs.check-prepared.outputs.should_prepare == 'true'
+    needs: check-prepared
 
     steps:
     - name: Before freeing up disk space
@@ -69,15 +100,12 @@ jobs:
         df -hT
         echo "=============================================================================="
 
-    - name: Checkout
-      uses: actions/checkout@main
-
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        sudo -E apt-get -qq install -y python3-distutils python3 libpython3-stdlib ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
         libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
@@ -95,6 +123,12 @@ jobs:
       working-directory: ./
       run: |
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+
+    - name: Set script permissions
+      run: |
+        cd openwrt
+        chmod +x scripts/*.sh
+        chmod +x scripts/config.guess
 
     - name: Load custom feeds
       run: |
@@ -125,3 +159,38 @@ jobs:
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
+
+    - name: Upload prepared source
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-prepared
+        path: openwrt
+
+  compile:
+    runs-on: ubuntu-22.04
+    needs: [check-prepared, prepare]
+
+    steps:
+    - name: Download prepared source
+      uses: actions/download-artifact@v4
+      with:
+        name: openwrt-prepared
+        path: openwrt
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Clean up if successful
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        rm -rf openwrt
+
+    # ... (以下省略 compile 作业中的其他步骤)
