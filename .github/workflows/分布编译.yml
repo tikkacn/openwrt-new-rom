@@ -97,10 +97,10 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
+        [ -e feeds.conf.default ] && mv feeds.conf.default openwrt/feeds.conf.default
+        chmod +x diy-part1.sh
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        $GITHUB_WORKSPACE/diy-part1.sh
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
@@ -111,10 +111,15 @@ jobs:
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
+        [ -e .config ] && mv .config openwrt/.config
+        chmod +x diy-part2.sh
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        $GITHUB_WORKSPACE/diy-part2.sh
+        # 确保.config文件存在
+        if [ ! -f .config ]; then
+          echo "Error: .config file not found"
+          exit 1
+        fi
 
     - name: Cache feeds and config
       uses: actions/cache@v2
@@ -141,10 +146,24 @@ jobs:
           openwrt/.config
         key: ${{ runner.os }}-feeds-${{ hashFiles('openwrt/.config') }}
 
+    - name: Debug Node Environment
+      run: |
+        cd openwrt
+        echo "Current directory: $(pwd)"
+        ls -la
+        echo "Config file content:"
+        cat .config
+        echo "Environment variables:"
+        env | grep -E 'REPO|FEEDS|CONFIG'
+
     - name: Download package
       run: |
         cd openwrt
-        make defconfig
+        make defconfig V=s
+        if [ $? -ne 0 ]; then
+          echo "make defconfig failed"
+          exit 1
+        fi
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
@@ -180,6 +199,3 @@ jobs:
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    # 这里可以添加你原来的上传、组织文件等步骤
-    # ...
