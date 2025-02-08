@@ -20,11 +20,14 @@ jobs:
     - name: Checkout
       uses: actions/checkout@main
 
+    # 恢复第一个工作流的缓存
     - name: Restore OpenWrt Source Cache
       uses: actions/cache@v3
       with:
         path: openwrt
         key: openwrt-source-${{ github.sha }}
+        restore-keys: |
+          openwrt-source-
 
     - name: Load custom configuration
       run: |
@@ -43,14 +46,15 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: Cache OpenWrt Downloads
+    # 保存编译准备阶段的缓存
+    - name: Cache OpenWrt Build Files
       uses: actions/cache@v3
       with:
-        path: openwrt/dl
-        key: openwrt-dl-${{ github.sha }}
-
-    - name: Cache OpenWrt BuildDir
-      uses: actions/cache@v3
-      with:
-        path: openwrt/build_dir
-        key: openwrt-build_dir-${{ github.sha }}
+        path: |
+          openwrt
+          openwrt/dl
+          openwrt/build_dir
+          openwrt/staging_dir
+        key: openwrt-build-${{ github.sha }}
+        restore-keys: |
+          openwrt-build-
