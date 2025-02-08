@@ -1,8 +1,13 @@
-name: 分布式编译V2
+name: "分布编译V2"
 
 on:
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions'
+        required: false
+        default: 'false'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
@@ -19,95 +24,64 @@ env:
   TZ: Asia/Shanghai
 
 jobs:
-  setup:
+  build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 360  # 设置6小时超时限制
 
     steps:
-    - name: Before freeing up disk space
-      run: |
-        echo "Before freeing up disk space"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
+    - name: Checkout
+      uses: actions/checkout@main
 
-    - name: "Optimize Disk Space"
-      uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
-      with:
-        operate_sudo: "True"
-        general_include: ".+"
-        general_exclude: |- 
-          ^GCC$
-          ^G\+\+$
-          Clang
-          LLVM
-        docker_include: ".+"
-        docker_prune: "True"
-        docker_clean: "True"
-        apt_prune: "True"
-        apt_clean: "True"
-        homebrew_prune: "True"
-        homebrew_clean: "True"
-        npm_prune: "True"
-        npm_clean: "True"
-        os_swap: "True"
-
-    - name: Freeing up disk space
+    - name: Disk Space Optimization
       uses: easimon/maximize-build-space@master
-      with: 
+      with:
         root-reserve-mb: 2048
-        swap-size-mb: 1
+        swap-size-mb: 1024
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
 
-    - name: Free up disk space complete
-      run: |
-        echo "Free up disk space complete"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
-
-    - name: Checkout
-      uses: actions/checkout@v3
+    - name: Setup ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: openwrt-ccache-${{ github.sha }}
+        max-size: 4G
 
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
-        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-        vim wget xmlto xxd zlib1g-dev python3-setuptools
+        sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2204)
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
-        /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
         sudo timedatectl set-timezone "$TZ"
-        sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
     - name: Clone source code
-      working-directory: ./
+      id: clone
       run: |
+        df -hT
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workspaces/openwrt $GITHUB_WORKSPACE/openwrt
+        echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Load custom feeds
+      id: feeds
       run: |
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
+        echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
+      if: steps.feeds.outputs.status == 'success'
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
     - name: Load custom configuration
       run: |
@@ -117,66 +91,23 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
-    - name: Cache feeds and config
-      uses: actions/cache@v4
-      with:
-        path: |
-          openwrt/feeds
-          openwrt/.config
-        key: ${{ runner.os }}-feeds-${{ hashFiles('openwrt/.config') }}
-        restore-keys: |
-          ${{ runner.os }}-feeds-
-
-  compile-base:
-    needs: setup
-    runs-on: ubuntu-22.04
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Restore cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          openwrt/feeds
-          openwrt/.config
-        key: ${{ runner.os }}-feeds-${{ hashFiles('openwrt/.config') }}
-
     - name: Download package
+      id: package
       run: |
         cd openwrt
         make defconfig
-        make download -j8
+        make download -j$(nproc)
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
+        echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Compile base packages
-      run: |
-        cd openwrt
-        make -j$(nproc) package/feeds/base/*
-
-  compile-all:
-    needs: compile-base
-    runs-on: ubuntu-22.04
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Restore cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          openwrt/feeds
-          openwrt/.config
-          openwrt/dl
-        key: ${{ runner.os }}-feeds-${{ hashFiles('openwrt/.config') }}
-
-    - name: Compile all packages and firmware
+    - name: Compile firmware
       id: compile
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        export CCACHE_DIR=/root/.ccache
+        make -j$(nproc) || make -j$(($(nproc)/2)) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
@@ -185,13 +116,6 @@ jobs:
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@v3
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
 
     - name: Organize files
       id: organize
@@ -203,29 +127,12 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
-
-    - name: Upload firmware to cowtransfer
-      id: cowtransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
-        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
-        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to WeTransfer
-      id: wetransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
-        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
-        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+        retention-days: 7
 
     - name: Generate release tag
       id: tag
@@ -233,8 +140,6 @@ jobs:
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
