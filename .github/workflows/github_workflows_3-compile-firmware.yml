@@ -24,12 +24,43 @@ jobs:
     - name: Checkout
       uses: actions/checkout@main
 
-    # 更新到 v4 版本
+    # 获取上一个工作流的运行ID
+    - name: Get Previous Workflow Run ID
+      id: get-run-id
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const workflows = await github.rest.actions.listWorkflowRuns({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            workflow_id: 'prepare-compile.yml',
+            status: 'success',
+            per_page: 1
+          });
+          if (workflows.data.workflow_runs.length > 0) {
+            core.setOutput('run_id', workflows.data.workflow_runs[0].id);
+          } else {
+            core.setFailed('No successful workflow run found');
+          }
+
+    # 下载构件
     - name: Download Build Files
       uses: actions/download-artifact@v4
       with:
-        name: openwrt-build-files
+        name: openwrt-build-files-${{ steps.get-run-id.outputs.run_id }}
         path: openwrt
+      
+    # 验证下载
+    - name: Verify Download
+      run: |
+        if [ ! -d "openwrt" ]; then
+          echo "Error: Build files download failed!"
+          exit 1
+        fi
+        echo "OpenWrt directory contents:"
+        ls -la openwrt/
+        echo "Directory size:"
+        du -sh openwrt/
 
     - name: Set Permissions
       run: |
@@ -37,25 +68,5 @@ jobs:
         chmod -R +x openwrt/target
         ls -la openwrt/scripts
         ls -la openwrt/target
-
-    - name: Compile firmware
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    # 更新到 v4 版本
-    - name: Upload firmware
-      uses: actions/upload-artifact@v4
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin/targets/
-        retention-days: 7
 
     # 其余步骤保持不变...
