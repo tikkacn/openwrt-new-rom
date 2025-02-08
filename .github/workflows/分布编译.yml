@@ -148,6 +148,12 @@ jobs:
         path: openwrt
         key: openwrt-source-${{ github.sha }}
 
+    - name: Prepare source code
+      run: |
+        sudo mkdir -p /workdir
+        sudo mv openwrt /workdir/
+        sudo chown -R $USER:$GROUPS /workdir/openwrt
+
     - name: Update feeds
       working-directory: /workdir/openwrt
       run: ./scripts/feeds update -a || { echo "Failed to update feeds"; exit 1; }
