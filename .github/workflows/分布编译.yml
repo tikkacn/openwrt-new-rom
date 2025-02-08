@@ -97,12 +97,20 @@ jobs:
       run: |
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        # 确认 openwrt 目录是否存在
+        if [ -d "openwrt" ]; then
+          echo "OpenWrt source code cloned successfully."
+        else
+          echo "Failed to clone OpenWrt source code."
+          exit 1
+        fi
 
     - name: Load custom feeds
+      working-directory: /workdir/openwrt
       run: |
-        # 检查并移动 feeds.conf.default 文件
+        # 检查 feeds.conf.default 文件
         if [ -e "$FEEDS_CONF" ]; then
-          mv "$FEEDS_CONF" openwrt/feeds.conf.default
+          mv "$FEEDS_CONF" feeds.conf.default
         else
           echo "feeds.conf.default not found, skipping..."
         fi
@@ -110,7 +118,6 @@ jobs:
         # 检查 diy-part1.sh 文件是否存在并执行
         if [ -f "$DIY_P1_SH" ]; then
           chmod +x "$DIY_P1_SH"
-          cd openwrt
           $GITHUB_WORKSPACE/$DIY_P1_SH
         else
           echo "diy-part1.sh not found, skipping..."
@@ -141,19 +148,22 @@ jobs:
         key: openwrt-source-${{ github.sha }}
 
     - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
+      working-directory: /workdir/openwrt
+      run: ./scripts/feeds update -a
 
     - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
+      working-directory: /workdir/openwrt
+      run: ./scripts/feeds install -a
 
     - name: Load custom configuration
+      working-directory: /workdir/openwrt
       run: |
         # 检查并移动 files 目录
-        [ -e files ] && mv files openwrt/files || echo "files directory not found"
+        [ -e files ] && mv files files || echo "files directory not found"
 
         # 检查并移动 .config 文件
         if [ -e "$CONFIG_FILE" ]; then
-          mv "$CONFIG_FILE" openwrt/.config
+          mv "$CONFIG_FILE" .config
         else
           echo ".config not found, exiting..."
           exit 1
@@ -162,31 +172,27 @@ jobs:
         # 检查 diy-part2.sh 文件是否存在并执行
         if [ -f "$DIY_P2_SH" ]; then
           chmod +x "$DIY_P2_SH"
-          cd openwrt
           $GITHUB_WORKSPACE/$DIY_P2_SH
         else
           echo "diy-part2.sh not found, skipping..."
         fi
 
     - name: Download package
+      working-directory: /workdir/openwrt
       id: package
       run: |
-        cd openwrt
         make defconfig
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
     - name: Compile the firmware (Part ${{ matrix.part }})
+      working-directory: /workdir/openwrt
       id: compile
       run: |
-        cd openwrt
         echo -e "$(nproc) thread compile"
-        # 计算每部分应该编译的线程数
         total_threads=$(nproc)
         threads_per_part=$((total_threads / 2))
-        
-        # 使用指定的线程范围进行编译
         make -j$threads_per_part || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
