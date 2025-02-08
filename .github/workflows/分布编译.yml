@@ -1,4 +1,4 @@
-name: 分布编译OpenWrt
+name: Build X86_64 OpenWrt
 
 on:
   repository_dispatch:
@@ -127,7 +127,7 @@ jobs:
         find dl -size -1024c -exec rm -f {} \;
 
     - name: Upload prepared source
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: openwrt-prepared
         path: openwrt
@@ -138,7 +138,7 @@ jobs:
 
     steps:
     - name: Download prepared source
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: openwrt-prepared
         path: openwrt
@@ -159,7 +159,7 @@ jobs:
       run: df -hT
 
     - name: Upload bin directory
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
@@ -175,7 +175,7 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
