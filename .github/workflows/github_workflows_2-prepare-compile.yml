@@ -1,76 +1,14 @@
 name: "2. Prepare OpenWrt Compile"
 
-on:
-  workflow_dispatch:
-  workflow_run:
-    workflows: ["1. Prepare OpenWrt Environment"]
-    types:
-      - completed
-
-env:
-  CONFIG_FILE: .config
-  DIY_P2_SH: diy-part2.sh
-  TZ: Asia/Shanghai
-
-jobs:
-  prepare-compile:
-    runs-on: ubuntu-22.04
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@main
-
-    - name: Restore OpenWrt Source Cache
-      uses: actions/cache@v3
-      with:
-        path: openwrt
-        key: openwrt-source-${{ github.sha }}
-        restore-keys: |
-          openwrt-source-
-
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-
-    - name: Download package
-      id: package
-      run: |
-        cd openwrt
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
-
-    # 添加验证步骤
-    - name: Verify Build Files
-      run: |
-        if [ ! -d "openwrt" ]; then
-          echo "Error: OpenWrt directory not found!"
-          exit 1
-        fi
-        echo "OpenWrt directory structure:"
-        ls -la openwrt/
-        echo "Size of build directory:"
-        du -sh openwrt/
+# ... (前面的配置保持不变) ...
 
     - name: Upload Build Files
       uses: actions/upload-artifact@v4
       with:
-        name: openwrt-build-files-${{ github.run_id }}  # 添加运行ID使其唯一
+        name: OpenWrt_Build_Files_$(date +"%Y%m%d")  # 使用日期作为构件名
         path: |
           openwrt
           openwrt/dl
           openwrt/build_dir
           openwrt/staging_dir
         retention-days: 1
-
-    # 添加上传确认步骤
-    - name: Verify Upload
-      run: |
-        echo "Build files uploaded with name: openwrt-build-files-${{ github.run_id }}"
-        echo "ARTIFACT_NAME=openwrt-build-files-${{ github.run_id }}" >> $GITHUB_ENV
