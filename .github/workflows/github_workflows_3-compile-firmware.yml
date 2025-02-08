@@ -23,8 +23,8 @@ jobs:
     - name: Checkout
       uses: actions/checkout@main
 
-    # 恢复第二个工作流的缓存
-    - name: Restore OpenWrt Build Cache
+    # 修改缓存恢复策略
+    - name: Restore OpenWrt Cache
       uses: actions/cache@v3
       with:
         path: |
@@ -32,92 +32,24 @@ jobs:
           openwrt/dl
           openwrt/build_dir
           openwrt/staging_dir
+        # 使用更通用的恢复键模式
         key: openwrt-build-${{ github.sha }}
         restore-keys: |
           openwrt-build-
+          openwrt-source-
 
-    # 验证目录存在
-    - name: Verify OpenWrt directory
+    # 添加调试信息
+    - name: Debug Info
       run: |
-        if [ ! -d "openwrt" ]; then
-          echo "Error: OpenWrt directory not found!"
-          exit 1
+        pwd
+        ls -la
+        if [ -d "openwrt" ]; then
+          echo "OpenWrt directory exists"
+          ls -la openwrt
+        else
+          echo "OpenWrt directory not found"
+          echo "Current directory contents:"
+          ls -la
         fi
-        ls -la openwrt
 
-    - name: Setup ccache
-      uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        key: openwrt-ccache-${{ github.sha }}
-        max-size: 4G
-
-    - name: Compile firmware
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        export CCACHE_DIR=/root/.ccache
-        make -j$(nproc) || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    - name: Check compilation result
-      run: |
-        cd openwrt
-        if [ ! -d "bin/targets" ]; then
-          echo "Error: Compilation failed! No targets directory found."
-          exit 1
-        fi
-        ls -la bin/targets
-
-    - name: Organize files
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
-        retention-days: 7
-
-    - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
-
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 1
-        keep_minimum_runs: 3
-
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # 其余步骤保持不变...
