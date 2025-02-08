@@ -70,9 +70,15 @@ jobs:
           path: openwrt/dl
           key: openwrt-deps-${{ needs.prepare.outputs.cache-key }}
 
+      - name: Clone OpenWrt Source Code Again (if not exists)
+        run: |
+          if [ ! -d "openwrt" ]; then
+            git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+          fi
+
       - name: Compile ${{ matrix.part }}
         run: |
-          cd openwrt
+          cd $GITHUB_WORKSPACE/openwrt
           case "${{ matrix.part }}" in
             toolchain)
               make toolchain/install -j$MAX_JOBS
