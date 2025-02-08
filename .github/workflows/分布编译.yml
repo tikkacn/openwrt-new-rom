@@ -159,7 +159,7 @@ jobs:
     - name: Compile Packages Batch ${{ matrix.batch }}
       run: |
         cd openwrt
-        make package/compile -j$(nproc) PACKAGES="${{ env.BATCH_${{ matrix.batch }} }}" V=s
+        make package/compile -j$(nproc) PACKAGES="${{ env['BATCH_' + matrix.batch] }}" V=s
 
   build_firmware:
     needs: compile_packages
