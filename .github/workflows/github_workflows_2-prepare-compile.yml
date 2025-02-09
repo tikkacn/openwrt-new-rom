@@ -78,31 +78,13 @@ jobs:
         make tools/install -j$(nproc)
         make toolchain/install -j$(nproc)
 
-    - name: Generate File List
-      run: |
-        cd openwrt
-        echo "File structure before upload:"
-        ls -R
-
     - name: Upload Build Files
       uses: actions/upload-artifact@v4
       with:
-        name: openwrt_buildfiles_${{ github.run_id }}
+        name: OpenWrt_Files
         path: openwrt
         retention-days: 1
         if-no-files-found: error
-
-    - name: Save Workflow Info
-      run: |
-        echo "${{ github.run_id }}" > workflow_info.txt
-        echo "Workflow ID: ${{ github.run_id }}"
-
-    - name: Upload Workflow Info
-      uses: actions/upload-artifact@v4
-      with:
-        name: workflow_info
-        path: workflow_info.txt
-        retention-days: 1
 
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@v2
