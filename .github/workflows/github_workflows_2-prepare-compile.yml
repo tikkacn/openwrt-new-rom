@@ -1,14 +1,108 @@
 name: "2. Prepare OpenWrt Compile"
 
-# ... (前面的配置保持不变) ...
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["1. Prepare OpenWrt Environment"]
+    types:
+      - completed
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  TZ: Asia/Shanghai
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+    - name: Set Build Date
+      run: |
+        echo "TODAY=$(date +%Y%m%d)" >> $GITHUB_ENV
+        echo "Building for date: $(date +%Y%m%d)"
+
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        swap-storage: true
+        docker-images: true
+
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Clone Source Code
+      run: |
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load Custom Feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update Feeds
+      run: cd openwrt && ./scripts/feeds update -a
+
+    - name: Install Feeds
+      run: cd openwrt && ./scripts/feeds install -a
+
+    - name: Load Custom Configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Download Package
+      id: package
+      run: |
+        cd openwrt
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Dependencies
+      id: compile_deps
+      run: |
+        cd openwrt
+        make tools/install -j$(nproc)
+        make toolchain/install -j$(nproc)
+
+    - name: Generate File List
+      run: |
+        cd openwrt
+        echo "File structure before upload:"
+        ls -R
 
     - name: Upload Build Files
       uses: actions/upload-artifact@v4
       with:
-        name: OpenWrt_Build_Files_$(date +"%Y%m%d")  # 使用日期作为构件名
+        name: OpenWrt_Build_Files_${{ env.TODAY }}
         path: |
           openwrt
           openwrt/dl
           openwrt/build_dir
           openwrt/staging_dir
         retention-days: 1
+        if-no-files-found: error
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
