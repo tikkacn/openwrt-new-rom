@@ -87,14 +87,22 @@ jobs:
     - name: Upload Build Files
       uses: actions/upload-artifact@v4
       with:
-        name: OpenWrt_Build_Files
-        path: |
-          openwrt
-          openwrt/dl
-          openwrt/build_dir
-          openwrt/staging_dir
+        name: openwrt_buildfiles_${{ github.run_id }}
+        path: openwrt
         retention-days: 1
         if-no-files-found: error
+
+    - name: Save Workflow Info
+      run: |
+        echo "${{ github.run_id }}" > workflow_info.txt
+        echo "Workflow ID: ${{ github.run_id }}"
+
+    - name: Upload Workflow Info
+      uses: actions/upload-artifact@v4
+      with:
+        name: workflow_info
+        path: workflow_info.txt
+        retention-days: 1
 
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@v2
