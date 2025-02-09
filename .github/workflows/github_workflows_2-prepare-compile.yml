@@ -3,7 +3,7 @@ name: "2. Prepare OpenWrt Compile"
 on:
   workflow_dispatch:
   workflow_run:
-    workflows: ["1. Prepare OpenWrt Environment"]
+    workflows: ["1. Init OpenWrt Build Environment"]
     types:
       - completed
 
@@ -22,11 +22,6 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
-    - name: Set Build Date
-      run: |
-        echo "TODAY=$(date +%Y%m%d)" >> $GITHUB_ENV
-        echo "Building for date: $(date +%Y%m%d)"
-
     - name: Free Disk Space
       uses: jlumbroso/free-disk-space@main
       with:
@@ -92,7 +87,7 @@ jobs:
     - name: Upload Build Files
       uses: actions/upload-artifact@v4
       with:
-        name: OpenWrt_Build_Files_${{ env.TODAY }}
+        name: OpenWrt_Build_Files
         path: |
           openwrt
           openwrt/dl
