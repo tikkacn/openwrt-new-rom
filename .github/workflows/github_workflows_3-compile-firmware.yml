@@ -32,36 +32,14 @@ jobs:
     - name: Checkout
       uses: actions/checkout@main
 
-    - name: Download Workflow Info
-      uses: dawidd6/action-download-artifact@v3
-      with:
-        name: workflow_info
-        workflow: 2-prepare-compile.yml
-        workflow_conclusion: success
-        if_no_artifact_found: fail
-
-    - name: Set Build Info
-      id: build-info
-      run: |
-        WORKFLOW_ID=$(cat workflow_info.txt)
-        echo "WORKFLOW_ID=${WORKFLOW_ID}" >> $GITHUB_ENV
-        echo "Using workflow ID: ${WORKFLOW_ID}"
-
     - name: Download Build Files
-      uses: dawidd6/action-download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
-        name: openwrt_buildfiles_${{ env.WORKFLOW_ID }}
-        workflow: 2-prepare-compile.yml
-        workflow_conclusion: success
-        if_no_artifact_found: fail
+        name: OpenWrt_Files
         path: openwrt
-
-    - name: Display Structure
-      run: |
-        echo "Current working directory:"
-        pwd
-        echo "OpenWrt directory contents:"
-        ls -la openwrt/
+        repository: ${{ github.repository }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        run-id: ${{ github.event.workflow_run.id }}
 
     - name: Set Permissions
       run: |
@@ -73,7 +51,7 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Organize files
@@ -89,7 +67,7 @@ jobs:
       uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_Firmware_${{ github.run_id }}
+        name: OpenWrt_Firmware
         path: ${{ env.FIRMWARE }}
         retention-days: 7
 
