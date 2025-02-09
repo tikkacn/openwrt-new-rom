@@ -29,6 +29,12 @@ jobs:
         swap-storage: true
         docker-images: true
 
+    - name: Install Python Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3-distutils python3-setuptools python3-dev
+        python3 -m pip install --upgrade pip
+
     - name: Checkout
       uses: actions/checkout@main
 
@@ -45,6 +51,12 @@ jobs:
       run: |
         chmod -R +x openwrt/scripts
         chmod -R +x openwrt/target
+
+    - name: Verify Python Installation
+      run: |
+        python3 --version
+        python3 -c "import distutils" || echo "distutils not found"
+        python3 -m pip list
 
     - name: Compile firmware
       id: compile
