@@ -15,7 +15,7 @@ env:
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   TZ: Asia/Shanghai
-  PYTHON_PATH: /usr/lib/python3/dist-packages:/usr/local/lib/python3/dist-packages
+  CACHE_KEY: openwrt-cache-${{ github.sha }}
 
 jobs:
   prepare:
@@ -34,21 +34,15 @@ jobs:
         swap-storage: true
         docker-images: true
 
-    - name: Setup Python Environment
+    - name: Setup Build Environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y python3 python3-distutils python3-setuptools python3-dev python3-pip
-        sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1
+        sudo apt-get install -y python3-distutils python3-lib2to3 python3-setuptools python3-dev
         sudo ln -sf /usr/bin/python3 /usr/bin/python
-        echo "PYTHON=/usr/bin/python3" >> $GITHUB_ENV
-        echo "PYTHON_VERSION=$(python3 --version | cut -d' ' -f2)" >> $GITHUB_ENV
-
-    - name: Verify Python Setup
-      run: |
+        # 验证 Python 环境
+        python3 -c "import distutils" || { echo "Error: distutils import failed"; exit 1; }
+        python3 -c "import setuptools" || { echo "Error: setuptools import failed"; exit 1; }
         python3 --version
-        python3 -c "import distutils" || echo "distutils not found"
-        python3 -m pip list
-        echo "Python path: $PYTHON_PATH"
 
     - name: Checkout
       uses: actions/checkout@main
@@ -57,6 +51,8 @@ jobs:
       run: |
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        cd openwrt
+        echo "SOURCE_CODE_VERSION=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
     - name: Load Custom Feeds
       run: |
@@ -66,10 +62,10 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_P1_SH
 
     - name: Update Feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install Feeds
-      run: cd openwrt && ./scripts/feeds install -a
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
     - name: Load Custom Configuration
       run: |
@@ -83,36 +79,51 @@ jobs:
       id: package
       run: |
         cd openwrt
-        echo "FORCE=1" >> $GITHUB_ENV
-        FORCE=1 make defconfig
-        FORCE=1 make download -j8
-        find dl -size -1024c -exec ls -l {} \;
+        make defconfig
+        make download -j8
         find dl -size -1024c -exec rm -f {} \;
+        
+        # 验证下载的包
+        [ -d dl ] || { echo "Error: Download directory missing"; exit 1; }
+        [ "$(ls -A dl)" ] || { echo "Error: No packages downloaded"; exit 1; }
 
-    - name: Compile Dependencies
-      id: compile_deps
+    - name: Verify Build Environment
       run: |
         cd openwrt
-        FORCE=1 make tools/install -j$(nproc)
-        FORCE=1 make toolchain/install -j$(nproc)
+        make defconfig
+        # 检查关键文件和目录
+        for dir in "scripts" "target" "tools" "toolchain" "staging_dir"; do
+          [ -d "$dir" ] || { echo "Error: $dir directory missing"; exit 1; }
+        done
+        [ -f ".config" ] || { echo "Error: .config file missing"; exit 1; }
 
-    - name: Save Environment
-      run: |
-        cd openwrt
-        echo "PYTHON=$PYTHON" > .env
-        echo "PYTHON_VERSION=$PYTHON_VERSION" >> .env
-        echo "PYTHON_PATH=$PYTHON_PATH" >> .env
-        echo "FORCE=1" >> .env
-
-    - name: Upload Build Files
-      uses: actions/upload-artifact@v4
+    - name: Cache OpenWrt Build Environment
+      id: cache-env
+      uses: actions/cache/save@v4
       with:
-        name: OpenWrt_Files
         path: |
           openwrt
-          .env
+          !openwrt/build_dir/*/host/*
+          !openwrt/build_dir/*/hostpkg/*
+        key: ${{ env.CACHE_KEY }}-${{ env.SOURCE_CODE_VERSION }}
+        enableCrossOsArchive: true
+
+    - name: Generate Build Info
+      run: |
+        echo "${{ env.CACHE_KEY }}-${{ env.SOURCE_CODE_VERSION }}" > cache_key.txt
+        echo "$(date)" > build_time.txt
+        echo "Python version: $(python3 --version)" >> build_info.txt
+        echo "System information: $(uname -a)" >> build_info.txt
+
+    - name: Upload Build Info
+      uses: actions/upload-artifact@v4
+      with:
+        name: BuildInfo
+        path: |
+          cache_key.txt
+          build_time.txt
+          build_info.txt
         retention-days: 1
-        if-no-files-found: error
 
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@v2
