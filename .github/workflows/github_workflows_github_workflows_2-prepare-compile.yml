@@ -1,0 +1,81 @@
+name: "2. Prepare OpenWrt Compile"
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["1. Init OpenWrt Build Environment"]
+    types:
+      - completed
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  TZ: Asia/Shanghai
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Clone source code
+      working-directory: ./
+      run: |
+        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt | tee -a prepare-compile.log
+
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default | tee -a prepare-compile.log
+        chmod +x $DIY_P1_SH | tee -a prepare-compile.log
+        cd openwrt | tee -a prepare-compile.log
+        $GITHUB_WORKSPACE/$DIY_P1_SH | tee -a prepare-compile.log
+
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a | tee -a prepare-compile.log
+
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a | tee -a prepare-compile.log
+
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files | tee -a prepare-compile.log
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config | tee -a prepare-compile.log
+        chmod +x $DIY_P2_SH | tee -a prepare-compile.log
+        cd openwrt | tee -a prepare-compile.log
+        $GITHUB_WORKSPACE/$DIY_P2_SH | tee -a prepare-compile.log
+
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt | tee -a prepare-compile.log
+        make defconfig | tee -a prepare-compile.log
+        make download -j8 | tee -a prepare-compile.log
+        find dl -size -1024c -exec ls -l {} \; | tee -a prepare-compile.log
+        find dl -size -1024c -exec rm -f {} \; | tee -a prepare-compile.log
+
+    - name: Cache OpenWrt Build Environment
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenWrt_BuildFiles
+        path: openwrt/
+        retention-days: 1
+        if-no-files-found: error
+
+    - name: Upload Prepare Compile Logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: prepare-compile-logs
+        path: prepare-compile.log
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
