@@ -84,14 +84,14 @@ jobs:
 
     - name: Clone source code
       run: |
-        git clone --depth=1 https://github.com/tikkacn/openwrt.git -b main openwrt
+        git clone --depth=1 https://github.com/coolsnowwolf/lede -b master openwrt
 
     - name: Load custom feeds
       run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
+        [ -e feeds.conf.default ] && mv feeds.conf.default openwrt/feeds.conf.default
+        chmod +x diy-part1.sh
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        $GITHUB_WORKSPACE/diy-part1.sh
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
@@ -102,15 +102,13 @@ jobs:
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
+        [ -e .config ] && mv .config openwrt/.config
+        chmod +x diy-part2.sh
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        $GITHUB_WORKSPACE/diy-part2.sh
 
-    - name: Trigger package download workflow
-      run: |
-        curl -X POST \
-          -H "Accept: application/vnd.github.v3+json" \
-          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          https://api.github.com/repos/tikkacn/openwrt-new-rom/dispatches \
-          -d '{"event_type":"package_download"}'
+    - name: Save workspace
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-workspace
+        path: openwrt
