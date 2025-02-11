@@ -1,12 +1,7 @@
-name: 分布编译V2
+name: Build OpenWrt
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-  schedule:
-    - cron: '0 1 * * 5'  # 每周五凌晨1点运行
+  workflow_dispatch:    # 仅保留手动触发
 
 jobs:
   prepare:
