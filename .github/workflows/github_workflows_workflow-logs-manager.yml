@@ -1,0 +1,140 @@
+name: "Workflow Logs Manager"
+
+on:
+  workflow_run:
+    workflows: 
+      - "1. Init OpenWrt Build Environment"
+      - "2. Prepare OpenWrt Compile"
+      - "3. Compile OpenWrt Firmware"
+    types:
+      - completed
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  process-logs:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+
+    - name: Download workflow logs
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
+        RUN_ID="${{ github.event.workflow_run.id }}"
+        STATUS="${{ github.event.workflow_run.conclusion }}"
+        TIMESTAMP=$(date -u +"%Y-%m-%d_%H-%M-%S")
+        
+        mkdir -p .github/workflow_logs/"${WORKFLOW_NAME}"
+        
+        # 创建日志摘要文件
+        LOG_FILE=".github/workflow_logs/${WORKFLOW_NAME}/${TIMESTAMP}_${STATUS}.log"
+        
+        {
+          echo "=== Workflow Execution Summary ==="
+          echo "Workflow: ${WORKFLOW_NAME}"
+          echo "Run ID: ${RUN_ID}"
+          echo "Status: ${STATUS}"
+          echo "Timestamp: ${TIMESTAMP}"
+          echo "Runner: ${{ github.event.workflow_run.runner_name }}"
+          echo "Trigger: ${{ github.event.workflow_run.event }}"
+          echo "Duration: ${{ github.event.workflow_run.updated_at }}"
+          echo ""
+        } > "${LOG_FILE}"
+
+    - name: Download build artifacts
+      if: github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure'
+      uses: actions/download-artifact@v4
+      with:
+        run-id: ${{ github.event.workflow_run.id }}
+        name: OpenWrt_Build_Logs_${{ github.event.workflow_run.run_number }}
+        path: temp_logs
+
+    - name: Process build logs
+      if: github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure'
+      run: |
+        if [ -d "temp_logs" ]; then
+          WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
+          TIMESTAMP=$(date -u +"%Y-%m-%d_%H-%M-%S")
+          LOG_FILE=".github/workflow_logs/${WORKFLOW_NAME}/${TIMESTAMP}_${STATUS}.log"
+          
+          {
+            echo "=== Build Logs ==="
+            if [ -f "temp_logs/build.log" ]; then
+              echo "--- Build Output ---"
+              cat "temp_logs/build.log"
+            fi
+            
+            if [ -f "temp_logs/environment.log" ]; then
+              echo "--- Environment Information ---"
+              cat "temp_logs/environment.log"
+            fi
+            
+            if [ -f "temp_logs/system_state.log" ]; then
+              echo "--- System State ---"
+              cat "temp_logs/system_state.log"
+            fi
+          } >> "${LOG_FILE}"
+          
+          # 清理临时文件
+          rm -rf temp_logs
+        fi
+
+    - name: Create issue for failures
+      if: github.event.workflow_run.conclusion == 'failure'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const workflow = context.payload.workflow_run;
+          
+          // 读取日志文件
+          const logPath = `.github/workflow_logs/${workflow.name}/${new Date().toISOString().replace(/:/g, '-')}_failure.log`;
+          let logContent = '';
+          if (fs.existsSync(logPath)) {
+            logContent = fs.readFileSync(logPath, 'utf8');
+          }
+          
+          // 创建 issue
+          await github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `Workflow Failure: ${workflow.name} #${workflow.run_number}`,
+            body: `
+            ## Workflow Failure Report
+            
+            - **Workflow:** ${workflow.name}
+            - **Run ID:** ${workflow.id}
+            - **Triggered by:** ${workflow.event}
+            - **Started at:** ${workflow.created_at}
+            - **Failed at:** ${workflow.updated_at}
+            
+            ### Log Summary
+            \`\`\`
+            ${logContent.slice(0, 3000)}  # 限制日志长度
+            \`\`\`
+            
+            [View full workflow run](${workflow.html_url})
+            `
+          });
+
+    - name: Clean old logs
+      run: |
+        # 保留最近30天的日志
+        find .github/workflow_logs -type f -mtime +30 -delete
+
+    - name: Commit logs
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        git add .github/workflow_logs/
+        git commit -m "Update workflow logs [skip ci]" || echo "No changes to commit"
+        git push
