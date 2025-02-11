@@ -3,6 +3,9 @@ name: Setup and Preparation
 on:
   workflow_dispatch:
 
+env:
+  TZ: Asia/Shanghai  # 设置默认时区
+
 jobs:
   setup:
     runs-on: ubuntu-22.04
