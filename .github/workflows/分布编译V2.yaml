@@ -1,4 +1,4 @@
-name: Build OpenWrt
+name: 分步编译V2
 
 on:
   workflow_dispatch:    # 仅保留手动触发
