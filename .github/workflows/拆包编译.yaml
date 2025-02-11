@@ -1,0 +1,207 @@
+name: Build OpenWrt
+
+on:
+  workflow_dispatch:    # 仅保留手动触发
+
+jobs:
+  prepare:
+    runs-on: ubuntu-20.04
+    outputs:
+      date: ${{ steps.date.outputs.date }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Get Date
+        id: date
+        run: echo "date=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+
+      - name: Initialize Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo -E swapoff -a
+          sudo -E rm -f /swapfile
+          sudo -E docker image prune -a -f
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2004)
+          sudo -E apt-get -qq install build-essential clang flex g++ gawk gcc-multilib gettext \
+            git libncurses5-dev libssl-dev python3-distutils python3-pyelftools python3-setuptools \
+            libpython3-dev rsync unzip zlib1g-dev file wget
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "Asia/Shanghai"
+
+      - name: Clone Source Code
+        run: |
+          git clone https://github.com/coolsnowwolf/lede openwrt
+          
+      - name: Load Custom Files
+        run: |
+          [ -e files ] && mv files openwrt/files
+          [ -e .config ] && mv .config openwrt/.config
+          [ -e feeds.conf.default ] && mv feeds.conf.default openwrt/feeds.conf.default
+
+      - name: Update Feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds clean
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate Config
+        run: |
+          cd openwrt
+          make defconfig
+
+      - name: Cache Build Files
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            openwrt
+          key: openwrt-${{ steps.date.outputs.date }}
+
+  base:
+    needs: prepare
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Restore Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            openwrt
+          key: openwrt-${{ needs.prepare.outputs.date }}
+          fail-on-cache-miss: true
+
+      - name: Compile Tools
+        run: |
+          cd openwrt
+          make tools/install -j$(nproc) || make tools/install -j1 V=s
+
+      - name: Compile Toolchain
+        run: |
+          cd openwrt
+          make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
+
+      - name: Compile Basic Packages
+        run: |
+          cd openwrt
+          make package/libs/compile -j$(nproc) || make package/libs/compile -j1 V=s
+          make package/base-files/compile -j$(nproc)
+          make package/system/opkg/compile -j$(nproc)
+          make package/system/ubus/compile -j$(nproc)
+          make package/network/config/netifd/compile -j$(nproc)
+
+      - name: Cache Base
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            openwrt
+          key: openwrt-base-${{ needs.prepare.outputs.date }}
+
+  packages-1:
+    needs: base
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Restore Base Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            openwrt
+          key: openwrt-base-${{ needs.prepare.outputs.date }}
+          fail-on-cache-miss: true
+
+      - name: Compile Network Packages
+        run: |
+          cd openwrt
+          make package/feeds/helloworld/compile -j$(nproc) || make package/feeds/helloworld/compile -j1 V=s
+          make package/feeds/passwall/compile -j$(nproc) || make package/feeds/passwall/compile -j1 V=s
+          make package/feeds/passwall_packages/compile -j$(nproc) || make package/feeds/passwall_packages/compile -j1 V=s
+          make package/feeds/openclash/compile -j$(nproc) || make package/feeds/openclash/compile -j1 V=s
+
+      - name: Cache Packages 1
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            openwrt
+          key: openwrt-packages-1-${{ needs.prepare.outputs.date }}
+
+  packages-2:
+    needs: base
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Restore Base Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            openwrt
+          key: openwrt-base-${{ needs.prepare.outputs.date }}
+          fail-on-cache-miss: true
+
+      - name: Compile Luci
+        run: |
+          cd openwrt
+          make package/feeds/luci/compile -j$(nproc) || make package/feeds/luci/compile -j1 V=s
+          make package/feeds/routing/compile -j$(nproc) || make package/feeds/routing/compile -j1 V=s
+          make package/feeds/telephony/compile -j$(nproc) || make package/feeds/telephony/compile -j1 V=s
+
+      - name: Cache Packages 2
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            openwrt
+          key: openwrt-packages-2-${{ needs.prepare.outputs.date }}
+
+  firmware:
+    needs: [packages-1, packages-2]
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Restore Package Caches
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            openwrt
+          key: openwrt-packages-2-${{ needs.prepare.outputs.date }}
+          restore-keys: |
+            openwrt-packages-1-${{ needs.prepare.outputs.date }}
+            openwrt-base-${{ needs.prepare.outputs.date }}
+          fail-on-cache-miss: true
+
+      - name: 拆包编译
+        id: compile
+        run: |
+          cd openwrt
+          make package/index
+          echo -e "$(nproc) thread compile"
+          make -j$(nproc) || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+          grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+          [ -s DEVICE_NAME ] && echo "DEVICE_NAME=$(cat DEVICE_NAME)" >> $GITHUB_OUTPUT
+          echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_OUTPUT
+
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_firmware_${{ steps.compile.outputs.DEVICE_NAME }}_${{ steps.compile.outputs.FILE_DATE }}
+          path: openwrt/bin/targets/
+          compression-level: 9
+
+      - name: Generate release tag
+        id: tag
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          echo "release_tag=OpenWrt_${{ steps.compile.outputs.DEVICE_NAME }}_$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+          touch release.txt
+          echo "This is OpenWrt firmware for ${{ steps.compile.outputs.DEVICE_NAME }}" >> release.txt
+          echo "Compiled on $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
+
+      - name: Upload firmware to release
+        uses: softprops/action-gh-release@v1
+        if: steps.compile.outputs.status == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          body_path: release.txt
+          files: openwrt/bin/targets/*/*/*
