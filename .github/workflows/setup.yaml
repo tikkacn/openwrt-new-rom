@@ -46,7 +46,7 @@ jobs:
       uses: easimon/maximize-build-space@master
       with: 
         root-reserve-mb: 2048
-        swap-size-mb: 1
+        swap-size-mb: 1024
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
@@ -61,7 +61,7 @@ jobs:
         echo "=============================================================================="
 
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v2
 
     - name: Initialization environment
       env:
@@ -83,9 +83,8 @@ jobs:
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
     - name: Clone source code
-      working-directory: ./
       run: |
-        git clone --depth=1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
+        git clone --depth=1 https://github.com/tikkacn/openwrt.git -b main openwrt
 
     - name: Load custom feeds
       run: |
