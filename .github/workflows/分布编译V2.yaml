@@ -1,4 +1,4 @@
-name: 分布编译V2
+name: Build OpenWrt
 
 on:
   workflow_dispatch:    # 仅保留手动触发
@@ -11,7 +11,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-
+        
       - name: Get Date
         id: date
         run: echo "date=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
@@ -32,201 +32,66 @@ jobs:
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
           sudo timedatectl set-timezone "Asia/Shanghai"
-          sudo mkdir -p /workdir
-          sudo chown $USER:$GROUPS /workdir
 
       - name: Clone Source Code
-        working-directory: /workdir
         run: |
-          df -hT $PWD
           git clone https://github.com/coolsnowwolf/lede openwrt
-          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-
-      - name: Cache Source Code
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-base-${{ steps.date.outputs.date }}
-
-  feeds:
-    needs: prepare
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Restore Source Code
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-base-${{ needs.prepare.outputs.date }}
-
-      - name: Load Custom Feeds
+          
+      - name: Load Custom Files
         run: |
-          [ -e feeds.conf.default ] && mv feeds.conf.default /workdir/openwrt/feeds.conf.default
-          cd /workdir/openwrt
+          [ -e files ] && mv files openwrt/files
+          [ -e .config ] && mv .config openwrt/.config
+          [ -e feeds.conf.default ] && mv feeds.conf.default openwrt/feeds.conf.default
+
+      - name: Update Feeds
+        run: |
+          cd openwrt
           ./scripts/feeds clean
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Cache Feeds
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-feeds-${{ needs.prepare.outputs.date }}
-
-  config:
-    needs: feeds
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Restore Feeds
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-feeds-${{ needs.prepare.outputs.date }}
-
-      - name: Load Custom Configuration
+      - name: Generate Config
         run: |
-          [ -e files ] && mv files /workdir/openwrt/files
-          [ -e .config ] && mv .config /workdir/openwrt/.config
-          cd /workdir/openwrt
+          cd openwrt
           make defconfig
 
-      - name: Cache Config
-        uses: actions/cache@v3
+      - name: Cache Build Files
+        uses: actions/cache/save@v3
         with:
-          path: /workdir/openwrt
-          key: openwrt-config-${{ needs.prepare.outputs.date }}
+          path: |
+            openwrt
+          key: openwrt-${{ steps.date.outputs.date }}
 
-  toolchain:
-    needs: config
+  compile:
+    needs: prepare
     runs-on: ubuntu-20.04
     steps:
-      - name: Restore Config
-        uses: actions/cache@v3
+      - name: Restore Cache
+        uses: actions/cache/restore@v3
         with:
-          path: /workdir/openwrt
-          key: openwrt-config-${{ needs.prepare.outputs.date }}
+          path: |
+            openwrt
+          key: openwrt-${{ needs.prepare.outputs.date }}
+          fail-on-cache-miss: true
 
-      - name: Compile Tools & Toolchain
-        id: compile
+      - name: Compile Tools
+        id: tools
         run: |
-          cd /workdir/openwrt
+          cd openwrt
           echo -e "$(nproc) thread compile"
-          make tools/install -j$(nproc)
-          make toolchain/install -j$(nproc)
+          make tools/install -j$(nproc) || make tools/install -j1 V=s
 
-      - name: Cache Toolchain
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-toolchain-${{ needs.prepare.outputs.date }}
+      - name: Compile Toolchain
+        id: toolchain
+        run: |
+          cd openwrt
+          echo -e "$(nproc) thread compile"
+          make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
 
-  kernel:
-    needs: toolchain
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Restore Toolchain
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-toolchain-${{ needs.prepare.outputs.date }}
-
-      - name: Compile Kernel
+      - name: Compile Packages
         id: compile
         run: |
-          cd /workdir/openwrt
-          make target/compile -j$(nproc) || make target/compile -j1 V=s
-
-      - name: Cache Kernel
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-kernel-${{ needs.prepare.outputs.date }}
-
-  packages-1:
-    needs: kernel
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Restore Kernel Build
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-kernel-${{ needs.prepare.outputs.date }}
-
-      - name: Compile Base Packages
-        id: compile_base
-        run: |
-          cd /workdir/openwrt
-          make package/libs/compile -j$(nproc) || make package/libs/compile -j1 V=s
-          make package/base-files/compile -j$(nproc)
-          make package/network/config/netifd/compile -j$(nproc)
-
-      - name: Cache Base Packages
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-packages-1-${{ needs.prepare.outputs.date }}
-
-  packages-2:
-    needs: kernel
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Restore Kernel Build
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-kernel-${{ needs.prepare.outputs.date }}
-
-      - name: Compile Luci
-        id: compile_luci
-        run: |
-          cd /workdir/openwrt
-          make package/feeds/luci/compile -j$(nproc) || make package/feeds/luci/compile -j1 V=s
-
-      - name: Cache Luci
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-packages-2-${{ needs.prepare.outputs.date }}
-
-  packages-3:
-    needs: kernel
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Restore Kernel Build
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-kernel-${{ needs.prepare.outputs.date }}
-
-      - name: Compile Network Packages
-        id: compile_network
-        run: |
-          cd /workdir/openwrt
-          make package/feeds/helloworld/compile -j$(nproc) || make package/feeds/helloworld/compile -j1 V=s
-          make package/feeds/passwall/compile -j$(nproc) || make package/feeds/passwall/compile -j1 V=s
-          make package/feeds/passwall_packages/compile -j$(nproc) || make package/feeds/passwall_packages/compile -j1 V=s
-          make package/feeds/openclash/compile -j$(nproc) || make package/feeds/openclash/compile -j1 V=s
-
-      - name: Cache Network Packages
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-packages-3-${{ needs.prepare.outputs.date }}
-
-  final:
-    needs: [packages-1, packages-2, packages-3]
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Restore All Packages
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt
-          key: openwrt-packages-3-${{ needs.prepare.outputs.date }}
-
-      - name: Generate Firmware
-        id: compile
-        run: |
-          cd /workdir/openwrt
-          make package/index
+          cd openwrt
           echo -e "$(nproc) thread compile"
           make -j$(nproc) || make -j1 V=s
           echo "status=success" >> $GITHUB_OUTPUT
@@ -238,7 +103,7 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: OpenWrt_firmware_${{ steps.compile.outputs.DEVICE_NAME }}_${{ steps.compile.outputs.FILE_DATE }}
-          path: /workdir/openwrt/bin/targets/
+          path: openwrt/bin/targets/
 
       - name: Generate release tag
         id: tag
@@ -257,4 +122,4 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           body_path: release.txt
-          files: /workdir/openwrt/bin/targets/*/*/*
+          files: openwrt/bin/targets/*/*/*
