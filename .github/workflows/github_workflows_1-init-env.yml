@@ -11,6 +11,12 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+    - name: Clear previous logs
+      run: |
+        echo "Clearing previous logs" | tee init-env.log
+        rm -f init-env.log
+        echo "Previous logs cleared" | tee -a init-env.log
+
     - name: Before freeing up disk space
       run: |
         echo "Before freeing up disk space" | tee -a init-env.log
