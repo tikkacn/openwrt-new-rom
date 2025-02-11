@@ -1,130 +1,96 @@
-name: 分布编译（Deepseek）
-
+name: OpenWRT固件编译（x86_64专用版）
+ 
 on:
   repository_dispatch:
   workflow_dispatch:
-
+ 
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: .config
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
-  UPLOAD_COWTRANSFER: false
-  UPLOAD_WETRANSFER: false
-  UPLOAD_RELEASE: false
-  TZ: Asia/Shanghai
-
+  REPO_URL: https://github.com/coolsnowwolf/lede  
+  REPO_BRANCH: master 
+  FEEDS_CONF: feeds.conf.default  
+  CONFIG_FILE: .config 
+  DIY_P1_SH: diy-part1.sh  
+  DIY_P2_SH: diy-part2.sh  
+  TZ: Asia/Shanghai 
+ 
 jobs:
   prepare:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04 
     steps:
-      - name: Checkout
-        uses: actions/checkout@main
-
-      - name: Initialization environment
+      - name: 检出代码库 
+        uses: actions/checkout@v4 
+ 
+      - name: 安装编译依赖 
         env:
-          DEBIAN_FRONTEND: noninteractive
+          DEBIAN_FRONTEND: noninteractive 
         run: |
-          sudo -E apt-get -qq update
-          sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
-          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools
-          sudo -E apt-get -qq autoremove --purge
-          sudo -E apt-get -qq clean
-          sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
-          /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
-          sudo timedatectl set-timezone "$TZ"
-          sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
-
-      - name: Clone source code
+          sudo apt-get update -y 
+          sudo apt-get full-upgrade -y 
+          sudo apt-get install -y build-essential ccache ecj fastjar file flex \
+          g++ gawk gettext git java-propose-classpath libelf-dev libncurses5-dev \
+          libncursesw5-dev libssl-dev python3 python2.7 python3-distutils qemu-utils \
+          rsync subversion unzip zlib1g-dev wget time 
+ 
+      - name: 克隆OpenWRT源码 
         run: |
-          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-
-      - name: Load custom feeds
+          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt 
+          [ -f $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default  
+ 
+      - name: 执行自定义配置 
         run: |
-          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-          chmod +x $DIY_P1_SH
-          cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P1_SH
-
-      - name: Update feeds
-        run: cd openwrt && ./scripts/feeds update -a
-
-      - name: Install feeds
-        run: cd openwrt && ./scripts/feeds install -a
-
-      - name: Load custom configuration
-        run: |
-          [ -e files ] && mv files openwrt/files
-          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-          chmod +x $DIY_P2_SH
-          cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P2_SH
-
-      - name: Upload source code
-        uses: actions/upload-artifact@v3
+          chmod +x $DIY_P1_SH $DIY_P2_SH 
+          cd openwrt 
+          ../$DIY_P1_SH 
+          ./scripts/feeds update -a 
+          ./scripts/feeds install -a 
+          [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config 
+          ../$DIY_P2_SH 
+ 
+      - name: 上传源码快照 
+        uses: actions/upload-artifact@v4 
         with:
-          name: openwrt-source
-          path: openwrt
-
+          name: openwrt-src 
+          path: openwrt 
+ 
   build:
-    needs: prepare
-    runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        target: ["target1", "target2", "target3"]  # 定义需要编译的目标
+    needs: prepare 
+    runs-on: ubuntu-22.04 
     steps:
-      - name: Download source code
-        uses: actions/download-artifact@v3
+      - name: 获取源码 
+        uses: actions/download-artifact@v4 
         with:
-          name: openwrt-source
-          path: openwrt
-
-      - name: Compile the firmware
+          name: openwrt-src 
+          path: openwrt 
+ 
+      - name: 编译固件 
         run: |
-          cd openwrt
-          make defconfig
-          make -j$(nproc) ${{ matrix.target }}
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v3
+          cd openwrt 
+          make defconfig 
+          make -j$(($(nproc) + 1)) download 
+          make -j$(nproc) V=s 
+ 
+      - name: 归档编译产物 
+        uses: actions/upload-artifact@v4 
         with:
-          name: openwrt-build-${{ matrix.target }}
-          path: openwrt/bin
-
-  package:
-    needs: build
-    runs-on: ubuntu-22.04
+          name: openwrt-bin 
+          path: openwrt/bin/targets/x86/64/*.img.gz  
+ 
+  deploy:
+    needs: build 
+    runs-on: ubuntu-22.04 
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v3
+      - name: 下载固件 
+        uses: actions/download-artifact@v4 
         with:
-          path: openwrt-build
-
-      - name: Organize files
-        run: |
-          cd openwrt-build/bin/targets/*/*
-          rm -rf packages
-          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-
-      - name: Upload firmware directory
-        uses: actions/upload-artifact@v3
+          name: openwrt-bin 
+          path: firmware 
+ 
+      - name: 创建版本发布 
+        uses: softprops/action-gh-release@v1 
         with:
-          name: OpenWrt_firmware
-          path: ${{ env.FIRMWARE }}
-
-      - name: Upload firmware to release
-        uses: softprops/action-gh-release@v1
+          tag_name: build-$(date +%Y%m%d%H%M)
+          files: |
+            firmware/*.img.gz  
+            firmware/sha256sums 
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: $(date +"%Y.%m.%d-%H%M")
-          files: ${{ env.FIRMWARE }}/*
