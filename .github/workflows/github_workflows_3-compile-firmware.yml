@@ -1,0 +1,138 @@
+name: "3. Compile OpenWrt Firmware"
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["2. Prepare OpenWrt Compile"]
+    types:
+      - completed
+
+env:
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_COWTRANSFER: false
+  UPLOAD_WETRANSFER: false
+  UPLOAD_RELEASE: false
+  TZ: Asia/Shanghai
+
+jobs:
+  compile:
+    runs-on: ubuntu-22.04
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Download Build Files
+      uses: actions/download-artifact@v4
+      with:
+        name: OpenWrt_BuildFiles
+        path: openwrt/
+        repository: ${{ github.repository }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        run-id: ${{ github.event.workflow_run.id }}
+
+    - name: Set Permissions
+      run: |
+        ls -la openwrt/ | tee -a compile-firmware.log
+        chmod -R +x openwrt/scripts | tee -a compile-firmware.log
+        chmod -R +x openwrt/target | tee -a compile-firmware.log
+        find openwrt/scripts -type f -exec test -x {} \; || echo "Warning: Some scripts may not be executable" | tee -a compile-firmware.log
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt | tee -a compile-firmware.log
+        echo -e "$(nproc) thread compile" | tee -a compile-firmware.log
+        make -j$(nproc) || make -j1 || make -j1 V=s | tee -a compile-firmware.log
+        echo "status=success" >> $GITHUB_OUTPUT | tee -a compile-firmware.log
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME | tee -a compile-firmware.log
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV | tee -a compile-firmware.log
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV | tee -a compile-firmware.log
+
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT | tee -a compile-firmware.log
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin
+
+    - name: Organize files
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/* | tee -a compile-firmware.log
+        rm -rf packages | tee -a compile-firmware.log
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV | tee -a compile-firmware.log
+        echo "status=success" >> $GITHUB_OUTPUT | tee -a compile-firmware.log
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Upload firmware to cowtransfer
+      id: cowtransfer
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
+      run: |
+        curl -fsSL git.io/file-transfer | sh | tee -a compile-firmware.log
+        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log | tee -a compile-firmware.log
+        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)" | tee -a compile-firmware.log
+        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT | tee -a compile-firmware.log
+
+    - name: Upload firmware to WeTransfer
+      id: wetransfer
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
+      run: |
+        curl -fsSL git.io/file-transfer | sh | tee -a compile-firmware.log
+        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log | tee -a compile-firmware.log
+        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)" | tee -a compile-firmware.log
+        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT | tee -a compile-firmware.log
+
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT | tee -a compile-firmware.log
+        touch release.txt | tee -a compile-firmware.log
+        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt | tee -a compile-firmware.log
+        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt | tee -a compile-firmware.log
+        echo "status=success" >> $GITHUB_OUTPUT | tee -a compile-firmware.log
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v1
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: Upload Compile Firmware Logs
+      uses: actions/upload-artifact@v2
+      with:
+        name: compile-firmware-logs
+        path: compile-firmware.log
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
+
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@v0.1.0
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
