@@ -87,11 +87,14 @@ jobs:
       - name: Compile Basic Packages
         run: |
           cd openwrt
-          make package/libs/compile -j$(nproc) || make package/libs/compile -j1 V=s
-          make package/base-files/compile -j$(nproc)
-          make package/system/opkg/compile -j$(nproc)
-          make package/system/ubus/compile -j$(nproc)
-          make package/network/config/netifd/compile -j$(nproc)
+          make defconfig
+          make package/libs/toolchain/compile -j$(nproc) || make package/libs/toolchain/compile -j1 V=s
+          make package/libs/mbedtls/compile -j$(nproc) || make package/libs/mbedtls/compile -j1 V=s
+          make package/libs/openssl/compile -j$(nproc) || make package/libs/openssl/compile -j1 V=s
+          make package/base-files/compile -j$(nproc) || make package/base-files/compile -j1 V=s
+          make package/system/opkg/compile -j$(nproc) || make package/system/opkg/compile -j1 V=s
+          make package/system/ubus/compile -j$(nproc) || make package/system/ubus/compile -j1 V=s
+          make package/network/config/netifd/compile -j$(nproc) || make package/network/config/netifd/compile -j1 V=s
 
       - name: Cache Base
         uses: actions/cache/save@v4
@@ -204,4 +207,4 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           body_path: release.txt
-          files: openwrt/bin/targets/*/*/*
+          files: openwrt/bin/targets/*/*/* 
