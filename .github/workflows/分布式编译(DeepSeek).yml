@@ -1,114 +1,112 @@
-name: OpenWRT固件编译（Python依赖完全修复版）
+name: OpenWRT固件编译（多阶段优化版）
  
 on:
   workflow_dispatch:
  
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede  
-  REPO_BRANCH: master 
   PYTHON_VER: "3.10"
  
 jobs:
-  env-setup:
+  setup:
     runs-on: ubuntu-22.04 
+    outputs:
+      cache-key: ${{ steps.python-cache.outputs.cache-key  }}
     steps:
-      - name: 设置Python环境 
+      - name: 配置Python环境 
         run: |
           sudo apt-get update 
-          # 安装完整Python套件 
           sudo apt-get install -y \
           python${{ env.PYTHON_VER }} \
           python${{ env.PYTHON_VER }}-dev \
           python${{ env.PYTHON_VER }}-distutils \
-          python${{ env.PYTHON_VER }}-venv \
-          python3-setuptools 
+          python${{ env.PYTHON_VER }}-venv 
  
-          # 修复系统链接 
           sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${{ env.PYTHON_VER }} 100 
-          sudo ln -sf /usr/lib/python${{ env.PYTHON_VER }}/dist-packages /usr/lib/python3/dist-packages 
-          
-          # 验证环境 
-          python3 -c "import distutils, sys; print(f'Python {sys.version}\nDistutils 路径: {distutils.__file__}')"
+          sudo ln -sfv /usr/lib/python${{ env.PYTHON_VER }}/dist-packages /usr/lib/python3/dist-packages 
+ 
+      - name: 生成缓存密钥 
+        id: python-cache 
+        run: echo "cache-key=$(date +%s)" >> $GITHUB_OUTPUT 
  
   prepare:
-    needs: env-setup 
+    needs: setup 
     runs-on: ubuntu-22.04 
     steps:
-      - name: 检出仓库 
-        uses: actions/checkout@v4 
- 
-      - name: 安装编译依赖 
+      - name: 安装基础依赖 
         run: |
           sudo apt-get install -y \
-          build-essential ccache flex gawk gettext git libncurses-dev libssl-dev \
-          zlib1g-dev gcc g++ make unzip rsync wget curl 
+          build-essential ccache flex gawk gettext git libncurses-dev \
+          libssl-dev zlib1g-dev gcc g++ make unzip rsync wget curl 
  
-      - name: 克隆源码 
+      - name: 获取源码 
+        uses: actions/checkout@v4 
+        with:
+          path: src 
+ 
+      - name: 初始化仓库 
         run: |
-          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt 
-          [ -f feeds.conf.default  ] && cp feeds.conf.default  openwrt/feeds.conf.default  
+          cd src 
+          git clone --depth 1 ${{ env.REPO_URL }} openwrt 
+          cp feeds.conf.default  openwrt/feeds.conf.default  || true 
  
-      - name: 应用配置 
-        run: |
-          chmod +x diy-part*.sh 
-          cd openwrt 
-          ../diy-part1.sh  
-          ./scripts/feeds update -a 
-          ./scripts/feeds install -a 
-          [ -f ../.config ] && cp ../.config .
-          ../diy-part2.sh  
- 
-      - name: 上传预处理代码 
+      - name: 缓存源码 
         uses: actions/upload-artifact@v4 
         with:
           name: openwrt-src 
-          path: openwrt 
+          path: src/openwrt 
+          retention-days: 1 
  
   build:
     needs: prepare 
     runs-on: ubuntu-22.04 
+    timeout-minutes: 120 
+    strategy:
+      matrix:
+        target: [full, minimal]
     steps:
+      - name: 恢复Python环境 
+        run: |
+          sudo apt-get install -y python${{ env.PYTHON_VER }}-distutils 
+          sudo ln -sfv /usr/lib/python${{ env.PYTHON_VER }}/dist-packages /usr/lib/python3/dist-packages 
+ 
       - name: 下载源码 
         uses: actions/download-artifact@v4 
         with:
           name: openwrt-src 
           path: openwrt 
  
-      - name: 编译环境验证 
+      - name: 配置编译选项 
         run: |
-          export PYTHONPATH=/usr/lib/python${{ env.PYTHON_VER }}/dist-packages 
           cd openwrt 
-          make defconfig PYTHON=python3 
+          [ "${{ matrix.target  }}" = "full" ] && CONFIG="full.config"  || CONFIG="minimal.config" 
+          cp ../$CONFIG .config 
  
       - name: 执行编译 
-        timeout-minutes: 120 
+        env:
+          FORCE_UNSAFE_CONFIGURE: 1 
         run: |
           cd openwrt 
+          make defconfig FORCE=1 
           make -j$(($(nproc) + 1)) download 
-          make -j$(nproc) V=s PYTHON=python3 
+          make -j$(nproc) V=s 
  
-      - name: 打包产物 
-        run: |
-          cd openwrt/bin/targets/x86/64/
-          sha256sum *img* > sha256sums 
-          ls -lh 
- 
-      - name: 上传固件 
+      - name: 上传产物 
         uses: actions/upload-artifact@v4 
         with:
-          name: openwrt-x86_64-$(date +%s)
+          name: bin-${{ matrix.target  }}
           path: openwrt/bin/targets/x86/64/* 
  
   release:
     needs: build 
     runs-on: ubuntu-22.04 
     steps:
-      - name: 创建发布版本 
+      - name: 创建发布 
         uses: softprops/action-gh-release@v1 
         with:
-          tag_name: x86_64-$(date +%Y%m%d-%H%M)
+          tag_name: build-$(date +%Y%m%d-%H%M)
           files: |
-            openwrt-x86_64-*/openwrt-x86-64-generic-squashfs-combined-efi.img.gz  
-            openwrt-x86_64-*/sha256sums 
+            bin-*/openwrt-x86-64-*.img.gz  
+            bin-*/sha256sums 
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
