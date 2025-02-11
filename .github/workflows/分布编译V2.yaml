@@ -1,4 +1,4 @@
-name: 分步编译V2
+name: Build OpenWrt
 
 on:
   workflow_dispatch:    # 仅保留手动触发
@@ -10,7 +10,7 @@ jobs:
       date: ${{ steps.date.outputs.date }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         
       - name: Get Date
         id: date
@@ -56,7 +56,7 @@ jobs:
           make defconfig
 
       - name: Cache Build Files
-        uses: actions/cache/save@v3
+        uses: actions/cache/save@v4
         with:
           path: |
             openwrt
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - name: Restore Cache
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             openwrt
@@ -100,10 +100,11 @@ jobs:
           echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_OUTPUT
 
       - name: Upload Firmware
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4  # 更新到 v4 版本
         with:
           name: OpenWrt_firmware_${{ steps.compile.outputs.DEVICE_NAME }}_${{ steps.compile.outputs.FILE_DATE }}
           path: openwrt/bin/targets/
+          compression-level: 9  # v4 新特性：支持设置压缩级别
 
       - name: Generate release tag
         id: tag
