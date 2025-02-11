@@ -1,263 +1,265 @@
-name: 分布式编译V2
+name: 分布式编译V2-OpenWrt
 
 on:
-  repository_dispatch:
   workflow_dispatch:
-
-env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: .config
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
-  UPLOAD_COWTRANSFER: false
-  UPLOAD_WETRANSFER: false
-  UPLOAD_RELEASE: false
-  TZ: Asia/Shanghai
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 1 * * 5'  # 每周五凌晨1点运行
 
 jobs:
-  setup:
-    runs-on: ubuntu-22.04
-
+  prepare:
+    runs-on: ubuntu-20.04
+    outputs:
+      date: ${{ steps.date.outputs.date }}
     steps:
-    - name: Before freeing up disk space
-      run: |
-        echo "Before freeing up disk space"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
+      - name: Checkout
+        uses: actions/checkout@v3
 
-    - name: "Optimize Disk Space"
-      uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
-      with:
-        operate_sudo: "True"
-        general_include: ".+"
-        general_exclude: |- 
-          ^GCC$
-          ^G\+\+$
-          Clang
-          LLVM
-        docker_include: ".+"
-        docker_prune: "True"
-        docker_clean: "True"
-        apt_prune: "True"
-        apt_clean: "True"
-        homebrew_prune: "True"
-        homebrew_clean: "True"
-        npm_prune: "True"
-        npm_clean: "True"
-        os_swap: "True"
+      - name: Get Date
+        id: date
+        run: echo "date=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
 
-    - name: Freeing up disk space
-      uses: easimon/maximize-build-space@master
-      with: 
-        root-reserve-mb: 2048
-        swap-size-mb: 1
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
+      - name: Initialize Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo -E swapoff -a
+          sudo -E rm -f /swapfile
+          sudo -E docker image prune -a -f
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2004)
+          sudo -E apt-get -qq install build-essential clang flex g++ gawk gcc-multilib gettext \
+            git libncurses5-dev libssl-dev python3-distutils python3-pyelftools python3-setuptools \
+            libpython3-dev rsync unzip zlib1g-dev file wget
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          sudo mkdir -p /workdir
+          sudo chown $USER:$GROUPS /workdir
 
-    - name: Free up disk space complete
-      run: |
-        echo "Free up disk space complete"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
+      - name: Clone Source Code
+        working-directory: /workdir
+        run: |
+          df -hT $PWD
+          git clone https://github.com/coolsnowwolf/lede openwrt
+          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    - name: Checkout
-      uses: actions/checkout@v3
+      - name: Cache Source Code
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-base-${{ steps.date.outputs.date }}
 
-    - name: Initialization environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
-        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-        vim wget xmlto xxd zlib1g-dev python3-setuptools
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
-        /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
-        sudo timedatectl set-timezone "$TZ"
-        sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
-
-    - name: Clone source code
-      working-directory: ./
-      run: |
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
-
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-
-    - name: Cache feeds and config
-      uses: actions/cache@v4
-      with:
-        path: |
-          openwrt/feeds
-          openwrt/.config
-        key: ${{ runner.os }}-feeds-${{ hashFiles('openwrt/.config') }}
-        restore-keys: |
-          ${{ runner.os }}-feeds-
-
-  compile-base:
-    needs: setup
-    runs-on: ubuntu-22.04
-
+  feeds:
+    needs: prepare
+    runs-on: ubuntu-20.04
     steps:
-    - uses: actions/checkout@v3
+      - name: Restore Source Code
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-base-${{ needs.prepare.outputs.date }}
 
-    - name: Restore cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          openwrt/feeds
-          openwrt/.config
-        key: ${{ runner.os }}-feeds-${{ hashFiles('openwrt/.config') }}
+      - name: Load Custom Feeds
+        run: |
+          [ -e feeds.conf.default ] && mv feeds.conf.default /workdir/openwrt/feeds.conf.default
+          cd /workdir/openwrt
+          ./scripts/feeds clean
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-    - name: Download package
-      run: |
-        cd openwrt
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+      - name: Cache Feeds
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-feeds-${{ needs.prepare.outputs.date }}
 
-    - name: Compile base packages
-      run: |
-        cd openwrt
-        make -j$(nproc) package/feeds/base/*
-
-  compile-all:
-    needs: compile-base
-    runs-on: ubuntu-22.04
-
+  config:
+    needs: feeds
+    runs-on: ubuntu-20.04
     steps:
-    - uses: actions/checkout@v3
+      - name: Restore Feeds
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-feeds-${{ needs.prepare.outputs.date }}
 
-    - name: Restore cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          openwrt/feeds
-          openwrt/.config
-          openwrt/dl
-        key: ${{ runner.os }}-feeds-${{ hashFiles('openwrt/.config') }}
+      - name: Load Custom Configuration
+        run: |
+          [ -e files ] && mv files /workdir/openwrt/files
+          [ -e .config ] && mv .config /workdir/openwrt/.config
+          cd /workdir/openwrt
+          make defconfig
 
-    - name: Compile all packages and firmware
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+      - name: Cache Config
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-config-${{ needs.prepare.outputs.date }}
 
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
+  toolchain:
+    needs: config
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Restore Config
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-config-${{ needs.prepare.outputs.date }}
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@v3
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
+      - name: Compile Tools & Toolchain
+        id: compile
+        run: |
+          cd /workdir/openwrt
+          echo -e "$(nproc) thread compile"
+          make tools/install -j$(nproc)
+          make toolchain/install -j$(nproc)
 
-    - name: Organize files
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+      - name: Cache Toolchain
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-toolchain-${{ needs.prepare.outputs.date }}
 
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@v3
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
+  kernel:
+    needs: toolchain
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Restore Toolchain
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-toolchain-${{ needs.prepare.outputs.date }}
 
-    - name: Upload firmware to cowtransfer
-      id: cowtransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
-        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
-        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+      - name: Compile Kernel
+        id: compile
+        run: |
+          cd /workdir/openwrt
+          make target/compile -j$(nproc) || make target/compile -j1 V=s
 
-    - name: Upload firmware to WeTransfer
-      id: wetransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
-        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
-        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+      - name: Cache Kernel
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-kernel-${{ needs.prepare.outputs.date }}
 
-    - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
+  packages-1:
+    needs: kernel
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Restore Kernel Build
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-kernel-${{ needs.prepare.outputs.date }}
 
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+      - name: Compile Base Packages
+        id: compile_base
+        run: |
+          cd /workdir/openwrt
+          make package/libs/compile -j$(nproc) || make package/libs/compile -j1 V=s
+          make package/base-files/compile -j$(nproc)
+          make package/network/config/netifd/compile -j$(nproc)
 
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 1
-        keep_minimum_runs: 3
+      - name: Cache Base Packages
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-packages-1-${{ needs.prepare.outputs.date }}
 
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  packages-2:
+    needs: kernel
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Restore Kernel Build
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-kernel-${{ needs.prepare.outputs.date }}
+
+      - name: Compile Luci
+        id: compile_luci
+        run: |
+          cd /workdir/openwrt
+          make package/feeds/luci/compile -j$(nproc) || make package/feeds/luci/compile -j1 V=s
+
+      - name: Cache Luci
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-packages-2-${{ needs.prepare.outputs.date }}
+
+  packages-3:
+    needs: kernel
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Restore Kernel Build
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-kernel-${{ needs.prepare.outputs.date }}
+
+      - name: Compile Network Packages
+        id: compile_network
+        run: |
+          cd /workdir/openwrt
+          make package/feeds/helloworld/compile -j$(nproc) || make package/feeds/helloworld/compile -j1 V=s
+          make package/feeds/passwall/compile -j$(nproc) || make package/feeds/passwall/compile -j1 V=s
+          make package/feeds/passwall_packages/compile -j$(nproc) || make package/feeds/passwall_packages/compile -j1 V=s
+          make package/feeds/openclash/compile -j$(nproc) || make package/feeds/openclash/compile -j1 V=s
+
+      - name: Cache Network Packages
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-packages-3-${{ needs.prepare.outputs.date }}
+
+  final:
+    needs: [packages-1, packages-2, packages-3]
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Restore All Packages
+        uses: actions/cache@v3
+        with:
+          path: /workdir/openwrt
+          key: openwrt-packages-3-${{ needs.prepare.outputs.date }}
+
+      - name: Generate Firmware
+        id: compile
+        run: |
+          cd /workdir/openwrt
+          make package/index
+          echo -e "$(nproc) thread compile"
+          make -j$(nproc) || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+          grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+          [ -s DEVICE_NAME ] && echo "DEVICE_NAME=$(cat DEVICE_NAME)" >> $GITHUB_OUTPUT
+          echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_OUTPUT
+
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v3
+        with:
+          name: OpenWrt_firmware_${{ steps.compile.outputs.DEVICE_NAME }}_${{ steps.compile.outputs.FILE_DATE }}
+          path: /workdir/openwrt/bin/targets/
+
+      - name: Generate release tag
+        id: tag
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          echo "release_tag=OpenWrt_${{ steps.compile.outputs.DEVICE_NAME }}_$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+          touch release.txt
+          echo "This is OpenWrt firmware for ${{ steps.compile.outputs.DEVICE_NAME }}" >> release.txt
+          echo "Compiled on $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
+
+      - name: Upload firmware to release
+        uses: softprops/action-gh-release@v1
+        if: steps.compile.outputs.status == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          body_path: release.txt
+          files: /workdir/openwrt/bin/targets/*/*/*
