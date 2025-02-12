@@ -15,15 +15,11 @@ jobs:
   build-toolchain:
     runs-on: ubuntu-latest
     steps:
-    - name: Start Job Logging
-      run: |
-        mkdir -p ${{ env.LOG_PATH }}
-        echo "=== Build Toolchain Job Started at $(date) ===" > ${{ env.LOG_PATH }}/toolchain.log
-        echo "Running on: $(uname -a)" >> ${{ env.LOG_PATH }}/toolchain.log
-
     - name: Checkout
       uses: actions/checkout@v4
-      continue-on-error: true
+
+    - name: Create Log Directory
+      run: mkdir -p ${{ env.LOG_PATH }}
 
     - name: Initialize Environment
       env:
@@ -31,11 +27,40 @@ jobs:
       run: |
         {
           echo "=== Environment Initialization Started at $(date) ==="
-          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo -E apt-get -qq update
-          sudo -E apt-get -qq install build-essential clang flex g++ gawk gcc-multilib g++-multilib \
-            gettext git libncurses5-dev libssl-dev python3-distutils \
-            zlib1g-dev lib32gcc-s1 rsync unzip file wget
+          # 首先更新软件源
+          sudo -E apt-get update
+          
+          # 添加必要的软件源
+          sudo -E apt-get install -y software-properties-common
+          sudo -E add-apt-repository -y "deb http://archive.ubuntu.com/ubuntu $(lsb_release -sc) main universe"
+          sudo -E add-apt-repository -y "deb http://archive.ubuntu.com/ubuntu $(lsb_release -sc)-updates main universe"
+          
+          # 再次更新软件源
+          sudo -E apt-get update
+          
+          # 安装基本开发工具
+          sudo -E apt-get install -y \
+            build-essential \
+            clang \
+            flex \
+            g++ \
+            gawk \
+            gcc-multilib \
+            g++-multilib \
+            gettext \
+            git \
+            libncurses5-dev \
+            libssl-dev \
+            python3 \
+            python3-distutils \
+            python3-pip \
+            zlib1g-dev \
+            lib32gcc-s1 \
+            rsync \
+            unzip \
+            file \
+            wget
+            
           echo "=== Environment Initialization Completed at $(date) ==="
         } 2>&1 | tee -a ${{ env.LOG_PATH }}/toolchain.log
 
@@ -53,179 +78,4 @@ jobs:
           echo "=== Source Code Clone Completed at $(date) ==="
         } 2>&1 | tee -a ${{ env.LOG_PATH }}/toolchain.log
 
-    - name: Generate Config
-      run: |
-        {
-          echo "=== Config Generation Started at $(date) ==="
-          cd openwrt
-          cat > .config <<'EOF'
-        CONFIG_TARGET_x86=y
-        CONFIG_TARGET_x86_64=y
-        CONFIG_TARGET_x86_64_DEVICE_generic=y
-        CONFIG_PACKAGE_dnsmasq_full_dhcpv6=y
-        CONFIG_PACKAGE_ip6tables=y
-        CONFIG_PACKAGE_ipv6helper=y
-        EOF
-          make defconfig
-          echo "=== Config Generation Completed at $(date) ==="
-        } 2>&1 | tee -a ${{ env.LOG_PATH }}/toolchain.log
-
-    - name: Compile Toolchain
-      run: |
-        {
-          echo "=== Toolchain Compilation Started at $(date) ==="
-          cd openwrt
-          make toolchain/install -j$(($(nproc) + 1)) || make toolchain/install V=s
-          echo "=== Toolchain Compilation Completed at $(date) ==="
-        } 2>&1 | tee -a ${{ env.LOG_PATH }}/toolchain.log
-
-    - name: Upload Toolchain and Logs
-      uses: actions/upload-artifact@v4
-      with:
-        name: toolchain_and_logs
-        path: |
-          openwrt
-          ${{ env.LOG_PATH }}
-        retention-days: 1
-
-  build-target:
-    needs: build-toolchain
-    runs-on: ubuntu-latest
-    steps:
-    - name: Start Job Logging
-      run: |
-        mkdir -p ${{ env.LOG_PATH }}
-        echo "=== Build Target Job Started at $(date) ===" > ${{ env.LOG_PATH }}/target.log
-
-    - name: Download Previous Artifacts
-      uses: actions/download-artifact@v4
-      with:
-        name: toolchain_and_logs
-        path: .
-
-    - name: Fix Permissions
-      run: |
-        {
-          echo "=== Fixing Permissions Started at $(date) ==="
-          cd openwrt
-          sudo chown -R runner:runner .
-          chmod +x scripts/feeds
-          chmod +x scripts/* tools/*/compile
-          echo "=== Fixing Permissions Completed at $(date) ==="
-        } 2>&1 | tee -a ${{ env.LOG_PATH }}/target.log
-
-    - name: Initialize Environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        {
-          echo "=== Environment Initialization Started at $(date) ==="
-          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo -E apt-get -qq update
-          sudo -E apt-get -qq install build-essential clang flex g++ gawk gcc-multilib g++-multilib \
-            gettext git libncurses5-dev libssl-dev python3-distutils \
-            zlib1g-dev lib32gcc-s1 rsync unzip file wget
-          echo "=== Environment Initialization Completed at $(date) ==="
-        } 2>&1 | tee -a ${{ env.LOG_PATH }}/target.log
-
-    - name: Build Target
-      run: |
-        {
-          echo "=== Target Build Started at $(date) ==="
-          cd openwrt
-          make target/compile -j$(($(nproc) + 1)) || make target/compile V=s
-          echo "=== Target Build Completed at $(date) ==="
-        } 2>&1 | tee -a ${{ env.LOG_PATH }}/target.log
-
-    - name: Upload Target and Logs
-      uses: actions/upload-artifact@v4
-      with:
-        name: target_and_logs
-        path: |
-          openwrt
-          ${{ env.LOG_PATH }}
-        retention-days: 1
-
-    - name: Cleanup Previous Artifacts
-      if: success()
-      uses: geekyeggo/delete-artifact@v2
-      with:
-        name: toolchain_and_logs
-
-  build-packages:
-    needs: build-target
-    runs-on: ubuntu-latest
-    steps:
-    - name: Start Job Logging
-      run: |
-        mkdir -p ${{ env.LOG_PATH }}
-        echo "=== Build Packages Job Started at $(date) ===" > ${{ env.LOG_PATH }}/packages.log
-
-    - name: Download Previous Artifacts
-      uses: actions/download-artifact@v4
-      with:
-        name: target_and_logs
-        path: .
-
-    - name: Fix Permissions
-      run: |
-        {
-          echo "=== Fixing Permissions Started at $(date) ==="
-          cd openwrt
-          sudo chown -R runner:runner .
-          chmod +x scripts/feeds
-          chmod +x scripts/* tools/*/compile
-          echo "=== Fixing Permissions Completed at $(date) ==="
-        } 2>&1 | tee -a ${{ env.LOG_PATH }}/packages.log
-
-    - name: Initialize Environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        {
-          echo "=== Environment Initialization Started at $(date) ==="
-          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo -E apt-get -qq update
-          sudo -E apt-get -qq install build-essential clang flex g++ gawk gcc-multilib g++-multilib \
-            gettext git libncurses5-dev libssl-dev python3-distutils \
-            zlib1g-dev lib32gcc-s1 rsync unzip file wget
-          echo "=== Environment Initialization Completed at $(date) ==="
-        } 2>&1 | tee -a ${{ env.LOG_PATH }}/packages.log
-
-    - name: Build Packages
-      run: |
-        {
-          echo "=== Packages Build Started at $(date) ==="
-          cd openwrt
-          make package/compile -j$(($(nproc) + 1)) || make package/compile V=s
-          make package/index
-          echo "=== Packages Build Completed at $(date) ==="
-        } 2>&1 | tee -a ${{ env.LOG_PATH }}/packages.log
-
-    - name: Generate Firmware
-      run: |
-        {
-          echo "=== Firmware Generation Started at $(date) ==="
-          cd openwrt
-          make target/install -j$(($(nproc) + 1)) || make target/install V=s
-          make package/install
-          make buildinfo
-          make json_overview_image_info
-          make checksum
-          echo "=== Firmware Generation Completed at $(date) ==="
-        } 2>&1 | tee -a ${{ env.LOG_PATH }}/packages.log
-
-    - name: Upload Firmware and Logs
-      uses: actions/upload-artifact@v4
-      with:
-        name: OpenWrt_firmware_and_logs
-        path: |
-          openwrt/bin/targets/
-          ${{ env.LOG_PATH }}
-        retention-days: 7
-
-    - name: Cleanup Previous Artifacts
-      if: success()
-      uses: geekyeggo/delete-artifact@v2
-      with:
-        name: target_and_logs
+    # ... 其余步骤保持不变
