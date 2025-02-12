@@ -23,14 +23,13 @@ jobs:
       run: |
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install \
-          build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-          gettext git libncurses5-dev libssl-dev python3-distutils \
-          libncurses5-dev zlib1g-dev libelf-dev lib32gcc-s1 \
-          rsync unzip file wget python3 python3-pip python3-ply \
-          qemu-utils upx libstring-crc32-perl antlr3 gperf \
-          libantlr3c-dev ccache help2man python3-dev \
-          xsltproc
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pip qemu-utils \
+          rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev \
+          python3-ply python3-distutils xsltproc clang
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
@@ -43,4 +42,118 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    # ... 其余步骤保持不变 ...
+    - name: Generate Config
+      run: |
+        cd openwrt
+        cat > .config <<'EOF'
+        CONFIG_TARGET_x86=y
+        CONFIG_TARGET_x86_64=y
+        CONFIG_TARGET_x86_64_DEVICE_generic=y
+        CONFIG_PACKAGE_dnsmasq_full_dhcpv6=y
+        CONFIG_PACKAGE_ip6tables=y
+        CONFIG_PACKAGE_ipv6helper=y
+        EOF
+        make defconfig
+
+    - name: Compile Toolchain
+      run: |
+        cd openwrt
+        make toolchain/install -j$(($(nproc) + 1)) || make toolchain/install V=s
+
+    - name: Upload Toolchain
+      uses: actions/upload-artifact@v4
+      with:
+        name: toolchain
+        path: openwrt
+
+  build-target:
+    needs: build-toolchain
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download Toolchain
+      uses: actions/download-artifact@v4
+      with:
+        name: toolchain
+        path: openwrt
+
+    - name: Fix Permissions
+      run: |
+        cd openwrt
+        sudo chown -R runner:runner .
+        chmod +x scripts/* tools/*/compile
+
+    - name: Initialize Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pip qemu-utils \
+          rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev \
+          python3-ply python3-distutils xsltproc clang
+
+    - name: Build Target
+      run: |
+        cd openwrt
+        make target/compile -j$(($(nproc) + 1)) || make target/compile V=s
+
+    - name: Upload Target
+      uses: actions/upload-artifact@v4
+      with:
+        name: target
+        path: openwrt
+
+  build-packages:
+    needs: build-target
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download Build Files
+      uses: actions/download-artifact@v4
+      with:
+        name: target
+        path: openwrt
+
+    - name: Fix Permissions
+      run: |
+        cd openwrt
+        sudo chown -R runner:runner .
+        chmod +x scripts/* tools/*/compile
+
+    - name: Initialize Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pip qemu-utils \
+          rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev \
+          python3-ply python3-distutils xsltproc clang
+
+    - name: Build Packages
+      run: |
+        cd openwrt
+        make package/compile -j$(($(nproc) + 1)) || make package/compile V=s
+        make package/index
+
+    - name: Generate Firmware
+      run: |
+        cd openwrt
+        make target/install -j$(($(nproc) + 1)) || make target/install V=s
+        make package/install
+        make buildinfo
+        make json_overview_image_info
+        make checksum
+
+    - name: Upload Firmware
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenWrt_firmware
+        path: openwrt/bin/targets/
