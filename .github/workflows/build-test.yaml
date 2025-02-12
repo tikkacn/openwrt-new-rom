@@ -32,16 +32,19 @@ jobs:
     steps:
     - name: Check Server Performance
       run: |
-        echo "======================="
+        echo "=========================="
+        echo "System Information:"
+        uname -a
+        echo "=========================="
         echo "CPU Model Information:"
         lscpu
-        echo "======================="
+        echo "=========================="
         echo "Memory Information:"
         free -h
-        echo "======================="
+        echo "=========================="
         echo "Disk Space Information:"
         df -hT
-        echo "======================="
+        echo "=========================="
 
     - name: Checkout repository
       uses: actions/checkout@main
@@ -61,34 +64,76 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
+        echo "::group::Cleaning up unnecessary packages"
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        echo "::endgroup::"
+
+        echo "::group::Updating package lists"
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-        gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
-        file wget
+        echo "::endgroup::"
+
+        echo "::group::Installing required packages"
+        sudo -E apt-get -qq install \
+          build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+          gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip \
+          zlib1g-dev file wget
+        echo "::endgroup::"
+
+        echo "::group::Cleaning up"
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
+        echo "::endgroup::"
+
+        echo "::group::Setting timezone"
         sudo timedatectl set-timezone "$TZ"
+        echo "::endgroup::"
+
+        echo "::group::Setting up work directory"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
+        echo "Work directory created and permissions set"
+        ls -la /workdir
+        echo "::endgroup::"
 
     - name: Clone OpenWrt Source
       working-directory: /workdir
       run: |
+        echo "::group::Current directory space"
         df -hT $PWD
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        echo "::endgroup::"
+
+        echo "::group::Cloning OpenWrt repository"
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt || {
+          echo "Failed to clone repository"
+          exit 1
+        }
+        echo "::endgroup::"
+
+        echo "::group::Setting up symlinks"
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
         cd openwrt
         echo "WORKDIR=$PWD" >> $GITHUB_ENV
         echo "::set-output name=key::$(date +%Y%m%d%H%M%S)"
+        echo "::endgroup::"
+
+        echo "::group::Verifying repository"
+        if [ ! -d "package" ] || [ ! -d "tools" ]; then
+          echo "Error: Essential OpenWrt directories are missing"
+          exit 1
+        fi
+        echo "Repository verification completed"
+        echo "::endgroup::"
       id: cache-key
 
     - name: Print Directory Structure
       run: |
-        echo "Directory structure in /workdir/openwrt:"
+        echo "::group::Directory structure in /workdir/openwrt"
         ls -la /workdir/openwrt
-        echo "Symlink status:"
+        echo "::endgroup::"
+
+        echo "::group::Symlink status"
         ls -la $GITHUB_WORKSPACE/openwrt
+        echo "::endgroup::"
 
     - name: Cache Source Code
       uses: actions/cache@v3
@@ -112,19 +157,53 @@ jobs:
         path: /workdir/openwrt
         key: openwrt-source-${{ needs.prepare.outputs.cache-key }}
 
+    - name: Verify Work Directory
+      run: |
+        echo "::group::Checking work directory"
+        if [ ! -d "/workdir/openwrt" ]; then
+          echo "Creating work directory"
+          sudo mkdir -p /workdir/openwrt
+          sudo chown $USER:$GROUPS /workdir
+        fi
+        ls -la /workdir
+        echo "::endgroup::"
+
     - name: Setup Custom Feeds
       run: |
-        mkdir -p /workdir/openwrt
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF /workdir/openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd /workdir/openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        echo "::group::Setting up custom feeds"
+        if [ -e $FEEDS_CONF ]; then
+          echo "Moving feeds configuration"
+          mv $FEEDS_CONF /workdir/openwrt/feeds.conf.default
+        else
+          echo "Warning: $FEEDS_CONF not found"
+        fi
+
+        if [ -f $DIY_P1_SH ]; then
+          echo "Executing custom script"
+          chmod +x $DIY_P1_SH
+          cd /workdir/openwrt
+          $GITHUB_WORKSPACE/$DIY_P1_SH
+        else
+          echo "Warning: $DIY_P1_SH not found"
+        fi
+        echo "::endgroup::"
 
     - name: Update and Install Feeds
       run: |
+        echo "::group::Updating feeds"
         cd /workdir/openwrt
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+        ./scripts/feeds update -a || {
+          echo "Error: Failed to update feeds"
+          exit 1
+        }
+        echo "::endgroup::"
+
+        echo "::group::Installing feeds"
+        ./scripts/feeds install -a || {
+          echo "Error: Failed to install feeds"
+          exit 1
+        }
+        echo "::endgroup::"
 
     - name: Cache Updated Feeds
       uses: actions/cache@v3
@@ -146,31 +225,67 @@ jobs:
         path: /workdir/openwrt
         key: openwrt-feeds-${{ needs.prepare.outputs.cache-key }}
 
+    - name: Verify Work Directory
+      run: |
+        echo "::group::Verifying work directory"
+        if [ ! -d "/workdir/openwrt" ]; then
+          echo "Error: Work directory not found"
+          exit 1
+        fi
+        ls -la /workdir/openwrt
+        echo "::endgroup::"
+
     - name: Load Custom Configuration
       run: |
-        [ -e files ] && mv files /workdir/openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE /workdir/openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd /workdir/openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        echo "::group::Loading custom configuration"
+        if [ -d "files" ]; then
+          echo "Moving files directory"
+          mv files /workdir/openwrt/files
+        fi
+
+        if [ -e $CONFIG_FILE ]; then
+          echo "Moving config file"
+          mv $CONFIG_FILE /workdir/openwrt/.config
+        else
+          echo "Warning: $CONFIG_FILE not found"
+        fi
+
+        if [ -f $DIY_P2_SH ]; then
+          echo "Executing custom script"
+          chmod +x $DIY_P2_SH
+          cd /workdir/openwrt
+          $GITHUB_WORKSPACE/$DIY_P2_SH
+        else
+          echo "Warning: $DIY_P2_SH not found"
+        fi
+        echo "::endgroup::"
 
     - name: Generate Default Config
       run: |
+        echo "::group::Generating default config"
         cd /workdir/openwrt
-        make defconfig
+        make defconfig || {
+          echo "Error: Failed to generate default config"
+          exit 1
+        }
+        echo "::endgroup::"
         
     - name: Show Config File
       run: |
+        echo "::group::Current config file contents"
         cd /workdir/openwrt
         cat .config
+        echo "::endgroup::"
 
     - name: Download Package Sources
       id: package
       run: |
+        echo "::group::Downloading package sources"
         cd /workdir/openwrt
         make download -j8 || make download -j1 V=s
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
+        echo "::endgroup::"
 
     - name: Cache Configured Source
       uses: actions/cache@v3
@@ -190,39 +305,64 @@ jobs:
         path: /workdir/openwrt
         key: openwrt-configured-${{ needs.prepare.outputs.cache-key }}
 
+    - name: Check Environment
+      run: |
+        echo "::group::Environment check"
+        if [ ! -d "/workdir/openwrt" ]; then
+          echo "Error: Work directory not found"
+          exit 1
+        fi
+        df -h
+        free -h
+        echo "::endgroup::"
+
+    - name: SSH connection (if enabled)
+      uses: tmate/tmate-action@v1
+      if: github.event.inputs.ssh == 'true'
+      timeout-minutes: 30
+
     - name: Compile Firmware
       id: compile
       run: |
+        echo "::group::Starting compilation"
         cd /workdir/openwrt
         echo "CPU cores: $(nproc)"
         echo "Starting compilation..."
         make -j$(($(nproc) + 1)) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
+        
+        echo "::group::Setting up device info"
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "::endgroup::"
 
     - name: Check Space Usage
       if: always()
       run: |
+        echo "::group::Compilation results"
         cd /workdir/openwrt
-        echo "============== Compilation Results =============="
         if [ -d bin/targets ]; then
           echo "Directory structure of bin/targets/:"
           ls -R bin/targets/
         else
-          echo "bin/targets/ directory not found"
+          echo "Warning: bin/targets/ directory not found"
         fi
-        echo "============== Space Usage =============="
+        echo "::endgroup::"
+
+        echo "::group::Space usage"
         df -hT
-        echo "============== Memory Usage =============="
+        echo "::endgroup::"
+
+        echo "::group::Memory usage"
         free -h
+        echo "::endgroup::"
 
     - name: Upload Compilation Logs
       if: failure()
       uses: actions/upload-artifact@main
       with:
-        name: compilation-logs
+        name: compilation-logs-${{ env.FILE_DATE }}
         path: /workdir/openwrt/logs/
 
     - name: Cache Compiled Files
@@ -244,11 +384,24 @@ jobs:
         path: /workdir/openwrt
         key: openwrt-compiled-${{ needs.prepare.outputs.cache-key }}
 
+    - name: Check Compiled Files
+      run: |
+        echo "::group::Checking compiled files"
+        if [ ! -d "/workdir/openwrt/bin/targets" ]; then
+          echo "Error: Compiled files not found"
+          exit 1
+        fi
+        ls -la /workdir/openwrt/bin/targets
+        echo "::endgroup::"
+
     - name: Organize Firmware Files
       run: |
+        echo "::group::Organizing firmware files"
         cd /workdir/openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        ls -la
+        echo "::endgroup::"
 
     - name: Upload Firmware
       uses: actions/upload-artifact@main
