@@ -63,14 +63,12 @@ jobs:
       - name: 最小化配置
         run: |
           cd openwrt
-          cat > .config << 'EOF'
-CONFIG_TARGET_x86=y
-CONFIG_TARGET_x86_64=y
-CONFIG_TARGET_x86_64_DEVICE_generic=y
-CONFIG_PACKAGE_base-files=y
-CONFIG_PACKAGE_libc=y
-CONFIG_PACKAGE_libgcc=y
-EOF
+          echo "CONFIG_TARGET_x86=y" > .config
+          echo "CONFIG_TARGET_x86_64=y" >> .config
+          echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
+          echo "CONFIG_PACKAGE_base-files=y" >> .config
+          echo "CONFIG_PACKAGE_libc=y" >> .config
+          echo "CONFIG_PACKAGE_libgcc=y" >> .config
           make defconfig
 
       - name: 缓存环境
