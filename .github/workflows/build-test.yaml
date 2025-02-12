@@ -45,8 +45,6 @@ jobs:
 
     - name: Checkout repository
       uses: actions/checkout@main
-      with:
-        path: source
 
     - name: Maximize Build Space
       uses: easimon/maximize-build-space@master
