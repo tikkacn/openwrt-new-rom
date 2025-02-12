@@ -207,8 +207,18 @@ jobs:
         }
         echo "::endgroup::"
 
+    - name: Verify Feeds Installation
+      run: |
+        cd /workdir/openwrt
+        echo "::group::Installed Packages List"
+        ./scripts/feeds list -i
+        echo "Number of installed packages:"
+        ./scripts/feeds list -i | wc -l
+        echo "::endgroup::"
+
     - name: Cache Updated Feeds
       uses: actions/cache@v3
+      continue-on-error: true
       with:
         path: /workdir/openwrt
         key: openwrt-feeds-${{ needs.prepare.outputs.cache-key }}
