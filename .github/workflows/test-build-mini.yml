@@ -40,16 +40,14 @@ jobs:
       run: git clone --depth=1 https://github.com/coolsnowwolf/lede openwrt
 
     - name: 最小化配置
+      working-directory: openwrt
       run: |
-        cd openwrt
-        cat > .config <<'EOF'
-        CONFIG_TARGET_x86=y
-        CONFIG_TARGET_x86_64=y
-        CONFIG_TARGET_x86_64_DEVICE_generic=y
-        CONFIG_PACKAGE_base-files=y
-        CONFIG_PACKAGE_libc=y
-        CONFIG_PACKAGE_libgcc=y
-        EOF
+        echo 'CONFIG_TARGET_x86=y' > .config
+        echo 'CONFIG_TARGET_x86_64=y' >> .config
+        echo 'CONFIG_TARGET_x86_64_DEVICE_generic=y' >> .config
+        echo 'CONFIG_PACKAGE_base-files=y' >> .config
+        echo 'CONFIG_PACKAGE_libc=y' >> .config
+        echo 'CONFIG_PACKAGE_libgcc=y' >> .config
         make defconfig
 
     - name: 缓存环境
@@ -57,3 +55,71 @@ jobs:
       with:
         path: openwrt
         key: openwrt-mini-${{ steps.date.outputs.date }}
+
+  base:
+    needs: prepare
+    if: github.event.inputs.test_stage == 'base' || github.event.inputs.test_stage == 'prepare'
+    runs-on: ubuntu-20.04
+    steps:
+    - name: 恢复缓存
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt
+        key: openwrt-mini-${{ needs.prepare.outputs.date }}
+        fail-on-cache-miss: true
+
+    - name: 编译工具链
+      working-directory: openwrt
+      run: make toolchain/compile -j1 V=s || make toolchain/compile -j1 V=sc
+
+    - name: 保存工具链
+      uses: actions/cache/save@v4
+      with:
+        path: openwrt
+        key: openwrt-mini-toolchain-${{ needs.prepare.outputs.date }}
+
+  packages:
+    needs: [prepare, base]
+    if: github.event.inputs.test_stage == 'packages' || github.event.inputs.test_stage == 'prepare'
+    runs-on: ubuntu-20.04
+    steps:
+    - name: 恢复工具链
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt
+        key: openwrt-mini-toolchain-${{ needs.prepare.outputs.date }}
+        fail-on-cache-miss: true
+
+    - name: 编译基础包
+      working-directory: openwrt
+      run: make package/base-files/compile -j1 V=s || make package/base-files/compile -j1 V=sc
+
+    - name: 保存结果
+      uses: actions/cache/save@v4
+      with:
+        path: openwrt
+        key: openwrt-mini-packages-${{ needs.prepare.outputs.date }}
+
+  firmware:
+    needs: [prepare, base, packages]
+    if: github.event.inputs.test_stage == 'firmware' || github.event.inputs.test_stage == 'prepare'
+    runs-on: ubuntu-20.04
+    steps:
+    - name: 恢复缓存
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt
+        key: openwrt-mini-packages-${{ needs.prepare.outputs.date }}
+        fail-on-cache-miss: true
+
+    - name: 测试固件
+      working-directory: openwrt
+      run: make target/install -j1 V=s || make target/install -j1 V=sc
+
+    - name: 上传日志
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: mini-test-logs
+        path: openwrt/logs/
+        compression-level: 9
