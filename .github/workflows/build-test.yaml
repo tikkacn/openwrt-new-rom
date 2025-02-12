@@ -90,7 +90,7 @@ jobs:
 
         echo "::group::Setting up work directory"
         sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
+        sudo chown -R $USER:$GROUPS /workdir
         echo "Work directory created and permissions set"
         ls -la /workdir
         echo "::endgroup::"
@@ -151,6 +151,11 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@main
 
+    - name: Set Work Directory Permissions
+      run: |
+        sudo chown -R $USER:$GROUPS /workdir
+        sudo chmod -R 755 /workdir
+
     - name: Restore Source Code
       uses: actions/cache@v3
       with:
@@ -163,7 +168,8 @@ jobs:
         if [ ! -d "/workdir/openwrt" ]; then
           echo "Creating work directory"
           sudo mkdir -p /workdir/openwrt
-          sudo chown $USER:$GROUPS /workdir
+          sudo chown -R $USER:$GROUPS /workdir
+          sudo chmod -R 755 /workdir
         fi
         ls -la /workdir
         echo "::endgroup::"
@@ -173,7 +179,7 @@ jobs:
         echo "::group::Setting up custom feeds"
         if [ -e $FEEDS_CONF ]; then
           echo "Moving feeds configuration"
-          mv $FEEDS_CONF /workdir/openwrt/feeds.conf.default
+          sudo cp $FEEDS_CONF /workdir/openwrt/feeds.conf.default
         else
           echo "Warning: $FEEDS_CONF not found"
         fi
@@ -219,6 +225,11 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@main
 
+    - name: Set Work Directory Permissions
+      run: |
+        sudo chown -R $USER:$GROUPS /workdir
+        sudo chmod -R 755 /workdir
+
     - name: Restore Updated Source
       uses: actions/cache@v3
       with:
@@ -240,12 +251,12 @@ jobs:
         echo "::group::Loading custom configuration"
         if [ -d "files" ]; then
           echo "Moving files directory"
-          mv files /workdir/openwrt/files
+          sudo cp -r files /workdir/openwrt/
         fi
 
         if [ -e $CONFIG_FILE ]; then
           echo "Moving config file"
-          mv $CONFIG_FILE /workdir/openwrt/.config
+          sudo cp $CONFIG_FILE /workdir/openwrt/.config
         else
           echo "Warning: $CONFIG_FILE not found"
         fi
@@ -299,6 +310,11 @@ jobs:
     timeout-minutes: 360
     
     steps:
+    - name: Set Work Directory Permissions
+      run: |
+        sudo chown -R $USER:$GROUPS /workdir
+        sudo chmod -R 755 /workdir
+
     - name: Restore Configured Source
       uses: actions/cache@v3
       with:
@@ -378,6 +394,11 @@ jobs:
     if: success()
     
     steps:
+    - name: Set Work Directory Permissions
+      run: |
+        sudo chown -R $USER:$GROUPS /workdir
+        sudo chmod -R 755 /workdir
+
     - name: Restore Compiled Files
       uses: actions/cache@v3
       with:
