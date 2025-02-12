@@ -30,6 +30,16 @@ jobs:
       cache-key: ${{ steps.cache-key.outputs.key }}
     
     steps:
+    - name: Initialize Work Directory
+      run: |
+        echo "::group::Setting up work directory"
+        sudo mkdir -p /workdir
+        sudo chown -R $USER:$GROUPS /workdir
+        sudo chmod -R 755 /workdir
+        echo "Work directory created and permissions set"
+        ls -la /workdir
+        echo "::endgroup::"
+
     - name: Check Server Performance
       run: |
         echo "=========================="
@@ -88,13 +98,6 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         echo "::endgroup::"
 
-        echo "::group::Setting up work directory"
-        sudo mkdir -p /workdir
-        sudo chown -R $USER:$GROUPS /workdir
-        echo "Work directory created and permissions set"
-        ls -la /workdir
-        echo "::endgroup::"
-
     - name: Clone OpenWrt Source
       working-directory: /workdir
       run: |
@@ -148,31 +151,24 @@ jobs:
     runs-on: ubuntu-22.04
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@main
-
-    - name: Set Work Directory Permissions
+    - name: Initialize Work Directory
       run: |
+        echo "::group::Setting up work directory"
+        sudo mkdir -p /workdir
         sudo chown -R $USER:$GROUPS /workdir
         sudo chmod -R 755 /workdir
+        echo "Work directory created and permissions set"
+        ls -la /workdir
+        echo "::endgroup::"
+
+    - name: Checkout repository
+      uses: actions/checkout@main
 
     - name: Restore Source Code
       uses: actions/cache@v3
       with:
         path: /workdir/openwrt
         key: openwrt-source-${{ needs.prepare.outputs.cache-key }}
-
-    - name: Verify Work Directory
-      run: |
-        echo "::group::Checking work directory"
-        if [ ! -d "/workdir/openwrt" ]; then
-          echo "Creating work directory"
-          sudo mkdir -p /workdir/openwrt
-          sudo chown -R $USER:$GROUPS /workdir
-          sudo chmod -R 755 /workdir
-        fi
-        ls -la /workdir
-        echo "::endgroup::"
 
     - name: Setup Custom Feeds
       run: |
@@ -222,29 +218,24 @@ jobs:
     runs-on: ubuntu-22.04
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@main
-
-    - name: Set Work Directory Permissions
+    - name: Initialize Work Directory
       run: |
+        echo "::group::Setting up work directory"
+        sudo mkdir -p /workdir
         sudo chown -R $USER:$GROUPS /workdir
         sudo chmod -R 755 /workdir
+        echo "Work directory created and permissions set"
+        ls -la /workdir
+        echo "::endgroup::"
+
+    - name: Checkout repository
+      uses: actions/checkout@main
 
     - name: Restore Updated Source
       uses: actions/cache@v3
       with:
         path: /workdir/openwrt
         key: openwrt-feeds-${{ needs.prepare.outputs.cache-key }}
-
-    - name: Verify Work Directory
-      run: |
-        echo "::group::Verifying work directory"
-        if [ ! -d "/workdir/openwrt" ]; then
-          echo "Error: Work directory not found"
-          exit 1
-        fi
-        ls -la /workdir/openwrt
-        echo "::endgroup::"
 
     - name: Load Custom Configuration
       run: |
@@ -310,10 +301,15 @@ jobs:
     timeout-minutes: 360
     
     steps:
-    - name: Set Work Directory Permissions
+    - name: Initialize Work Directory
       run: |
+        echo "::group::Setting up work directory"
+        sudo mkdir -p /workdir
         sudo chown -R $USER:$GROUPS /workdir
         sudo chmod -R 755 /workdir
+        echo "Work directory created and permissions set"
+        ls -la /workdir
+        echo "::endgroup::"
 
     - name: Restore Configured Source
       uses: actions/cache@v3
@@ -394,10 +390,15 @@ jobs:
     if: success()
     
     steps:
-    - name: Set Work Directory Permissions
+    - name: Initialize Work Directory
       run: |
+        echo "::group::Setting up work directory"
+        sudo mkdir -p /workdir
         sudo chown -R $USER:$GROUPS /workdir
         sudo chmod -R 755 /workdir
+        echo "Work directory created and permissions set"
+        ls -la /workdir
+        echo "::endgroup::"
 
     - name: Restore Compiled Files
       uses: actions/cache@v3
