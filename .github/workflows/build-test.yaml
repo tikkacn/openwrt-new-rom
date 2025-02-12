@@ -88,7 +88,7 @@ jobs:
         echo "Current directory structure:"
         ls -la /workdir/openwrt
         echo "Source directory structure:"
-        ls -la $GITHUB_WORKSPACE/source
+        ls -la $GITHUB_WORKSPACE
 
     - name: Cache Source Code
       uses: actions/cache@v3
@@ -105,8 +105,6 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@main
-      with:
-        path: source
 
     - name: Restore Source Code
       uses: actions/cache@v3
@@ -116,10 +114,10 @@ jobs:
 
     - name: Setup Custom Feeds
       run: |
-        [ -e source/$FEEDS_CONF ] && mv source/$FEEDS_CONF /workdir/openwrt/feeds.conf.default
-        chmod +x source/$DIY_P1_SH
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF /workdir/openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
         cd /workdir/openwrt
-        $GITHUB_WORKSPACE/source/$DIY_P1_SH
+        $GITHUB_WORKSPACE/$DIY_P1_SH
 
     - name: Update and Install Feeds
       run: |
@@ -140,8 +138,6 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@main
-      with:
-        path: source
 
     - name: Restore Updated Source
       uses: actions/cache@v3
@@ -151,11 +147,11 @@ jobs:
 
     - name: Load Custom Configuration
       run: |
-        [ -e source/files ] && mv source/files /workdir/openwrt/files
-        [ -e source/$CONFIG_FILE ] && mv source/$CONFIG_FILE /workdir/openwrt/.config
-        chmod +x source/$DIY_P2_SH
+        [ -e files ] && mv files /workdir/openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE /workdir/openwrt/.config
+        chmod +x $DIY_P2_SH
         cd /workdir/openwrt
-        $GITHUB_WORKSPACE/source/$DIY_P2_SH
+        $GITHUB_WORKSPACE/$DIY_P2_SH
 
     - name: Generate Default Config
       run: |
