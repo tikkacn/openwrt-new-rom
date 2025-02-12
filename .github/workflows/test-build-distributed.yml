@@ -1,0 +1,233 @@
+name: OpenWrt 分布式测试构建
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_stage:
+        description: '从哪个阶段开始测试'
+        required: true
+        default: 'prepare'
+        type: choice
+        options:
+          - prepare   # 准备环境
+          - base      # 基础编译
+          - packages  # 包编译
+          - firmware  # 固件打包
+
+jobs:
+  prepare:
+    if: github.event.inputs.test_stage == 'prepare'
+    runs-on: ubuntu-20.04
+    outputs:
+      date: ${{ steps.date.outputs.date }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 获取日期
+        id: date
+        run: echo "date=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+
+      - name: 初始化环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex g++ gawk gcc-multilib gettext \
+            git libncurses5-dev libssl-dev python3-distutils python3-pyelftools python3-setuptools \
+            libpython3-dev rsync unzip zlib1g-dev file wget
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+
+      - name: 克隆源码
+        run: |
+          git clone --depth=1 https://github.com/coolsnowwolf/lede openwrt
+          [ -e .config ] && cp .config openwrt/
+
+      - name: 更新 feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 测试配置
+        run: |
+          cd openwrt
+          if [ ! -f .config ]; then
+            cat > .config <<EOF
+            CONFIG_TARGET_x86=y
+            CONFIG_TARGET_x86_64=y
+            CONFIG_TARGET_x86_64_DEVICE_generic=y
+            CONFIG_PACKAGE_base-files=y
+            CONFIG_PACKAGE_libc=y
+            CONFIG_PACKAGE_libgcc=y
+            CONFIG_PACKAGE_kmod-md-mod=y
+            EOF
+          fi
+          make defconfig
+          echo "配置文件内容:"
+          cat .config
+
+      - name: 缓存文件
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt
+          key: openwrt-test-${{ steps.date.outputs.date }}
+
+  base:
+    needs: prepare
+    if: github.event.inputs.test_stage == 'base' || github.event.inputs.test_stage == 'prepare'
+    runs-on: ubuntu-20.04
+    steps:
+      - name: 恢复缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: openwrt
+          key: openwrt-test-${{ needs.prepare.outputs.date }}
+          fail-on-cache-miss: true
+
+      - name: 测试工具链编译
+        run: |
+          cd openwrt
+          echo "========== 编译工具链 =========="
+          make tools/compile -j1 V=s || make tools/compile -j1 V=sc
+          make toolchain/compile -j1 V=s || make toolchain/compile -j1 V=sc
+
+      - name: 测试内核编译
+        run: |
+          cd openwrt
+          echo "========== 编译内核 =========="
+          make target/linux/clean
+          make target/linux/compile -j1 V=s || make target/linux/compile -j1 V=sc
+
+      - name: 测试基础包编译
+        run: |
+          cd openwrt
+          echo "========== 编译基础包 =========="
+          make package/libs/toolchain/compile -j1 V=s || make package/libs/toolchain/compile -j1 V=sc
+          make package/libs/mbedtls/compile -j1 V=s || make package/libs/mbedtls/compile -j1 V=sc
+          make package/libs/openssl/compile -j1 V=s || make package/libs/openssl/compile -j1 V=sc
+
+      - name: 收集编译日志
+        if: always()
+        run: |
+          cd openwrt
+          mkdir -p logs
+          echo "============== 系统信息 ==============" > logs/build-info.txt
+          echo "CPU: $(nproc) cores" >> logs/build-info.txt
+          free -h >> logs/build-info.txt
+          df -h >> logs/build-info.txt
+          if [ -f logs/last-build.txt ]; then
+            echo "============== 编译日志 ==============" >> logs/build-info.txt
+            tail -n 500 logs/last-build.txt >> logs/build-info.txt
+          fi
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-build-logs
+          path: openwrt/logs/
+          compression-level: 9
+
+      - name: 缓存编译结果
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt
+          key: openwrt-test-base-${{ needs.prepare.outputs.date }}
+
+  packages:
+    needs: [prepare, base]
+    if: github.event.inputs.test_stage == 'packages' || github.event.inputs.test_stage == 'prepare'
+    runs-on: ubuntu-20.04
+    steps:
+      - name: 恢复缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: openwrt
+          key: openwrt-test-base-${{ needs.prepare.outputs.date }}
+          fail-on-cache-miss: true
+
+      - name: 测试网络包编译
+        run: |
+          cd openwrt
+          echo "========== 编译网络包 =========="
+          make package/network/config/netifd/compile -j1 V=s || make package/network/config/netifd/compile -j1 V=sc
+
+      - name: 测试 Luci 编译
+        run: |
+          cd openwrt
+          echo "========== 编译 Luci =========="
+          make package/feeds/luci/luci/compile -j1 V=s || make package/feeds/luci/luci/compile -j1 V=sc
+
+      - name: 收集编译日志
+        if: always()
+        run: |
+          cd openwrt
+          mkdir -p logs
+          echo "============== 包编译日志 ==============" > logs/packages-info.txt
+          if [ -f logs/last-build.txt ]; then
+            tail -n 500 logs/last-build.txt >> logs/packages-info.txt
+          fi
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-build-logs
+          path: openwrt/logs/
+          compression-level: 9
+
+      - name: 缓存编译结果
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt
+          key: openwrt-test-packages-${{ needs.prepare.outputs.date }}
+
+  firmware:
+    needs: [prepare, base, packages]
+    if: github.event.inputs.test_stage == 'firmware' || github.event.inputs.test_stage == 'prepare'
+    runs-on: ubuntu-20.04
+    steps:
+      - name: 恢复缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: openwrt
+          key: openwrt-test-packages-${{ needs.prepare.outputs.date }}
+          fail-on-cache-miss: true
+
+      - name: 测试固件打包
+        id: build
+        run: |
+          cd openwrt
+          echo "========== 打包固件 =========="
+          make package/index
+          make -j1 V=s || make -j1 V=sc
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 收集构建信息
+        if: always()
+        run: |
+          cd openwrt
+          mkdir -p logs
+          echo "============== 固件构建信息 ==============" > logs/firmware-info.txt
+          if [ -f logs/last-build.txt ]; then
+            tail -n 500 logs/last-build.txt >> logs/firmware-info.txt
+          fi
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-build-logs
+          path: openwrt/logs/
+          compression-level: 9
+
+      - name: 上传固件
+        if: steps.build.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_firmware_test
+          path: openwrt/bin/targets/
+          compression-level: 9
