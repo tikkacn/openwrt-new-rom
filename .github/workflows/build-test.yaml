@@ -52,7 +52,7 @@ jobs:
             ^G\+\+$
             Clang
             LLVM
-          docker_include: ".+"
+          docker_include: "True"
           docker_prune: "True"
           docker_clean: "True"
           apt_prune: "True"
@@ -106,18 +106,8 @@ jobs:
 
       - name: Load custom feeds
         run: |
-          # 如果存在 feeds.conf.default（FEEDS_CONF），则替换
-          if [ -f "$FEEDS_CONF" ]; then
-            mv "$FEEDS_CONF" openwrt/feeds.conf.default
-          fi
-          # 如果 diy-part1.sh 存在，则赋予可执行权限并执行
-          if [ -f "$DIY_P1_SH" ]; then
-            chmod +x "$DIY_P1_SH"
-            cd openwrt
-            "../$DIY_P1_SH"
-          else
-            echo "Warning: $DIY_P1_SH 未找到，跳过该阶段。"
-          fi
+          [ -f "$FEEDS_CONF" ] && mv "$FEEDS_CONF" openwrt/feeds.conf.default
+          [ -f "$DIY_P1_SH" ] && chmod +x "$DIY_P1_SH" && cd openwrt && "../$DIY_P1_SH" || echo "Warning: $DIY_P1_SH not found, skipping."
 
       - name: Update feeds
         run: cd openwrt && ./scripts/feeds update -a
@@ -127,30 +117,15 @@ jobs:
 
       - name: Load custom configuration
         run: |
-          # 如果有自定义 files 目录，则移动
-          if [ -d files ]; then
-            mv files openwrt/
-          fi
-          # 如果有自定义 .config，则移动到 OpenWrt 根目录
-          if [ -f "$CONFIG_FILE" ]; then
-            mv "$CONFIG_FILE" openwrt/.config
-          fi
-          # 如果 diy-part2.sh 存在，则执行
-          if [ -f "$DIY_P2_SH" ]; then
-            chmod +x "$DIY_P2_SH"
-            cd openwrt
-            "../$DIY_P2_SH"
-          else
-            echo "Warning: $DIY_P2_SH 未找到，跳过该阶段。"
-          fi
+          [ -d files ] && mv files openwrt/
+          [ -f "$CONFIG_FILE" ] && mv "$CONFIG_FILE" openwrt/.config
+          [ -f "$DIY_P2_SH" ] && chmod +x "$DIY_P2_SH" && cd openwrt && "../$DIY_P2_SH" || echo "Warning: $DIY_P2_SH not found, skipping."
 
       - name: Pre-Download packages
         run: |
           cd openwrt
           make defconfig
-          # 预下载依赖包
           make download -j8
-          # 清理下载不完全的文件
           find dl -size -1024c -exec ls -l {} \; || true
           find dl -size -1024c -exec rm -f {} \; || true
 
@@ -158,7 +133,6 @@ jobs:
         id: prepare-final
         run: |
           cd "$GITHUB_WORKSPACE"
-          # 压缩整个 openwrt 目录，给下一个编译阶段使用
           zip -r openwrt_env.zip openwrt
           echo "status=success" >> "$GITHUB_OUTPUT"
 
@@ -194,22 +168,25 @@ jobs:
           df -hT
           echo "===================="
 
+      - name: Install missing build tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --reinstall gcc g++ binutils
+
       - name: Compile firmware for x86_64
         id: compile
         run: |
           cd openwrt
           echo "开始编译 x86_64 固件..."
 
-          # 可选：在此额外锁定 x86_64 配置，如果你的 .config 已经固定此目标，可不执行
-          if [ -f .config ]; then
-            sed -i '/^CONFIG_TARGET_/d' .config
-          fi
+          # 强制指定 x86_64 架构
+          sed -i '/^CONFIG_TARGET_/d' .config
           echo "CONFIG_TARGET_x86=y" >> .config
           echo "CONFIG_TARGET_x86_64=y" >> .config
 
           make defconfig
-          # 若 -j$(nproc) 过大导致超时，可适当调小
-          make -j"$(nproc)" || make -j1 || make -j1 V=s
+          # 使用 -j1 V=s 参数，方便查看详细报错信息
+          make -j1 V=s
 
           echo "status=success" >> "$GITHUB_OUTPUT"
 
@@ -233,7 +210,6 @@ jobs:
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
         run: |
           cd openwrt/bin/targets/*/*
-          # 移除不必要的 packages 目录，仅保留固件
           rm -rf packages
           echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
           echo "status=success" >> "$GITHUB_OUTPUT"
