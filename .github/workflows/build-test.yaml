@@ -104,28 +104,28 @@ jobs:
 
       - name: Clone source code
         run: |
-          git clone --depth=1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
+          git clone --depth=1 "$REPO_URL" -b "$REPO_BRANCH" /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
 
       - name: Load custom feeds
         run: |
-          [ -f "$FEEDS_CONF" ] && mv "$FEEDS_CONF" openwrt/feeds.conf.default
-          [ -f "$DIY_P1_SH" ] && chmod +x "$DIY_P1_SH" && cd openwrt && "../$DIY_P1_SH" || echo "Warning: $DIY_P1_SH not found, skipping."
+          [ -f "$FEEDS_CONF" ] && mv "$FEEDS_CONF" /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/feeds.conf.default
+          [ -f "$DIY_P1_SH" ] && chmod +x "$DIY_P1_SH" && cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt && "../$DIY_P1_SH" || echo "Warning: $DIY_P1_SH not found, skipping."
 
       - name: Update feeds
-        run: cd openwrt && ./scripts/feeds update -a
+        run: cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt && ./scripts/feeds update -a
 
       - name: Install feeds
-        run: cd openwrt && ./scripts/feeds install -a
+        run: cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt && ./scripts/feeds install -a
 
       - name: Load custom configuration
         run: |
-          [ -d files ] && mv files openwrt/
-          [ -f "$CONFIG_FILE" ] && mv "$CONFIG_FILE" openwrt/.config
-          [ -f "$DIY_P2_SH" ] && chmod +x "$DIY_P2_SH" && cd openwrt && "../$DIY_P2_SH" || echo "Warning: $DIY_P2_SH not found, skipping."
+          [ -d files ] && mv files /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/
+          [ -f "$CONFIG_FILE" ] && mv "$CONFIG_FILE" /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/.config
+          [ -f "$DIY_P2_SH" ] && chmod +x "$DIY_P2_SH" && cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt && "../$DIY_P2_SH" || echo "Warning: $DIY_P2_SH not found, skipping."
 
       - name: Pre-Download packages
         run: |
-          cd openwrt
+          cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
           make defconfig
           make download -j8
           find dl -size -1024c -exec ls -l {} \; || true
@@ -135,15 +135,8 @@ jobs:
         id: prepare-final
         run: |
           cd "$GITHUB_WORKSPACE"
-          zip -r openwrt_env.zip openwrt
+          zip -r openwrt_env.zip /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
           echo "status=success" >> "$GITHUB_OUTPUT"
-
-      - name: Upload environment artifact
-        if: steps.prepare-final.outputs.status == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: openwrt_env.zip
 
   #######################################################################
   # 第二步： 读取第一个job上传的环境包，并进行正式编译
@@ -161,7 +154,7 @@ jobs:
       - name: Unzip environment
         run: |
           unzip -q openwrt_env.zip
-          ls -al openwrt
+          ls -al /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
 
       - name: Check space usage before build
         run: |
@@ -178,6 +171,8 @@ jobs:
           sudo apt-get install --only-upgrade autoconf automake
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
           sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
+          sudo rm -rf /var/log/*
+          sudo apt-get clean
 
       - name: Verify gcc version
         run: gcc --version
@@ -200,19 +195,21 @@ jobs:
 
       - name: Clean staging and build directories
         run: |
-          cd openwrt
+          cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
           rm -rf staging_dir
           rm -rf build_dir
           rm -rf /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/build_dir/host/gmp-6.3.0
           make clean
+          make dirclean
 
       - name: Compile firmware for x86_64
         id: compile
         env:
           CC: /usr/bin/gcc-11
           CXX: /usr/bin/g++-11
+          TMPDIR: /tmp
         run: |
-          cd openwrt
+          cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
           echo "开始编译 x86_64 固件..."
 
           # 强制指定 x86_64 架构
@@ -222,6 +219,7 @@ jobs:
 
           export CC="/usr/bin/gcc-11"
           export CXX="/usr/bin/g++-11"
+          export TMPDIR=/tmp
 
           make defconfig
           # 使用 -j1 V=s 参数，方便查看详细报错信息
@@ -233,7 +231,7 @@ jobs:
         id: organize
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled() && steps.compile.outputs.status == 'success'
         run: |
-          cd openwrt/bin/targets/*/*
+          cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/bin/targets/*/*
           rm -rf packages
           echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
           echo "status=success" >> "$GITHUB_OUTPUT"
