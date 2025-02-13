@@ -22,10 +22,12 @@ env:
   UPLOAD_RELEASE: false
   # 分布式编译时使用的临时包名
   ARTIFACT_NAME: openwrt_build_cache
+  # 缓存 Key
+  CACHE_KEY: openwrt-x86_64-toolchain
 
 jobs:
   #######################################################################
-  # 第一步：准备环境并执行初始配置
+  # 第一步：准备环境并构建编译工具链
   #######################################################################
   prepare-env:
     runs-on: ubuntu-22.04
