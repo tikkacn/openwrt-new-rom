@@ -173,21 +173,41 @@ jobs:
       - name: Install gcc-11 and set alternatives
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y gcc-11 g++-11
-
+          sudo apt-get install -y --reinstall gcc-11 g++-11
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
           sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
 
       - name: Verify gcc version
         run: gcc --version
 
-      - name: Clean staging directory
+      - name: Find cc1
+        run: |
+          sudo find / -name cc1
+
+      - name: Check PATH
+        run: echo $PATH
+
+      - name: Check cc1 permissions
+        run: |
+          CC1_PATH=$(find / -name cc1 | head -n 1)
+          if [ -n "$CC1_PATH" ]; then
+            ls -l "$CC1_PATH"
+          else
+            echo "cc1 not found"
+          fi
+
+      - name: Clean staging and build directories
         run: |
           cd openwrt
+          rm -rf staging_dir
+          rm -rf build_dir
           make clean
 
       - name: Compile firmware for x86_64
         id: compile
+        env:
+          CC: /usr/bin/gcc-11
+          CXX: /usr/bin/g++-11
         run: |
           cd openwrt
           echo "开始编译 x86_64 固件..."
