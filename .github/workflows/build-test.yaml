@@ -1,196 +1,206 @@
-name: OpenWrt Build Test
+name: Build OpenWrt Distributed (x86_64 only)
 
 on:
+  repository_dispatch:
   workflow_dispatch:
-    inputs:
-      ssh:
-        description: 'SSH connection to Actions'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   TZ: Asia/Shanghai
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_COWTRANSFER: false
+  UPLOAD_WETRANSFER: false
+  UPLOAD_RELEASE: false
+  # 自行设置分布式编译过程的缓存压缩文件名，防止冲突
+  ARTIFACT_NAME: openwrt-build-cache
 
 jobs:
-  prepare:
+  # 第一步：准备环境并执行初始配置
+  prepare-env:
     runs-on: ubuntu-22.04
     outputs:
-      cache-key: ${{ steps.cache-key.outputs.key }}
-    
+      build-status: ${{ steps.prepare-final.outputs.status }}
     steps:
-    - name: Checkout
-      uses: actions/checkout@main
+      - name: Checkout
+        uses: actions/checkout@v3
 
-    - name: Generate Cache Key
-      id: cache-key
-      run: |
-        echo "key=$(date +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
+      - name: Before freeing up disk space
+        run: |
+          echo "Before freeing up disk space"
+          echo "=============================================================================="
+          df -hT
+          echo "=============================================================================="
+      
+      - name: Optimize Disk Space
+        uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
+        with:
+          operate_sudo: "True"
+          general_include: ".+"
+          general_exclude: |-
+            ^GCC$
+            ^G\+\+$
+            Clang
+            LLVM
+          docker_include: ".+"
+          docker_prune: "True"
+          docker_clean: "True"
+          apt_prune: "True"
+          apt_clean: "True"
+          homebrew_prune: "True"
+          homebrew_clean: "True"
+          npm_prune: "True"
+          npm_clean: "True"
+          os_swap: "True"
 
-    - name: Setup Environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown -R $USER:$GROUPS /workdir
-        
-        # 清理和安装依赖
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib \
-          gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
+      - name: Freeing up disk space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 1
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
 
-    - name: Clone Source Code
-      working-directory: /workdir
-      run: |
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+      - name: Free up disk space complete
+        run: |
+          echo "Free up disk space complete"
+          echo "=============================================================================="
+          df -hT
+          echo "=============================================================================="
 
-    - name: Cache Source Code
-      uses: actions/cache@v3
-      with:
-        path: /workdir/openwrt
-        key: openwrt-source-${{ steps.cache-key.outputs.key }}
+      - name: Initialization environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+          vim wget xmlto xxd zlib1g-dev python3-setuptools
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
+          /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
+          sudo timedatectl set-timezone "$TZ"
+          sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
-  feeds:
-    needs: prepare
+      - name: Clone source code
+        run: |
+          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+
+      - name: Load custom feeds
+        run: |
+          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+          chmod +x $DIY_P1_SH
+          cd openwrt
+          $GITHUB_WORKSPACE/$DIY_P1_SH
+
+      - name: Update feeds
+        run: cd openwrt && ./scripts/feeds update -a
+
+      - name: Install feeds
+        run: cd openwrt && ./scripts/feeds install -a
+
+      - name: Load custom configuration
+        run: |
+          [ -e files ] && mv files openwrt/files
+          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+          chmod +x $DIY_P2_SH
+          cd openwrt
+          $GITHUB_WORKSPACE/$DIY_P2_SH
+
+      - name: Pre-Download packages
+        run: |
+          cd openwrt
+          make defconfig
+          # 先下载依赖包，这样后续编译时能减少网络依赖
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \; || true
+          find dl -size -1024c -exec rm -f {} \; || true
+
+      - name: Prepare artifact
+        id: prepare-final
+        run: |
+          cd $GITHUB_WORKSPACE
+          # 将 openwrt 目录打包上传给后续的 job 使用
+          # 压缩体积可减少后续传输时间
+          zip -r openwrt_env.zip openwrt
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Upload environment artifact
+        if: steps.prepare-final.outputs.status == 'success'
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: openwrt_env.zip
+
+  # 第二步：在新Runner拉取准备好的环境并开始完整编译
+  build-firmware:
+    needs: prepare-env
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    
     steps:
-    - name: Checkout
-      uses: actions/checkout@main
+      - name: Download artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: .
 
-    - name: Restore Source
-      uses: actions/cache@v3
-      with:
-        path: /workdir/openwrt
-        key: openwrt-source-${{ needs.prepare.outputs.cache-key }}
+      - name: Unzip environment
+        run: |
+          unzip -q openwrt_env.zip
+          ls -al
 
-    - name: Update Feeds
-      run: |
-        cd /workdir/openwrt
-        if [ -f "$GITHUB_WORKSPACE/$DIY_P1_SH" ]; then
-          chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH"
-          "$GITHUB_WORKSPACE/$DIY_P1_SH"
-        fi
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+      - name: Check space usage before build
+        run: df -hT
 
-    - name: Cache Feeds
-      uses: actions/cache@v3
-      with:
-        path: /workdir/openwrt
-        key: openwrt-feeds-${{ needs.prepare.outputs.cache-key }}
+      - name: Compile the firmware
+        id: compile
+        run: |
+          cd openwrt
+          echo "Starting x86_64 compile"
+          # 仅保留 x86_64 目标
+          # 若你的配置里已经固定为 x86_64，可不执行此命令
+          [ -f .config ] && sed -i '/^CONFIG_TARGET_/d' .config
+          echo -e "\nCONFIG_TARGET_x86=y\nCONFIG_TARGET_x86_64=y" >> .config
+          make defconfig
+          # 并行编译，若依旧超时可改小并行度
+          make -j$(nproc) || make -j1 || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
 
-  config:
-    needs: feeds
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    
-    steps:
-    - name: Checkout
-      uses: actions/checkout@main
+      - name: Check space usage after build
+        if: (!cancelled())
+        run: df -hT
 
-    - name: Restore Feeds
-      uses: actions/cache@v3
-      with:
-        path: /workdir/openwrt
-        key: openwrt-feeds-${{ needs.prepare.outputs.cache-key }}
+      - name: Upload bin directory
+        uses: actions/upload-artifact@v3
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        with:
+          name: OpenWrt_bin
+          path: openwrt/bin
 
-    - name: Load Config
-      run: |
-        cd /workdir/openwrt
-        if [ -f "$GITHUB_WORKSPACE/$DIY_P2_SH" ]; then
-          chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
-          "$GITHUB_WORKSPACE/$DIY_P2_SH"
-        fi
-        [ -e "$GITHUB_WORKSPACE/$CONFIG_FILE" ] && cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
-        make defconfig
+      - name: Organize firmware
+        id: organize
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        run: |
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Cache Config
-      uses: actions/cache@v3
-      with:
-        path: /workdir/openwrt
-        key: openwrt-config-${{ needs.prepare.outputs.cache-key }}
-
-  compile:
-    needs: config
-    runs-on: ubuntu-22.04
-    timeout-minutes: 360
-    
-    steps:
-    - name: Restore Config
-      uses: actions/cache@v3
-      with:
-        path: /workdir/openwrt
-        key: openwrt-config-${{ needs.prepare.outputs.cache-key }}
-
-    - name: SSH Connection
-      uses: tmate/tmate-action@v1
-      if: github.event.inputs.ssh == 'true'
-      timeout-minutes: 30
-
-    - name: Download Packages
-      run: |
-        cd /workdir/openwrt
-        make download -j8 || make download -j1 V=s
-
-    - name: Compile
-      id: compile
-      run: |
-        cd /workdir/openwrt
-        echo "开始编译..."
-        make -j$(($(nproc) + 1)) || make -j1 V=s
-        echo "编译完成"
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    - name: Cache Compiled
-      uses: actions/cache@v3
-      if: success()
-      with:
-        path: /workdir/openwrt
-        key: openwrt-compiled-${{ needs.prepare.outputs.cache-key }}
-
-  upload:
-    needs: compile
-    runs-on: ubuntu-22.04
-    if: success()
-    
-    steps:
-    - name: Restore Compiled
-      uses: actions/cache@v3
-      with:
-        path: /workdir/openwrt
-        key: openwrt-compiled-${{ needs.prepare.outputs.cache-key }}
-
-    - name: Organize Files
-      run: |
-        cd /workdir/openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-
-    - name: Upload Firmware
-      uses: actions/upload-artifact@main
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
-
-    - name: Delete Old Runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 1
-        keep_minimum_runs: 3
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v3
+        if: steps.organize.outputs.status == 'success' && !cancelled()
+        with:
+          name: OpenWrt_Firmware
+          path: ${{ env.FIRMWARE }}
