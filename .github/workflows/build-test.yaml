@@ -94,7 +94,7 @@ jobs:
             libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
             mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
             libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-            vim wget xmlto xxd zlib1g-dev python3-setuptools
+            vim wget xmlto xxd zlib1g-dev python3-setuptools zip  # 添加 zip
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
           sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
@@ -137,6 +137,13 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           zip -r openwrt_env.zip /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
           echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Upload environment artifact
+        if: steps.prepare-final.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: openwrt_env.zip
 
   #######################################################################
   # 第二步： 读取第一个job上传的环境包，并进行正式编译
