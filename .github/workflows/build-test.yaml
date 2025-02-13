@@ -135,7 +135,7 @@ jobs:
         id: prepare-final
         run: |
           cd "$GITHUB_WORKSPACE"
-          zip -r openwrt_env.zip /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
+          zip -r openwrt_env.zip /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt  # 修改这里
           echo "status=success" >> "$GITHUB_OUTPUT"
 
       - name: Upload environment artifact
@@ -162,7 +162,7 @@ jobs:
         run: |
           pwd
           ls -al
-          unzip -q openwrt_env.zip -d /home/runner/work/openwrt-new-rom/openwrt-new-rom
+          unzip -q openwrt_env.zip  # 修改这里
           ls -al /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
 
       - name: Check space usage before build
