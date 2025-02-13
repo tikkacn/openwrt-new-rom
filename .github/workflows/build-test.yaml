@@ -25,7 +25,7 @@ env:
 
 jobs:
   #######################################################################
-  # 第一步：准备环境并执行初始配置（包含依赖安装、源码克隆、feeds 更新等）
+  # 第一步：准备环境并执行初始配置
   #######################################################################
   prepare-env:
     runs-on: ubuntu-22.04
@@ -168,10 +168,16 @@ jobs:
           df -hT
           echo "===================="
 
-      - name: Install missing build tools
+      - name: Install missing build tools and set environment
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y --reinstall gcc g++ binutils
+          sudo apt-get install -y --reinstall gcc g++ binutils make automake libtool pkg-config
+
+          # 显式设置环境变量
+          echo "Setting environment variables..."
+          echo "export CC=/usr/bin/gcc" >> $GITHUB_ENV
+          echo "export CXX=/usr/bin/g++" >> $GITHUB_ENV
+          echo "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" >> $GITHUB_ENV
 
       - name: Compile firmware for x86_64
         id: compile
