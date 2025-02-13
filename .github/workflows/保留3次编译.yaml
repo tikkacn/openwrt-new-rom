@@ -1,0 +1,326 @@
+name: Build OpenWrt (分布式保留三次固件)
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+
+env:
+  # 主要环境变量，可根据需要自行调整
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  TZ: Asia/Shanghai
+  # 是否在编译完成后上传 bin 目录
+  UPLOAD_BIN_DIR: false
+  # 是否在编译完成后上传固件目录
+  UPLOAD_FIRMWARE: true
+  UPLOAD_COWTRANSFER: false
+  UPLOAD_WETRANSFER: false
+  UPLOAD_RELEASE: true  # 启用自动发布 Release
+  # 分布式编译时使用的临时包名
+  ARTIFACT_NAME: openwrt_build_cache
+  # 缓存 Key
+  CACHE_KEY: openwrt-x86_64-toolchain
+
+jobs:
+  #######################################################################
+  # 第一步：准备环境并构建编译工具链
+  #######################################################################
+  prepare-env:
+    runs-on: ubuntu-22.04
+    outputs:
+      build-status: ${{ steps.prepare-final.outputs.status }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Before freeing up disk space
+        run: |
+          echo "===================="
+          echo "磁盘空间使用情况（清理前）"
+          df -hT
+          echo "===================="
+
+      - name: Optimize Disk Space
+        uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
+        with:
+          operate_sudo: "True"
+          general_include: ".+"
+          general_exclude: |-
+            ^GCC$
+            ^G\+\+$
+            Clang
+            LLVM
+          docker_include: "True"
+          docker_prune: "True"
+          docker_clean: "True"
+          apt_prune: "True"
+          apt_clean: "True"
+          homebrew_prune: "True"
+          homebrew_clean: "True"
+          npm_prune: "True"
+          npm_clean: "True"
+          os_swap: "True"
+
+      - name: Freeing up disk space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 1
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Free up disk space complete
+        run: |
+          echo "===================="
+          echo "磁盘空间使用情况（清理后）"
+          df -hT
+          echo "===================="
+
+      - name: Initialization environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+            git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+            mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+            libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+            vim wget xmlto xxd zlib1g-dev python3-setuptools
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
+            /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
+          sudo timedatectl set-timezone "$TZ"
+          sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
+
+      - name: Clone source code
+        run: |
+          git clone --depth=1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
+
+      - name: Load custom feeds
+        run: |
+          [ -f "$FEEDS_CONF" ] && mv "$FEEDS_CONF" openwrt/feeds.conf.default
+          [ -f "$DIY_P1_SH" ] && chmod +x "$DIY_P1_SH" && cd openwrt && "../$DIY_P1_SH" || echo "Warning: $DIY_P1_SH not found, skipping."
+
+      - name: Update feeds
+        run: cd openwrt && ./scripts/feeds update -a
+
+      - name: Install feeds
+        run: cd openwrt && ./scripts/feeds install -a
+
+      - name: Load custom configuration
+        run: |
+          [ -d files ] && mv files openwrt/
+          [ -f "$CONFIG_FILE" ] && mv "$CONFIG_FILE" openwrt/.config
+          [ -f "$DIY_P2_SH" ] && chmod +x "$DIY_P2_SH" && cd openwrt && "../$DIY_P2_SH" || echo "Warning: $DIY_P2_SH not found, skipping."
+
+      - name: Pre-Download packages
+        run: |
+          cd openwrt
+          make defconfig
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \; || true
+          find dl -size -1024c -exec rm -f {} \; || true
+
+      - name: Prepare artifact
+        id: prepare-final
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          zip -r openwrt_env.zip openwrt
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Upload environment artifact
+        if: steps.prepare-final.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: openwrt_env.zip
+
+  #######################################################################
+  # 第二步： 读取第一个job上传的环境包，并进行正式编译
+  #######################################################################
+  build-firmware:
+    needs: prepare-env
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: .
+
+      - name: Unzip environment
+        run: |
+          unzip -q openwrt_env.zip
+          ls -al openwrt
+
+      - name: Check space usage before build
+        run: |
+          echo "===================="
+          echo "磁盘空间使用情况（编译前）"
+          df -hT
+          echo "===================="
+
+      - name: Install gcc-11 and set alternatives
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --reinstall gcc-11 g++-11
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
+
+      - name: Verify gcc version
+        run: gcc --version
+
+      - name: Find cc1
+        run: |
+          sudo find / -name cc1
+
+      - name: Check PATH
+        run: echo $PATH
+
+      - name: Check cc1 permissions
+        run: |
+          CC1_PATH=$(find / -name cc1 | head -n 1)
+          if [ -n "$CC1_PATH" ]; then
+            ls -l "$CC1_PATH"
+          else
+            echo "cc1 not found"
+          fi
+
+      - name: Clean staging and build directories
+        run: |
+          cd openwrt
+          rm -rf staging_dir
+          rm -rf build_dir
+          make clean
+
+      - name: Compile firmware for x86_64
+        id: compile
+        env:
+          CC: /usr/bin/gcc-11
+          CXX: /usr/bin/g++-11
+        run: |
+          cd openwrt
+          echo "开始编译 x86_64 固件..."
+
+          # 强制指定 x86_64 架构
+          sed -i '/^CONFIG_TARGET_/d' .config
+          echo "CONFIG_TARGET_x86=y" >> .config
+          echo "CONFIG_TARGET_x86_64=y" >> .config
+
+          make defconfig
+          # 使用 -j1 V=s 参数，方便查看详细报错信息
+          make -j1 V=s
+
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Organize firmware
+        id: organize
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled() && steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Get current date and time
+        if: steps.compile.outputs.status == 'success'
+        id: get_date
+        run: echo "RELEASE_DATE=$(date '+%Y%m%d-%H%M')" >> $GITHUB_ENV
+
+      - name: Create Release
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: Openwrt-${{ env.RELEASE_DATE }}
+          release_name: Openwrt-${{ env.RELEASE_DATE }}
+          body: |
+            构建日期: ${{ env.RELEASE_DATE }}
+            构建者: ${{ github.actor }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ env.FIRMWARE }}
+          asset_name: openwrt-firmware.bin
+          asset_content_type: application/octet-stream
+
+      - name: Delete Old Releases
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        uses: actions/github-script@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          script: |
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const per_page = 100
+            const max_releases_to_keep = 3
+
+            async function listReleases() {
+              const releases = []
+              let page = 1
+              while (true) {
+                const { data } = await github.rest.repos.listReleases({
+                  owner,
+                  repo,
+                  per_page,
+                  page,
+                })
+                if (data.length === 0) break
+                releases.push(...data)
+                if (data.length < per_page) break
+                page++
+              }
+              return releases
+            }
+
+            async function deleteRelease(release) {
+              console.log(`Deleting release ${release.tag_name} (${release.id})`)
+              await github.rest.repos.deleteRelease({
+                owner,
+                repo,
+                release_id: release.id,
+              })
+            }
+
+            async function run() {
+              console.log(`Fetching all releases for ${owner}/${repo}`)
+              const releases = await listReleases()
+
+              // Filter out draft and prerelease releases
+              const validReleases = releases.filter(release => !release.draft && !release.prerelease);
+
+              if (validReleases.length > max_releases_to_keep) {
+                console.log(`Found ${validReleases.length} valid releases, deleting all but the ${max_releases_to_keep} most recent`)
+                const releasesToDelete = validReleases
+                  .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                  .slice(max_releases_to_keep);
+
+                for (const release of releasesToDelete) {
+                  await deleteRelease(release);
+                }
+              } else {
+                console.log(`Found ${validReleases.length} valid releases, nothing to delete`);
+              }
+            }
+
+            await run()
