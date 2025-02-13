@@ -19,7 +19,7 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_COWTRANSFER: false
   UPLOAD_WETRANSFER: false
-  UPLOAD_RELEASE: false
+  UPLOAD_RELEASE: true  # 启用自动发布 Release
   # 分布式编译时使用的临时包名
   ARTIFACT_NAME: openwrt_build_cache
   # 缓存 Key
@@ -174,6 +174,8 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --reinstall gcc-11 g++-11
+          sudo apt-get install -y m4 texinfo
+          sudo apt-get install --only-upgrade autoconf automake
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
           sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
 
@@ -201,6 +203,7 @@ jobs:
           cd openwrt
           rm -rf staging_dir
           rm -rf build_dir
+          rm -rf /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/build_dir/host/gmp-6.3.0
           make clean
 
       - name: Compile firmware for x86_64
@@ -217,39 +220,113 @@ jobs:
           echo "CONFIG_TARGET_x86=y" >> .config
           echo "CONFIG_TARGET_x86_64=y" >> .config
 
+          export CC="/usr/bin/gcc-11"
+          export CXX="/usr/bin/g++-11"
+
           make defconfig
           # 使用 -j1 V=s 参数，方便查看详细报错信息
           make -j1 V=s
 
           echo "status=success" >> "$GITHUB_OUTPUT"
 
-      - name: Check space usage after build
-        if: (!cancelled())
-        run: |
-          echo "===================="
-          echo "磁盘空间使用情况（编译后）"
-          df -hT
-          echo "===================="
-
-      - name: Upload bin directory
-        uses: actions/upload-artifact@v4
-        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-        with:
-          name: OpenWrt_bin
-          path: openwrt/bin
-
       - name: Organize firmware
         id: organize
-        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled() && steps.compile.outputs.status == 'success'
         run: |
           cd openwrt/bin/targets/*/*
           rm -rf packages
           echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
           echo "status=success" >> "$GITHUB_OUTPUT"
 
-      - name: Upload firmware artifact
-        uses: actions/upload-artifact@v4
-        if: steps.organize.outputs.status == 'success' && !cancelled()
+      - name: Get current date and time
+        if: steps.compile.outputs.status == 'success'
+        id: get_date
+        run: echo "RELEASE_DATE=$(date '+%Y%m%d-%H%M')" >> $GITHUB_ENV
+
+      - name: Create Release
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: OpenWrt_Firmware
-          path: ${{ env.FIRMWARE }}
+          tag_name: Openwrt-${{ env.RELEASE_DATE }}
+          release_name: Openwrt-${{ env.RELEASE_DATE }}
+          body: |
+            构建日期: ${{ env.RELEASE_DATE }}
+            构建者: ${{ github.actor }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ env.FIRMWARE }}
+          asset_name: openwrt-firmware.bin
+          asset_content_type: application/octet-stream
+
+      - name: Delete Old Releases
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        uses: actions/github-script@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          script: |
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const per_page = 100
+            const max_releases_to_keep = 3
+
+            async function listReleases() {
+              const releases = []
+              let page = 1
+              while (true) {
+                const { data } = await github.rest.repos.listReleases({
+                  owner,
+                  repo,
+                  per_page,
+                  page,
+                })
+                if (data.length === 0) break
+                releases.push(...data)
+                if (data.length < per_page) break
+                page++
+              }
+              return releases
+            }
+
+            async function deleteRelease(release) {
+              console.log(`Deleting release ${release.tag_name} (${release.id})`)
+              await github.rest.repos.deleteRelease({
+                owner,
+                repo,
+                release_id: release.id,
+              })
+            }
+
+            async function run() {
+              console.log(`Fetching all releases for ${owner}/${repo}`)
+              const releases = await listReleases()
+
+              // Filter out draft and prerelease releases
+              const validReleases = releases.filter(release => !release.draft && !release.prerelease);
+
+              if (validReleases.length > max_releases_to_keep) {
+                console.log(`Found ${validReleases.length} valid releases, deleting all but the ${max_releases_to_keep} most recent`)
+                const releasesToDelete = validReleases
+                  .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                  .slice(max_releases_to_keep);
+
+                for (const release of releasesToDelete) {
+                  await deleteRelease(release);
+                }
+              } else {
+                console.log(`Found ${validReleases.length} valid releases, nothing to delete`);
+              }
+            }
+
+            await run()
