@@ -1,10 +1,11 @@
-name: Build OpenWrt Distributed (x86_64 only)
+name: Build OpenWrt (x86_64 分布式完整方案)
 
 on:
   repository_dispatch:
   workflow_dispatch:
 
 env:
+  # 主要环境变量，可根据需要自行调整
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
@@ -12,16 +13,20 @@ env:
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   TZ: Asia/Shanghai
+  # 是否在编译完成后上传 bin 目录
   UPLOAD_BIN_DIR: false
+  # 是否在编译完成后上传固件目录
   UPLOAD_FIRMWARE: true
   UPLOAD_COWTRANSFER: false
   UPLOAD_WETRANSFER: false
   UPLOAD_RELEASE: false
-  # 自行设置分布式编译过程的缓存压缩文件名，防止冲突
-  ARTIFACT_NAME: openwrt-build-cache
+  # 分布式编译时使用的临时包名
+  ARTIFACT_NAME: openwrt_build_cache
 
 jobs:
-  # 第一步：准备环境并执行初始配置
+  #######################################################################
+  # 第一步：准备环境并执行初始配置（包含依赖安装、源码克隆、feeds 更新等）
+  #######################################################################
   prepare-env:
     runs-on: ubuntu-22.04
     outputs:
@@ -32,11 +37,11 @@ jobs:
 
       - name: Before freeing up disk space
         run: |
-          echo "Before freeing up disk space"
-          echo "=============================================================================="
+          echo "===================="
+          echo "磁盘空间使用情况（清理前）"
           df -hT
-          echo "=============================================================================="
-      
+          echo "===================="
+
       - name: Optimize Disk Space
         uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
         with:
@@ -71,10 +76,10 @@ jobs:
 
       - name: Free up disk space complete
         run: |
-          echo "Free up disk space complete"
-          echo "=============================================================================="
+          echo "===================="
+          echo "磁盘空间使用情况（清理后）"
           df -hT
-          echo "=============================================================================="
+          echo "===================="
 
       - name: Initialization environment
         env:
@@ -82,29 +87,37 @@ jobs:
         run: |
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
-          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools
+            bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+            git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+            mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+            libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+            vim wget xmlto xxd zlib1g-dev python3-setuptools
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
           sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
-          /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
+            /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
           sudo timedatectl set-timezone "$TZ"
           sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
       - name: Clone source code
         run: |
-          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+          git clone --depth=1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
 
       - name: Load custom feeds
         run: |
-          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-          chmod +x $DIY_P1_SH
-          cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P1_SH
+          # 如果存在 feeds.conf.default（FEEDS_CONF），则替换
+          if [ -f "$FEEDS_CONF" ]; then
+            mv "$FEEDS_CONF" openwrt/feeds.conf.default
+          fi
+          # 如果 diy-part1.sh 存在，则赋予可执行权限并执行
+          if [ -f "$DIY_P1_SH" ]; then
+            chmod +x "$DIY_P1_SH"
+            cd openwrt
+            "../$DIY_P1_SH"
+          else
+            echo "Warning: $DIY_P1_SH 未找到，跳过该阶段。"
+          fi
 
       - name: Update feeds
         run: cd openwrt && ./scripts/feeds update -a
@@ -114,29 +127,40 @@ jobs:
 
       - name: Load custom configuration
         run: |
-          [ -e files ] && mv files openwrt/files
-          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-          chmod +x $DIY_P2_SH
-          cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P2_SH
+          # 如果有自定义 files 目录，则移动
+          if [ -d files ]; then
+            mv files openwrt/
+          fi
+          # 如果有自定义 .config，则移动到 OpenWrt 根目录
+          if [ -f "$CONFIG_FILE" ]; then
+            mv "$CONFIG_FILE" openwrt/.config
+          fi
+          # 如果 diy-part2.sh 存在，则执行
+          if [ -f "$DIY_P2_SH" ]; then
+            chmod +x "$DIY_P2_SH"
+            cd openwrt
+            "../$DIY_P2_SH"
+          else
+            echo "Warning: $DIY_P2_SH 未找到，跳过该阶段。"
+          fi
 
       - name: Pre-Download packages
         run: |
           cd openwrt
           make defconfig
-          # 先下载依赖包，这样后续编译时能减少网络依赖
+          # 预下载依赖包
           make download -j8
+          # 清理下载不完全的文件
           find dl -size -1024c -exec ls -l {} \; || true
           find dl -size -1024c -exec rm -f {} \; || true
 
       - name: Prepare artifact
         id: prepare-final
         run: |
-          cd $GITHUB_WORKSPACE
-          # 将 openwrt 目录打包上传给后续的 job 使用
-          # 压缩体积可减少后续传输时间
+          cd "$GITHUB_WORKSPACE"
+          # 压缩整个 openwrt 目录，给下一个编译阶段使用
           zip -r openwrt_env.zip openwrt
-          echo "status=success" >> $GITHUB_OUTPUT
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
       - name: Upload environment artifact
         if: steps.prepare-final.outputs.status == 'success'
@@ -145,7 +169,9 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
           path: openwrt_env.zip
 
-  # 第二步：在新Runner拉取准备好的环境并开始完整编译
+  #######################################################################
+  # 第二步： 读取第一个job上传的环境包，并进行正式编译
+  #######################################################################
   build-firmware:
     needs: prepare-env
     runs-on: ubuntu-22.04
@@ -159,28 +185,41 @@ jobs:
       - name: Unzip environment
         run: |
           unzip -q openwrt_env.zip
-          ls -al
+          ls -al openwrt
 
       - name: Check space usage before build
-        run: df -hT
+        run: |
+          echo "===================="
+          echo "磁盘空间使用情况（编译前）"
+          df -hT
+          echo "===================="
 
-      - name: Compile the firmware
+      - name: Compile firmware for x86_64
         id: compile
         run: |
           cd openwrt
-          echo "Starting x86_64 compile"
-          # 仅保留 x86_64 目标
-          # 若你的配置里已经固定为 x86_64，可不执行此命令
-          [ -f .config ] && sed -i '/^CONFIG_TARGET_/d' .config
-          echo -e "\nCONFIG_TARGET_x86=y\nCONFIG_TARGET_x86_64=y" >> .config
+          echo "开始编译 x86_64 固件..."
+
+          # 可选：在此额外锁定 x86_64 配置，如果你的 .config 已经固定此目标，可不执行
+          if [ -f .config ]; then
+            sed -i '/^CONFIG_TARGET_/d' .config
+          fi
+          echo "CONFIG_TARGET_x86=y" >> .config
+          echo "CONFIG_TARGET_x86_64=y" >> .config
+
           make defconfig
-          # 并行编译，若依旧超时可改小并行度
-          make -j$(nproc) || make -j1 || make -j1 V=s
-          echo "status=success" >> $GITHUB_OUTPUT
+          # 若 -j$(nproc) 过大导致超时，可适当调小
+          make -j"$(nproc)" || make -j1 || make -j1 V=s
+
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
       - name: Check space usage after build
         if: (!cancelled())
-        run: df -hT
+        run: |
+          echo "===================="
+          echo "磁盘空间使用情况（编译后）"
+          df -hT
+          echo "===================="
 
       - name: Upload bin directory
         uses: actions/upload-artifact@v4
@@ -194,9 +233,10 @@ jobs:
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
         run: |
           cd openwrt/bin/targets/*/*
+          # 移除不必要的 packages 目录，仅保留固件
           rm -rf packages
-          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-          echo "status=success" >> $GITHUB_OUTPUT
+          echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
