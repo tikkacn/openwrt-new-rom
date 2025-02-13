@@ -160,6 +160,8 @@ jobs:
 
       - name: Unzip environment
         run: |
+          pwd
+          ls -al
           unzip -q openwrt_env.zip
           ls -al /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
 
