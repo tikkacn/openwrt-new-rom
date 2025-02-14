@@ -218,12 +218,24 @@ jobs:
       run: |
         cd ${{ env.OPENWRT_ROOT }}
         # 处理递归依赖问题
-        echo "CONFIG_PACKAGE_baresip-mod-avcodec=n" >> .config
-        echo "CONFIG_PACKAGE_baresip-mod-avformat=n" >> .config
+        echo "CONFIG_PACKAGE_baresip-mod-avcodec=n" > .config.new
+        echo "CONFIG_PACKAGE_baresip-mod-avformat=n" >> .config.new
+        
+        # 如果存在自定义配置文件，合并它
+        if [ -e $CONFIG_FILE ]; then
+          cat $CONFIG_FILE >> .config.new
+        fi
+        
+        # 使用新的配置文件
+        mv .config.new .config
+        
+        # 应用配置
         make defconfig
-        # 继续其他配置
+        
+        # 处理其他文件
         [ -e files ] && mv files files/
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE .config
+        
+        # 执行自定义脚本
         chmod +x $DIY_P2_SH
         $GITHUB_WORKSPACE/$DIY_P2_SH
         
