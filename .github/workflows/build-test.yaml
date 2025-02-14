@@ -28,8 +28,9 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
-  WORKDIR: ${{ github.workspace }}
-  OPENWRT_ROOT: ${{ github.workspace }}/openwrt
+  # 修改为使用大容量空间
+  WORKDIR: /home/runner/work/openwrt-new-rom/openwrt-new-rom
+  OPENWRT_ROOT: /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
 
 jobs:
   check-updates-and-status:
@@ -256,10 +257,15 @@ jobs:
       id: compile
       run: |
         cd ${{ env.OPENWRT_ROOT }}
+        # 检查并显示工作空间
+        echo "Working directory space:"
+        df -h ${{ env.WORKDIR }}
+        
+        # 确保使用大容量空间
+        export TMPDIR=${{ env.WORKDIR }}/tmp
+        mkdir -p $TMPDIR
+        
         echo -e "$(nproc) thread compile"
-        # 确保编译环境
-        mkdir -p staging_dir/host/bin
-        export PATH="${{ env.OPENWRT_ROOT }}/staging_dir/host/bin:$PATH"
         # 先编译 gn，因为它是主机工具
         make package/feeds/helloworld/gn/host/compile -j1 V=s || true
         # 主编译过程
