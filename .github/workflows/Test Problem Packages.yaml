@@ -38,24 +38,14 @@ jobs:
     - name: Setup feeds
       run: |
         cd ${{ env.OPENWRT_ROOT }}
-        # 添加 helloworld feed
         echo "src-git helloworld https://github.com/fw876/helloworld" >> feeds.conf.default
         cat feeds.conf.default
-        
-        # 更新和安装 feeds
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        
-        # 验证包是否存在
-        echo "Checking feeds..."
-        ls -la feeds/helloworld/
-        echo "Checking package directories..."
-        ls -la package/feeds/
 
     - name: Prepare compilation
       run: |
         cd ${{ env.OPENWRT_ROOT }}
-        # 确保配置文件包含必要的包
         cat >> .config <<EOF
         CONFIG_PACKAGE_simple-obfs=y
         CONFIG_PACKAGE_pcre=y
@@ -63,24 +53,31 @@ jobs:
         EOF
         make defconfig
 
+    - name: Build toolchain
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        echo "Building toolchain..."
+        make toolchain/install -j$(nproc) V=s
+
     - name: Test problem packages
       run: |
         cd ${{ env.OPENWRT_ROOT }}
+        mkdir -p logs
         
         echo "Testing simple-obfs..."
-        make package/feeds/helloworld/simple-obfs/compile V=99 || {
+        make package/feeds/helloworld/simple-obfs/compile V=s || {
           echo "simple-obfs failed"
           find logs/ -type f -exec cat {} \;
         }
         
         echo "Testing pcre..."
-        make package/libs/pcre/compile V=99 || {
+        make package/libs/pcre/compile V=s || {
           echo "pcre failed"
           find logs/ -type f -exec cat {} \;
         }
         
         echo "Testing gn..."
-        make package/feeds/helloworld/gn/host/compile V=99 || {
+        make package/feeds/helloworld/gn/host/compile V=s || {
           echo "gn failed"
           find logs/ -type f -exec cat {} \;
         }
