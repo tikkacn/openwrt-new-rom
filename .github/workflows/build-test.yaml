@@ -6,11 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       manual_start_stage:
-        description: 'Manually start from stage (leave empty for auto-detect)'
-        required: false
+        description: 'Start from stage (1-4)'
+        required: true
+        default: '1'
         type: choice
         options:
-          - ''
           - '1'
           - '2'
           - '3'
@@ -43,6 +43,14 @@ jobs:
     - name: Check for updates
       id: check
       run: |
+        # 如果是手动触发，直接返回 true
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "has_updates=true" >> $GITHUB_OUTPUT
+          echo "Manual trigger, will proceed with build"
+          exit 0
+        fi
+
+        # 自动触发时检查更新
         git clone --depth=1 ${{ env.REPO_URL }} temp_dir
         cd temp_dir
         LATEST_HASH=$(git rev-parse HEAD)
@@ -59,16 +67,14 @@ jobs:
           echo "No updates found, skipping build"
         fi
 
-    - name: Check previous build status
+    - name: Set start stage
       id: check-status
       run: |
-        if [ ! -z "${{ github.event.inputs.manual_start_stage }}" ]; then
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           echo "start_stage=${{ github.event.inputs.manual_start_stage }}" >> $GITHUB_OUTPUT
-          exit 0
+        else
+          echo "start_stage=1" >> $GITHUB_OUTPUT
         fi
-        
-        FAILED_STAGE=$(curl -s "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" | jq -r '.jobs[] | select(.conclusion == "failure") | .name' | grep -oE '[0-9]+' || echo "1")
-        echo "start_stage=${FAILED_STAGE:-1}" >> $GITHUB_OUTPUT
 
   stage1-prepare:
     needs: check-updates-and-status
@@ -110,7 +116,9 @@ jobs:
 
   stage2-feeds:
     needs: [check-updates-and-status, stage1-prepare]
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '2'
+    if: |
+      needs.check-updates-and-status.outputs.has_updates == 'true' && 
+      (needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '1')
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
@@ -159,7 +167,9 @@ jobs:
 
   stage3-compile:
     needs: [check-updates-and-status, stage2-feeds]
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '3'
+    if: |
+      needs.check-updates-and-status.outputs.has_updates == 'true' && 
+      (needs.check-updates-and-status.outputs.start_stage == '3' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '1')
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
@@ -239,7 +249,9 @@ jobs:
 
   stage4-upload:
     needs: [check-updates-and-status, stage3-compile]
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '4'
+    if: |
+      needs.check-updates-and-status.outputs.has_updates == 'true' && 
+      (needs.check-updates-and-status.outputs.start_stage == '4' || needs.check-updates-and-status.outputs.start_stage == '3' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '1')
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
