@@ -55,12 +55,9 @@ jobs:
     - name: Update and install feeds
       run: |
         cd ${{ env.OPENWRT_ROOT }}
-        # 检查是否已存在 helloworld feed
         if ! grep -q "src-git helloworld" feeds.conf.default; then
           echo "src-git helloworld https://github.com/fw876/helloworld" >> feeds.conf.default
         fi
-        echo "Current feeds configuration:"
-        cat feeds.conf.default
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
@@ -73,6 +70,14 @@ jobs:
         CONFIG_PACKAGE_gn=y
         EOF
         make defconfig
+
+    - name: Build toolchain
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        echo "Building toolchain first..."
+        make toolchain/compile -j$(nproc) V=s
+        echo "Toolchain build completed"
+        ls -la staging_dir/toolchain*
 
     - name: Test packages
       id: test-compile
