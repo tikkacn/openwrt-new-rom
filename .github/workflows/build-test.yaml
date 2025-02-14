@@ -1,38 +1,51 @@
-name: Build X86_64 OpenWrt (分步式)
+name: Build OpenWrt (x86_64 分布式完整方案)
 
 on:
   repository_dispatch:
   workflow_dispatch:
 
 env:
+  # 主要环境变量，可根据需要自行调整
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
+  TZ: Asia/Shanghai
+  # 是否在编译完成后上传 bin 目录
   UPLOAD_BIN_DIR: false
+  # 是否在编译完成后上传固件目录
   UPLOAD_FIRMWARE: true
   UPLOAD_COWTRANSFER: false
   UPLOAD_WETRANSFER: false
-  UPLOAD_RELEASE: false
-  TZ: Asia/Shanghai
+  UPLOAD_RELEASE: true  # 启用自动发布 Release
+  # 分布式编译时使用的临时包名
+  ARTIFACT_NAME: openwrt_build_cache
+  # 缓存 Key
+  CACHE_KEY: openwrt-x86_64-toolchain
 
 jobs:
+  #######################################################################
+  # 第一步：准备环境并构建编译工具链
+  #######################################################################
   prepare-env:
     runs-on: ubuntu-22.04
     outputs:
-      openwrt_dir: ${{ steps.set_env.outputs.openwrt_dir }}
+      build-status: ${{ steps.prepare-final.outputs.status }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
       - name: Before freeing up disk space
         run: |
-          echo "Before freeing up disk space"
-          echo "=============================================================================="
+          echo "===================="
+          echo "磁盘空间使用情况（清理前）"
           df -hT
-          echo "=============================================================================="
+          echo "===================="
 
-      - name: "Optimize Disk Space"
-        uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
+      - name: Optimize Disk Space
+        uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
         with:
           operate_sudo: "True"
           general_include: ".+"
@@ -41,7 +54,7 @@ jobs:
             ^G\+\+$
             Clang
             LLVM
-          docker_include: ".+"
+          docker_include: "True"
           docker_prune: "True"
           docker_clean: "True"
           apt_prune: "True"
@@ -65,13 +78,10 @@ jobs:
 
       - name: Free up disk space complete
         run: |
-          echo "Free up disk space complete"
-          echo "=============================================================================="
+          echo "===================="
+          echo "磁盘空间使用情况（清理后）"
           df -hT
-          echo "=============================================================================="
-
-      - name: Checkout
-        uses: actions/checkout@main
+          echo "===================="
 
       - name: Initialization environment
         env:
@@ -79,254 +89,251 @@ jobs:
         run: |
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
-          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools gcc-11 g++-11  # 添加 gcc-11 和 g++-11
+            bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+            git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+            mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+            libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+            vim wget xmlto xxd zlib1g-dev python3-setuptools zip  # 添加 zip
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
           sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
-          /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
+            /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
           sudo timedatectl set-timezone "$TZ"
           sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
       - name: Clone source code
-        working-directory: ./
         run: |
-          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+          git clone --depth=1 "$REPO_URL" -b "$REPO_BRANCH" /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
 
       - name: Load custom feeds
         run: |
-          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-          chmod +x $DIY_P1_SH
-          cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P1_SH
+          [ -f "$FEEDS_CONF" ] && mv "$FEEDS_CONF" /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/feeds.conf.default
+          [ -f "$DIY_P1_SH" ] && chmod +x "$DIY_P1_SH" && cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt && "../$DIY_P1_SH" || echo "Warning: $DIY_P1_SH not found, skipping."
 
       - name: Update feeds
-        run: cd openwrt && ./scripts/feeds update -a
+        run: cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt && ./scripts/feeds update -a
 
       - name: Install feeds
-        run: cd openwrt && ./scripts/feeds install -a
+        run: cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt && ./scripts/feeds install -a
 
       - name: Load custom configuration
         run: |
-          [ -e files ] && mv files openwrt/files
-          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-          chmod +x $DIY_P2_SH
-          cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P2_SH
+          [ -d files ] && mv files /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/
+          [ -f "$CONFIG_FILE" ] && mv "$CONFIG_FILE" /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/.config
+          [ -f "$DIY_P2_SH" ] && chmod +x "$DIY_P2_SH" && cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt && "../$DIY_P2_SH" || echo "Warning: $DIY_P2_SH not found, skipping."
 
-      - name: Install additional dependencies
+      - name: Pre-Download packages
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libtool automake autoconf  # 添加编译软件包所需的依赖
-
-      - name: Set environment variables
-        id: set_env
-        run: |
-          echo "openwrt_dir=$(pwd)/openwrt" >> $GITHUB_OUTPUT
-
-      - name: Prepare artifact
-        run: |
-          zip -r openwrt_env.zip openwrt feeds.conf.default .config $DIY_P1_SH $DIY_P2_SH
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: openwrt_env
-          path: openwrt_env.zip
-
-  build-packages:
-    needs: prepare-env
-    runs-on: ubuntu-22.04
-    env:
-      OPENWRT_DIR: ${{ needs.prepare-env.outputs.openwrt_dir }}
-    steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: openwrt_env
-          path: .
-
-      - name: Unzip artifact
-        run: |
-          unzip -q openwrt_env.zip
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
-          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools gcc-11 g++-11  # 添加 gcc-11 和 g++-11
-          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
-          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
-
-      - name: Set file permissions
-        run: |
-          sudo chown $USER:$GROUPS $GITHUB_WORKSPACE -R
-
-      - name: Download package
-        id: package
-        run: |
-          cd $OPENWRT_DIR
+          cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
           make defconfig
           make download -j8
-          find dl -size -1024c -exec ls -l {} \;
-          find dl -size -1024c -exec rm -f {} \;
+          find dl -size -1024c -exec ls -l {} \; || true
+          find dl -size -1024c -exec rm -f {} \; || true
 
-      - name: Compile packages
+      - name: Prepare artifact
+        id: prepare-final
         run: |
-          cd $OPENWRT_DIR
-          make package/compile -j$(nproc)
+          cd "$GITHUB_WORKSPACE"
+          zip -r openwrt_env.zip /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt  # 修改这里
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare package artifacts
-        run: |
-          cd $OPENWRT_DIR/bin/packages
-          mkdir -p ipk
-          find . -name "*.ipk" -print0 | xargs -0 mv -t ipk
-          tar -czvf packages.tar.gz ipk
-
-      - name: Upload package artifacts
+      - name: Upload environment artifact
+        if: steps.prepare-final.outputs.status == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt_packages
-          path: ${{ env.OPENWRT_DIR }}/bin/packages/packages.tar.gz
+          name: ${{ env.ARTIFACT_NAME }}
+          path: openwrt_env.zip
 
+  #######################################################################
+  # 第二步： 读取第一个job上传的环境包，并进行正式编译
+  #######################################################################
   build-firmware:
-    needs: [prepare-env, build-packages]
+    needs: prepare-env
     runs-on: ubuntu-22.04
-    env:
-      OPENWRT_DIR: ${{ needs.prepare-env.outputs.openwrt_dir }}
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: openwrt_env
+          name: ${{ env.ARTIFACT_NAME }}
           path: .
 
-      - name: Unzip artifact
+      - name: Unzip environment
         run: |
-          unzip -q openwrt_env.zip
+          pwd
+          ls -al
+          unzip -q openwrt_env.zip  # 修改这里
+          ls -al /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
 
-      - name: Install dependencies
+      - name: Check space usage before build
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
-          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools gcc-11 g++-11  # 添加 gcc-11 和 g++-11
+          echo "===================="
+          echo "磁盘空间使用情况（编译前）"
+          df -hT
+          echo "===================="
+
+      - name: Install gcc-11 and set alternatives
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --reinstall gcc-11 g++-11
+          sudo apt-get install -y m4 texinfo
+          sudo apt-get install --only-upgrade autoconf automake
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
           sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
+          sudo rm -rf /var/log/*
+          sudo apt-get clean
 
-      - name: Set file permissions
+      - name: Verify gcc version
+        run: gcc --version
+
+      - name: Find cc1
         run: |
-          sudo chown $USER:$GROUPS $GITHUB_WORKSPACE -R
+          sudo find / -name cc1
 
-      - name: Download package artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: openwrt_packages
-          path: packages
+      - name: Check PATH
+        run: echo $PATH
 
-      - name: Install packages
+      - name: Check cc1 permissions
         run: |
-          cd packages
-          tar -xzvf packages.tar.gz
-          cd ipk
-          opkg update
-          opkg install *.ipk
+          CC1_PATH=$(find / -name cc1 | head -n 1)
+          if [ -n "$CC1_PATH" ]; then
+            ls -l "$CC1_PATH"
+          else
+            echo "cc1 not found"
+          fi
 
-      - name: Compile the firmware
+      - name: Clean staging and build directories
+        run: |
+          cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
+          rm -rf staging_dir
+          rm -rf build_dir
+          rm -rf /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/build_dir/host/gmp-6.3.0
+          make clean
+          make dirclean
+
+      - name: Compile firmware for x86_64
         id: compile
+        env:
+          CC: /usr/bin/gcc-11
+          CXX: /usr/bin/g++-11
+          TMPDIR: /tmp
         run: |
-          cd $OPENWRT_DIR
-          echo -e "$(nproc) thread compile"
-          export CC=/usr/bin/gcc-11
-          export CXX=/usr/bin/g++-11
-          make -j$(nproc) || make -j1 || make -j1 V=s
-          echo "status=success" >> $GITHUB_OUTPUT
-          grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-          [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+          cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt
+          echo "开始编译 x86_64 固件..."
 
-      - name: Check space usage
-        if: (!cancelled())
-        run: df -hT
+          # 强制指定 x86_64 架构
+          sed -i '/^CONFIG_TARGET_/d' .config
+          echo "CONFIG_TARGET_x86=y" >> .config
+          echo "CONFIG_TARGET_x86_64=y" >> .config
 
-      - name: Organize files
+          export CC="/usr/bin/gcc-11"
+          export CXX="/usr/bin/g++-11"
+          export TMPDIR=/tmp
+
+          make defconfig
+          # 使用 -j1 V=s 参数，方便查看详细报错信息
+          make -j1 V=s
+
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Organize firmware
         id: organize
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled() && steps.compile.outputs.status == 'success'
         run: |
-          cd $OPENWRT_DIR/bin/targets/*/*
+          cd /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/bin/targets/*/*
           rm -rf packages
-          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-          echo "status=success" >> $GITHUB_OUTPUT
+          echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
-      - name: Upload firmware directory
-        uses: actions/upload-artifact@v4
-        if: steps.organize.outputs.status == 'success' && !cancelled()
-        with:
-          name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-          path: ${{ env.FIRMWARE }}
+      - name: Get current date and time
+        if: steps.compile.outputs.status == 'success'
+        id: get_date
+        run: echo "RELEASE_DATE=$(date '+%Y%m%d-%H%M')" >> $GITHUB_ENV
 
-      - name: Upload firmware to cowtransfer
-        id: cowtransfer
-        if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
-        run: |
-          curl -fsSL git.io/file-transfer | sh
-          ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
-          echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
-          echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
-
-      - name: Upload firmware to WeTransfer
-        id: wetransfer
-        if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-        run: |
-          curl -fsSL git.io/file-transfer | sh
-          ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
-          echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
-          echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
-
-      - name: Generate release tag
-        id: tag
-        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-        run: |
-          echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-          touch release.txt
-          [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-          [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
-          echo "status=success" >> $GITHUB_OUTPUT
-
-      - name: Upload firmware to release
-        uses: softprops/action-gh-release@v1
-        if: steps.tag.outputs.status == 'success' && !cancelled()
+      - name: Create Release
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        id: create_release
+        uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.tag.outputs.release_tag }}
-          body_path: release.txt
-          files: ${{ env.FIRMWARE }}/*
+          tag_name: Openwrt-${{ env.RELEASE_DATE }}
+          release_name: Openwrt-${{ env.RELEASE_DATE }}
+          body: |
+            构建日期: ${{ env.RELEASE_DATE }}
+            构建者: ${{ github.actor }}
+          draft: false
+          prerelease: false
 
-      - name: Delete workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          retain_days: 1
-          keep_minimum_runs: 3
-
-      - name: Remove old Releases
-        uses: dev-drprasad/delete-older-releases@v0.1.0
-        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-        with:
-          keep_latest: 3
-          delete_tags: true
+      - name: Upload Release Asset
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ env.FIRMWARE }}
+          asset_name: openwrt-firmware.bin
+          asset_content_type: application/octet-stream
+
+      - name: Delete Old Releases
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        uses: actions/github-script@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          script: |
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const per_page = 100
+            const max_releases_to_keep = 3
+
+            async function listReleases() {
+              const releases = []
+              let page = 1
+              while (true) {
+                const { data } = await github.rest.repos.listReleases({
+                  owner,
+                  repo,
+                  per_page,
+                  page,
+                })
+                if (data.length === 0) break
+                releases.push(...data)
+                if (data.length < per_page) break
+                page++
+              }
+              return releases
+            }
+
+            async function deleteRelease(release) {
+              console.log(`Deleting release ${release.tag_name} (${release.id})`)
+              await github.rest.repos.deleteRelease({
+                owner,
+                repo,
+                release_id: release.id,
+              })
+            }
+
+            async function run() {
+              console.log(`Fetching all releases for ${owner}/${repo}`)
+              const releases = await listReleases()
+
+              // Filter out draft and prerelease releases
+              const validReleases = releases.filter(release => !release.draft && !release.prerelease);
+
+              if (validReleases.length > max_releases_to_keep) {
+                console.log(`Found ${validReleases.length} valid releases, deleting all but the ${max_releases_to_keep} most recent`)
+                const releasesToDelete = validReleases
+                  .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                  .slice(max_releases_to_keep);
+
+                for (const release of releasesToDelete) {
+                  await deleteRelease(release);
+                }
+              } else {
+                console.log(`Found ${validReleases.length} valid releases, nothing to delete`);
+              }
+            }
+
+            await run()
