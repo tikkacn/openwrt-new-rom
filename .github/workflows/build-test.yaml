@@ -3,6 +3,17 @@ name: Build X86_64 OpenWrt（分步式）
 on:
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      start_stage:
+        description: 'Start from stage (1-4)'
+        required: true
+        default: '3'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
@@ -20,6 +31,7 @@ env:
 
 jobs:
   stage1-prepare:
+    if: github.event.inputs.start_stage == '1' || github.event.inputs.start_stage == null
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
@@ -35,7 +47,6 @@ jobs:
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         
-        # 验证工作目录
         echo "Working directory space:"
         df -h ${{ env.WORKDIR }}
 
@@ -57,6 +68,7 @@ jobs:
           openwrt-source-
 
   stage2-feeds:
+    if: github.event.inputs.start_stage <= '2' || github.event.inputs.start_stage == null
     needs: stage1-prepare
     runs-on: ubuntu-22.04
     steps:
@@ -74,7 +86,6 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        # 检查目录是否存在
         if [ ! -d "${{ env.OPENWRT_ROOT }}" ]; then
           echo "Error: OpenWrt directory not found at ${{ env.OPENWRT_ROOT }}"
           echo "Current directory structure:"
@@ -82,7 +93,6 @@ jobs:
           exit 1
         fi
         
-        # 检查并复制 feeds 配置
         if [ -f "$FEEDS_CONF" ]; then
           echo "Copying custom feeds configuration..."
           echo "Source: $FEEDS_CONF"
@@ -96,7 +106,6 @@ jobs:
           echo "No custom feeds configuration found, using default"
         fi
         
-        # 执行自定义脚本
         if [ -f "$DIY_P1_SH" ]; then
           echo "Executing custom script..."
           chmod +x "$DIY_P1_SH"
@@ -117,6 +126,7 @@ jobs:
         key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
 
   stage3-compile:
+    if: github.event.inputs.start_stage <= '3' || github.event.inputs.start_stage == null
     needs: stage2-feeds
     runs-on: ubuntu-22.04
     steps:
@@ -128,6 +138,17 @@ jobs:
       with:
         path: ${{ env.OPENWRT_ROOT }}
         key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
+
+    - name: Install additional dependencies
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+        gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
+        file wget python3 python3-pip python3-ply python3-setuptools
+        # 特别为 golang 和 gn 添加依赖
+        sudo -E apt-get -qq install golang-go ninja-build
+        # 为 pcre 添加依赖
+        sudo -E apt-get -qq install libpcre3-dev
 
     - name: Load custom configuration
       run: |
@@ -151,6 +172,11 @@ jobs:
       run: |
         cd ${{ env.OPENWRT_ROOT }}
         echo -e "$(nproc) thread compile"
+        # 先单独编译出错的包
+        make package/feeds/helloworld/gn/host/compile -j1 V=s || true
+        make package/feeds/packages/golang/host/compile -j1 V=s || true
+        make package/libs/pcre/compile -j1 V=s || true
+        # 然后继续完整编译
         make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
@@ -179,6 +205,7 @@ jobs:
         key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
 
   stage4-upload:
+    if: github.event.inputs.start_stage <= '4' || github.event.inputs.start_stage == null
     needs: stage3-compile
     runs-on: ubuntu-22.04
     steps:
