@@ -1,4 +1,4 @@
-name: Build X86_64 OpenWrt (分布式)
+name: Build X86_64 OpenWrt (Multi-Job)
 
 on:
   repository_dispatch:
@@ -19,6 +19,7 @@ env:
   TZ: Asia/Shanghai
 
 jobs:
+  # 1. 准备环境
   prepare-env:
     runs-on: ubuntu-22.04
     outputs:
@@ -31,8 +32,8 @@ jobs:
           df -hT
           echo "=============================================================================="
 
-      - name: "Optimize Disk Space"
-        uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
+      - name: Optimize Disk Space
+        uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
         with:
           operate_sudo: "True"
           general_include: ".+"
@@ -84,7 +85,7 @@ jobs:
           libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
           mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
           libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools gcc-11 g++-11
+          vim wget xmlto xxd zlib1g-dev python3-setuptools
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
           sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
@@ -93,7 +94,6 @@ jobs:
           sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
       - name: Clone source code
-        working-directory: ./
         run: |
           git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
 
@@ -118,42 +118,37 @@ jobs:
           cd openwrt
           $GITHUB_WORKSPACE/$DIY_P2_SH
 
-      - name: Install additional dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libtool automake autoconf  # 添加编译软件包所需的依赖
-          sudo apt-get install -y lua-mosquitto  # 安装 lua-mosquitto 依赖
-
       - name: Set environment variables
         id: set_env
         run: |
           echo "openwrt_dir=$(pwd)/openwrt" >> $GITHUB_OUTPUT
 
-      - name: Prepare artifact
+      - name: Prepare artifacts
         run: |
-          zip -r openwrt_env.zip openwrt feeds.conf.default .config $DIY_P1_SH $DIY_P2_SH
+          zip -r openwrt_src_env.zip openwrt feeds.conf.default .config $DIY_P1_SH $DIY_P2_SH
 
-      - name: Upload artifact
+      - name: Upload source artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt_env
-          path: openwrt_env.zip
+          name: openwrt_src_env
+          path: openwrt_src_env.zip
 
+  # 2. 下载项目并编译下载包(package)
   build-packages:
     needs: prepare-env
     runs-on: ubuntu-22.04
     env:
       OPENWRT_DIR: ${{ needs.prepare-env.outputs.openwrt_dir }}
     steps:
-      - name: Download artifact
+      - name: Download source artifacts
         uses: actions/download-artifact@v4
         with:
-          name: openwrt_env
+          name: openwrt_src_env
           path: .
 
-      - name: Unzip artifact
+      - name: Unzip source
         run: |
-          unzip -q openwrt_env.zip
+          unzip -q openwrt_src_env.zip
 
       - name: Install dependencies
         run: |
@@ -164,56 +159,59 @@ jobs:
           libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
           mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
           libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools gcc-11 g++-11
-          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
-          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
+          vim wget xmlto xxd zlib1g-dev python3-setuptools
 
       - name: Set file permissions
         run: |
           sudo chown $USER:$GROUPS $GITHUB_WORKSPACE -R
 
-      - name: Download package
-        id: package
-        working-directory: ${{ env.OPENWRT_DIR }}
+      - name: Download packages
         run: |
+          cd openwrt
           make defconfig
           make download -j8
           find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
 
-      - name: Compile packages
+      - name: Archive Downloaded Packages
         run: |
-          cd $OPENWRT_DIR
-          make package/compile -j$(nproc)
+          cd openwrt
+          tar -czvf dl_packages.tar.gz dl
+          mv dl_packages.tar.gz ..
 
-      - name: Prepare package artifacts
-        run: |
-          cd $OPENWRT_DIR/bin/packages
-          mkdir -p ipk
-          find . -name "*.ipk" -print0 | xargs -0 mv -t ipk
-          tar -czvf packages.tar.gz ipk
-
-      - name: Upload package artifacts
+      - name: Upload downloaded packages
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt_packages
-          path: ${{ env.OPENWRT_DIR }}/bin/packages/packages.tar.gz
+          name: openwrt_downloaded_pkgs
+          path: dl_packages.tar.gz
 
+  # 3. 编译固件
   build-firmware:
     needs: [prepare-env, build-packages]
     runs-on: ubuntu-22.04
     env:
       OPENWRT_DIR: ${{ needs.prepare-env.outputs.openwrt_dir }}
     steps:
-      - name: Download artifact
+      - name: Download source artifacts
         uses: actions/download-artifact@v4
         with:
-          name: openwrt_env
+          name: openwrt_src_env
           path: .
 
-      - name: Unzip artifact
+      - name: Unzip source
         run: |
-          unzip -q openwrt_env.zip
+          unzip -q openwrt_src_env.zip
+
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: openwrt_downloaded_pkgs
+          path: .
+
+      - name: Extract downloaded packages
+        run: |
+          cd openwrt
+          tar -xzvf ../dl_packages.tar.gz
 
       - name: Install dependencies
         run: |
@@ -224,36 +222,17 @@ jobs:
           libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
           mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
           libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools gcc-11 g++-11
-          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
-          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
+          vim wget xmlto xxd zlib1g-dev python3-setuptools
 
       - name: Set file permissions
         run: |
           sudo chown $USER:$GROUPS $GITHUB_WORKSPACE -R
 
-      - name: Download package artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: openwrt_packages
-          path: packages
-
-      - name: Unpack compiled packages
-        run: |
-          cd packages
-          tar -xzvf packages.tar.gz
-
-      # Removed the "opkg update" and "opkg install" steps because they do not apply to building the firmware
-      # in the host environment. Instead, ensure your .config or feeds configuration includes any packages
-      # you want to be part of the final firmware.
-
-      - name: Compile the firmware
+      - name: Compile firmware
         id: compile
         run: |
-          cd $OPENWRT_DIR
+          cd openwrt
           echo -e "$(nproc) thread compile"
-          export CC=/usr/bin/gcc-11
-          export CXX=/usr/bin/g++-11
           make -j$(nproc) || make -j1 || make -j1 V=s
           echo "status=success" >> $GITHUB_OUTPUT
           grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
@@ -264,11 +243,18 @@ jobs:
         if: (!cancelled())
         run: df -hT
 
+      - name: Upload bin directory
+        uses: actions/upload-artifact@v4
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        with:
+          name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: openwrt/bin
+
       - name: Organize files
         id: organize
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled() && steps.compile.outputs.status == 'success'
         run: |
-          cd $OPENWRT_DIR/bin/targets/*/*
+          cd openwrt/bin/targets/*/*
           rm -rf packages
           echo "FIRMWARE=$PWD" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
