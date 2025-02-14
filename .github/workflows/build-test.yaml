@@ -216,12 +216,17 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        [ -e files ] && mv files ${{ env.OPENWRT_ROOT }}/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE ${{ env.OPENWRT_ROOT }}/.config
-        chmod +x $DIY_P2_SH
         cd ${{ env.OPENWRT_ROOT }}
+        # 处理递归依赖问题
+        echo "CONFIG_PACKAGE_baresip-mod-avcodec=n" >> .config
+        echo "CONFIG_PACKAGE_baresip-mod-avformat=n" >> .config
+        make defconfig
+        # 继续其他配置
+        [ -e files ] && mv files files/
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE .config
+        chmod +x $DIY_P2_SH
         $GITHUB_WORKSPACE/$DIY_P2_SH
-
+        
     - name: Download package
       id: package
       run: |
