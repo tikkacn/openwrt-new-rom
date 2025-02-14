@@ -1,4 +1,5 @@
-name: Build X86_64 OpenWrt（分步式）
+# ==== 第1部分开始 ====
+name: Build X86_64 OpenWrt
 
 on:
   schedule:
@@ -6,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       manual_start_stage:
-        description: 'Start from stage (1-4)'
-        required: true
-        default: '1'
+        description: 'Manually start from stage (leave empty for auto-detect)'
+        required: false
         type: choice
         options:
+          - ''
           - '1'
           - '2'
           - '3'
@@ -76,6 +77,9 @@ jobs:
           echo "start_stage=1" >> $GITHUB_OUTPUT
         fi
 
+# ==== 第1部分结束 - 连接第2部分 ====
+# ==== 第2部分开始 - 承接第1部分 ====
+
   stage1-prepare:
     needs: check-updates-and-status
     if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '1'
@@ -133,6 +137,9 @@ jobs:
           openwrt-source-${{ github.run_id }}-
           openwrt-source-
 
+# ==== 第2部分结束 - 连接第3部分 ====
+# ==== 第3部分开始 - 承接第2部分 ====
+
     - name: Load custom feeds
       run: |
         if [ ! -d "${{ env.OPENWRT_ROOT }}" ]; then
@@ -183,6 +190,9 @@ jobs:
         restore-keys: |
           openwrt-feeds-
           openwrt-source-
+
+# ==== 第3部分结束 - 连接第4部分 ====
+# ==== 第4部分开始 - 承接第3部分 ====
 
     - name: Install additional dependencies
       run: |
@@ -246,6 +256,9 @@ jobs:
       with:
         path: ${{ env.OPENWRT_ROOT }}
         key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
+
+# ==== 第4部分结束 - 连接第5部分 ====
+# ==== 第5部分开始 - 承接第4部分 ====
 
   stage4-upload:
     needs: [check-updates-and-status, stage3-compile]
@@ -317,3 +330,5 @@ jobs:
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+# ==== 第5部分结束 - 完整文件结束 ====
