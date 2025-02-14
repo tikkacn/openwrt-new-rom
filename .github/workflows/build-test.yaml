@@ -207,8 +207,14 @@ jobs:
         file wget python3 python3-pip python3-ply python3-setuptools
         # 特别为 golang 和 gn 添加依赖
         sudo -E apt-get -qq install golang-go ninja-build
+        # 确保 ninja 可用
+        sudo ln -sf /usr/bin/ninja /usr/local/bin/ninja
+        sudo ln -sf /usr/bin/ninja /usr/bin/ninja-build
         # 为 pcre 添加依赖
         sudo -E apt-get -qq install libpcre3-dev
+        # 验证 ninja 安装
+        which ninja
+        ninja --version
 
     - name: Load custom configuration
       run: |
@@ -232,6 +238,8 @@ jobs:
       run: |
         cd ${{ env.OPENWRT_ROOT }}
         echo -e "$(nproc) thread compile"
+        # 确保 ninja 在路径中
+        export PATH="/usr/bin:$PATH"
         # 先编译 gn，因为它是主机工具
         make package/feeds/helloworld/gn/host/compile -j1 V=s || true
         # 主编译过程
