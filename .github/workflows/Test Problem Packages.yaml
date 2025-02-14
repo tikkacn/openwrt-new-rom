@@ -29,21 +29,37 @@ jobs:
         sudo -E apt-get -qq install golang-go ninja-build
         sudo -E apt-get -qq install libpcre3-dev libssl-dev libmbedtls-dev
 
-    - name: Clone source code
-      working-directory: ${{ env.WORKDIR }}
-      run: |
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf ${{ env.OPENWRT_ROOT }} openwrt
+    - name: Restore cache
+      id: cache-restore
+      uses: actions/cache/restore@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
+        restore-keys: |
+          openwrt-feeds-
+          openwrt-source-
 
-    - name: Setup feeds
+    - name: Verify workspace
+      run: |
+        echo "Checking workspace..."
+        if [ ! -d "${{ env.OPENWRT_ROOT }}" ]; then
+          echo "Cache restore failed, cloning source..."
+          git clone --depth=1 $REPO_URL -b $REPO_BRANCH ${{ env.OPENWRT_ROOT }}
+        fi
+        cd ${{ env.OPENWRT_ROOT }}
+        echo "Workspace content:"
+        ls -la
+        echo "Toolchain status:"
+        ls -la staging_dir/toolchain* || echo "No toolchain found"
+
+    - name: Update and install feeds
       run: |
         cd ${{ env.OPENWRT_ROOT }}
         echo "src-git helloworld https://github.com/fw876/helloworld" >> feeds.conf.default
-        cat feeds.conf.default
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Prepare compilation
+    - name: Prepare config
       run: |
         cd ${{ env.OPENWRT_ROOT }}
         cat >> .config <<EOF
@@ -53,34 +69,38 @@ jobs:
         EOF
         make defconfig
 
-    - name: Build toolchain
-      run: |
-        cd ${{ env.OPENWRT_ROOT }}
-        echo "Building toolchain..."
-        make toolchain/install -j$(nproc) V=s
-
-    - name: Test problem packages
+    - name: Test packages
+      id: test-compile
       run: |
         cd ${{ env.OPENWRT_ROOT }}
         mkdir -p logs
         
-        echo "Testing simple-obfs..."
-        make package/feeds/helloworld/simple-obfs/compile V=s || {
-          echo "simple-obfs failed"
-          find logs/ -type f -exec cat {} \;
-        }
-        
-        echo "Testing pcre..."
-        make package/libs/pcre/compile V=s || {
-          echo "pcre failed"
-          find logs/ -type f -exec cat {} \;
-        }
-        
-        echo "Testing gn..."
-        make package/feeds/helloworld/gn/host/compile V=s || {
-          echo "gn failed"
-          find logs/ -type f -exec cat {} \;
-        }
+        for pkg in "simple-obfs" "pcre" "gn"; do
+          echo "Testing package: $pkg"
+          case $pkg in
+            "simple-obfs")
+              make package/feeds/helloworld/simple-obfs/compile V=s || {
+                echo "$pkg compilation failed"
+                find logs/ -type f -exec cat {} \;
+                exit 1
+              }
+              ;;
+            "pcre")
+              make package/libs/pcre/compile V=s || {
+                echo "$pkg compilation failed"
+                find logs/ -type f -exec cat {} \;
+                exit 1
+              }
+              ;;
+            "gn")
+              make package/feeds/helloworld/gn/host/compile V=s || {
+                echo "$pkg compilation failed"
+                find logs/ -type f -exec cat {} \;
+                exit 1
+              }
+              ;;
+          esac
+        done
 
     - name: Upload logs
       uses: actions/upload-artifact@v4
