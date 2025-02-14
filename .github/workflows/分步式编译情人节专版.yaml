@@ -1,0 +1,318 @@
+name: 分步式编译情人节专版
+
+on:
+  schedule:
+    - cron: '0 16 * * *'  # UTC 16:00 = 北京时间 0:00
+  workflow_dispatch:
+    inputs:
+      manual_start_stage:
+        description: 'Manually start from stage (leave empty for auto-detect)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: false
+  TZ: Asia/Shanghai
+  WORKDIR: ${{ github.workspace }}
+  OPENWRT_ROOT: ${{ github.workspace }}/openwrt
+
+jobs:
+  check-updates-and-status:
+    runs-on: ubuntu-22.04
+    outputs:
+      has_updates: ${{ steps.check.outputs.has_updates }}
+      start_stage: ${{ steps.check-status.outputs.start_stage }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@main
+
+    - name: Check for updates
+      id: check
+      run: |
+        # 检查源码更新
+        git clone --depth=1 ${{ env.REPO_URL }} temp_dir
+        cd temp_dir
+        LATEST_HASH=$(git rev-parse HEAD)
+        LAST_HASH=$(curl -s "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$(basename ${{ github.workflow }})/runs?status=completed&conclusion=success" | jq -r '.workflow_runs[0].head_sha')
+        
+        # 检查feeds更新
+        ./scripts/feeds update -a
+        FEEDS_UPDATED=$(git status -s feeds.conf.default package/feeds | wc -l)
+        
+        if [ "$LATEST_HASH" != "$LAST_HASH" ] || [ "$FEEDS_UPDATED" -gt 0 ]; then
+          echo "has_updates=true" >> $GITHUB_OUTPUT
+          echo "Found updates, will proceed with build"
+        else
+          echo "has_updates=false" >> $GITHUB_OUTPUT
+          echo "No updates found, skipping build"
+        fi
+
+    - name: Check previous build status
+      id: check-status
+      run: |
+        # 检查手动指定的起始阶段
+        if [ ! -z "${{ github.event.inputs.manual_start_stage }}" ]; then
+          echo "start_stage=${{ github.event.inputs.manual_start_stage }}" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # 获取上次失败的阶段，如果没有失败则从头开始
+        FAILED_STAGE=$(curl -s "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" | jq -r '.jobs[] | select(.conclusion == "failure") | .name' | grep -oE '[0-9]+' || echo "1")
+        echo "start_stage=${FAILED_STAGE:-1}" >> $GITHUB_OUTPUT
+
+  stage1-prepare:
+    needs: check-updates-and-status
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '1'
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@main
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo timedatectl set-timezone "$TZ"
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2204)
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        
+        echo "Working directory space:"
+        df -h ${{ env.WORKDIR }}
+
+    - name: Clone source code
+      working-directory: ${{ env.WORKDIR }}
+      run: |
+        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf ${{ env.OPENWRT_ROOT }} openwrt
+        echo "Source code cloned to ${{ env.OPENWRT_ROOT }}"
+        ls -la ${{ env.OPENWRT_ROOT }}
+
+    - name: Cache OpenWrt source code
+      uses: actions/cache/save@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-source-${{ github.run_id }}-${{ github.sha }}
+        restore-keys: |
+          openwrt-source-${{ github.run_id }}-
+          openwrt-source-
+
+  stage2-feeds:
+    needs: [check-updates-and-status, stage1-prepare]
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '2'
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@main
+
+    - name: Restore OpenWrt source code
+      uses: actions/cache/restore@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-source-${{ github.run_id }}-${{ github.sha }}
+        restore-keys: |
+          openwrt-source-${{ github.run_id }}-
+          openwrt-source-
+
+    - name: Load custom feeds
+      run: |
+        if [ ! -d "${{ env.OPENWRT_ROOT }}" ]; then
+          echo "Error: OpenWrt directory not found at ${{ env.OPENWRT_ROOT }}"
+          echo "Current directory structure:"
+          ls -la ${{ github.workspace }}
+          exit 1
+        fi
+        
+        if [ -f "$FEEDS_CONF" ]; then
+          echo "Copying custom feeds configuration..."
+          echo "Source: $FEEDS_CONF"
+          echo "Destination: ${{ env.OPENWRT_ROOT }}/feeds.conf.default"
+          cp -f "$FEEDS_CONF" "${{ env.OPENWRT_ROOT }}/feeds.conf.default"
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to copy feeds configuration"
+            exit 1
+          fi
+        else
+          echo "No custom feeds configuration found, using default"
+        fi
+        
+        if [ -f "$DIY_P1_SH" ]; then
+          echo "Executing custom script..."
+          chmod +x "$DIY_P1_SH"
+          cd "${{ env.OPENWRT_ROOT }}"
+          "$GITHUB_WORKSPACE/$DIY_P1_SH"
+        fi
+
+    - name: Update and Install feeds
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Cache OpenWrt feeds
+      uses: actions/cache/save@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
+
+  stage3-compile:
+    needs: [check-updates-and-status, stage2-feeds]
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '3'
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@main
+
+    - name: Restore OpenWrt feeds
+      uses: actions/cache/restore@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
+        restore-keys: |
+          openwrt-feeds-
+          openwrt-source-
+
+    - name: Install additional dependencies
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+        gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
+        file wget python3 python3-pip python3-ply python3-setuptools
+        sudo -E apt-get -qq install golang-go ninja-build
+        sudo -E apt-get -qq install libpcre3-dev
+
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files ${{ env.OPENWRT_ROOT }}/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE ${{ env.OPENWRT_ROOT }}/.config
+        chmod +x $DIY_P2_SH
+        cd ${{ env.OPENWRT_ROOT }}
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Download package
+      id: package
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile firmware
+      id: compile
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        echo -e "$(nproc) thread compile"
+        make package/feeds/helloworld/gn/host/compile -j1 V=s || true
+        make package/feeds/packages/golang/host/compile -j1 V=s || true
+        make package/libs/pcre/compile -j1 V=s || true
+        make -j$(nproc) || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Check compilation status
+      if: steps.compile.outcome != 'success'
+      run: |
+        echo "Compilation failed. Uploading logs for debugging..."
+        mkdir -p /tmp/logs
+        cp ${{ env.OPENWRT_ROOT }}/logs/* /tmp/logs/ || true
+        
+    - name: Upload compilation logs
+      if: steps.compile.outcome != 'success'
+      uses: actions/upload-artifact@v4
+      with:
+        name: compilation-logs
+        path: /tmp/logs
+
+    - name: Cache firmware
+      if: steps.compile.outcome == 'success'
+      uses: actions/cache/save@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
+
+  stage4-upload:
+    needs: [check-updates-and-status, stage3-compile]
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '4'
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@main
+
+    - name: Restore firmware
+      uses: actions/cache/restore@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@v4
+      if: env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.OPENWRT_ROOT }}/bin
+
+    - name: Organize files
+      id: organize
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@v4
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && steps.organize.outputs.status == 'success'
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v1
+      if: steps.tag.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
+
+    - name: Remove old releases
+      uses: dev-drprasad/delete-older-releases@v0.1.0
+      if: env.UPLOAD_RELEASE == 'true'
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
