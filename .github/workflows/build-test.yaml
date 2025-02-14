@@ -153,7 +153,7 @@ jobs:
 
       - name: Unzip artifact
         run: |
-          unzip -q openwrt_env.zip -d ${GITHUB_WORKSPACE}  # 指定解压目录
+          unzip -q openwrt_env.zip
 
       - name: Install dependencies
         run: |
@@ -164,7 +164,7 @@ jobs:
           libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
           mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
           libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools gcc-11 g++-11  # 添加 gcc-11 和 g++-11
+          vim wget xmlto xxd zlib1g-dev python3-setuptools gcc-11 g++-11
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
           sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
 
@@ -174,7 +174,7 @@ jobs:
 
       - name: Download package
         id: package
-        working-directory: ${{ env.OPENWRT_DIR }}  # 指定工作目录
+        working-directory: ${{ env.OPENWRT_DIR }}
         run: |
           make defconfig
           make download -j8
@@ -224,7 +224,7 @@ jobs:
           libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
           mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
           libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools gcc-11 g++-11  # 添加 gcc-11 和 g++-11
+          vim wget xmlto xxd zlib1g-dev python3-setuptools gcc-11 g++-11
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
           sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
 
@@ -238,13 +238,14 @@ jobs:
           name: openwrt_packages
           path: packages
 
-      - name: Install packages
+      - name: Unpack compiled packages
         run: |
           cd packages
           tar -xzvf packages.tar.gz
-          cd ipk
-          opkg update
-          opkg install *.ipk
+
+      # Removed the "opkg update" and "opkg install" steps because they do not apply to building the firmware
+      # in the host environment. Instead, ensure your .config or feeds configuration includes any packages
+      # you want to be part of the final firmware.
 
       - name: Compile the firmware
         id: compile
