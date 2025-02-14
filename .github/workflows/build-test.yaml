@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       manual_start_stage:
-        description: 'Manually start from stage (leave empty for auto-detect)'
-        required: false
+        description: 'Start from stage (1-4)'
+        required: true
+        default: '3'
         type: choice
         options:
-          - ''
           - '1'
           - '2'
           - '3'
@@ -178,10 +178,8 @@ jobs:
         key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
 
   stage3-compile:
-    needs: [check-updates-and-status, stage2-feeds]
-    if: |
-      needs.check-updates-and-status.outputs.has_updates == 'true' && 
-      (needs.check-updates-and-status.outputs.start_stage == '3' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '1')
+    needs: check-updates-and-status
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '3'
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
