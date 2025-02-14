@@ -15,8 +15,8 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
-  WORKDIR: /workdir
-  OPENWRT_ROOT: /workdir/openwrt
+  WORKDIR: ${{ github.workspace }}
+  OPENWRT_ROOT: ${{ github.workspace }}/openwrt
 
 jobs:
   stage1-prepare:
@@ -25,47 +25,27 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@main
 
-    - name: Check disk space before cleanup
-      run: |
-        echo "Available disk space before cleanup:"
-        df -h
-
-    - name: Space cleanup
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 2048
-        swap-size-mb: 1
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
-
-    - name: Initialize build environment
+    - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo timedatectl set-timezone "$TZ"
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2204)
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         
-        # 创建并设置工作目录
-        sudo mkdir -p ${{ env.WORKDIR }}
-        sudo chown $USER:$GROUPS ${{ env.WORKDIR }}
+        # 验证工作目录
+        echo "Working directory space:"
+        df -h ${{ env.WORKDIR }}
 
-    - name: Clone OpenWrt source code
+    - name: Clone source code
       working-directory: ${{ env.WORKDIR }}
       run: |
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf ${{ env.OPENWRT_ROOT }} $GITHUB_WORKSPACE/openwrt
-        
-        # 验证源码
-        if [ ! -d "${{ env.OPENWRT_ROOT }}" ]; then
-          echo "Error: OpenWrt directory not found"
-          exit 1
-        fi
+        ln -sf ${{ env.OPENWRT_ROOT }} openwrt
+        echo "Source code cloned to ${{ env.OPENWRT_ROOT }}"
+        ls -la ${{ env.OPENWRT_ROOT }}
 
     - name: Cache OpenWrt source code
       uses: actions/cache/save@v3
@@ -76,7 +56,6 @@ jobs:
           openwrt-source-${{ github.run_id }}-
           openwrt-source-
 
-# ==== 第一部分结束，第二部分开始于 stage2-feeds job ====
   stage2-feeds:
     needs: stage1-prepare
     runs-on: ubuntu-22.04
@@ -95,11 +74,12 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        if [ -e $FEEDS_CONF ]; then
-          mv $FEEDS_CONF ${{ env.OPENWRT_ROOT }}/feeds.conf.default
+        if [ -f "$FEEDS_CONF" ]; then
+          echo "Moving custom feeds configuration..."
+          cp $FEEDS_CONF ${{ env.OPENWRT_ROOT }}/feeds.conf.default
         fi
         
-        if [ -f $DIY_P1_SH ]; then
+        if [ -f "$DIY_P1_SH" ]; then
           chmod +x $DIY_P1_SH
           cd ${{ env.OPENWRT_ROOT }}
           $GITHUB_WORKSPACE/$DIY_P1_SH
@@ -130,17 +110,6 @@ jobs:
         path: ${{ env.OPENWRT_ROOT }}
         key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
 
-    - name: Cache compilation tools
-      uses: actions/cache@v3
-      with:
-        path: |
-          ${{ env.OPENWRT_ROOT }}/staging_dir
-          ${{ env.OPENWRT_ROOT }}/build_dir
-          ${{ env.OPENWRT_ROOT }}/dl
-        key: ${{ runner.os }}-openwrt-tools-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-openwrt-tools-
-
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files ${{ env.OPENWRT_ROOT }}/files
@@ -163,7 +132,7 @@ jobs:
       run: |
         cd ${{ env.OPENWRT_ROOT }}
         echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
@@ -190,7 +159,6 @@ jobs:
         path: ${{ env.OPENWRT_ROOT }}
         key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
 
-# ==== 第二部分结束，第三部分开始于 stage4-upload job ====
   stage4-upload:
     needs: stage3-compile
     runs-on: ubuntu-22.04
@@ -204,26 +172,15 @@ jobs:
         path: ${{ env.OPENWRT_ROOT }}
         key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
 
-    - name: Check firmware existence
-      id: check
-      run: |
-        if [ ! -d "${{ env.OPENWRT_ROOT }}/bin" ]; then
-          echo "Error: Firmware directory not found"
-          exit 1
-        fi
-        echo "Firmware directory found"
-        echo "status=success" >> $GITHUB_OUTPUT
-
     - name: Upload bin directory
       uses: actions/upload-artifact@main
-      if: env.UPLOAD_BIN_DIR == 'true' && steps.check.outputs.status == 'success'
+      if: env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.OPENWRT_ROOT }}/bin
 
     - name: Organize files
       id: organize
-      if: steps.check.outputs.status == 'success'
       run: |
         cd ${{ env.OPENWRT_ROOT }}/bin/targets/*/*
         rm -rf packages
@@ -243,8 +200,6 @@ jobs:
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -257,7 +212,7 @@ jobs:
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
-    - name: Delete old workflow runs
+    - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@v2
       with:
         retain_days: 1
@@ -271,11 +226,3 @@ jobs:
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 1
-        keep_minimum_runs: 3
-
-# ==== 工作流程文件结束 ====
