@@ -41,10 +41,19 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@main
 
+  check-updates-and-status:
+    runs-on: ubuntu-22.04
+    outputs:
+      has_updates: ${{ steps.check.outputs.has_updates }}
+      start_stage: ${{ steps.check-status.outputs.start_stage }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@main
+
     - name: Check for updates
       id: check
       run: |
-        # 如果是手动触发，直接返回 true
+        # 手动触发时直接返回 true
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           echo "has_updates=true" >> $GITHUB_OUTPUT
           echo "Manual trigger, will proceed with build"
@@ -72,7 +81,12 @@ jobs:
       id: check-status
       run: |
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          echo "start_stage=${{ github.event.inputs.manual_start_stage }}" >> $GITHUB_OUTPUT
+          # 如果没有输入，默认从第一步开始
+          if [ -z "${{ github.event.inputs.manual_start_stage }}" ]; then
+            echo "start_stage=1" >> $GITHUB_OUTPUT
+          else
+            echo "start_stage=${{ github.event.inputs.manual_start_stage }}" >> $GITHUB_OUTPUT
+          fi
         else
           echo "start_stage=1" >> $GITHUB_OUTPUT
         fi
