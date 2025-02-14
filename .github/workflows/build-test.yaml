@@ -1,4 +1,4 @@
-name: Build X86_64 OpenWrt (Multi-Job)
+name: Build X86_64 OpenWrt (Multi-Job, No Lua-mosquitto)
 
 on:
   repository_dispatch:
