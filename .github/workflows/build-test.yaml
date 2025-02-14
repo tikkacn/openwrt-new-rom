@@ -31,7 +31,7 @@ env:
 
 jobs:
   stage1-prepare:
-    if: github.event.inputs.start_stage == '1' || github.event.inputs.start_stage == null
+    if: github.event.inputs.start_stage == '1' || !github.event.inputs.start_stage
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
@@ -68,7 +68,7 @@ jobs:
           openwrt-source-
 
   stage2-feeds:
-    if: github.event.inputs.start_stage <= '2' || github.event.inputs.start_stage == null
+    if: github.event.inputs.start_stage == '2' || !github.event.inputs.start_stage
     needs: stage1-prepare
     runs-on: ubuntu-22.04
     steps:
@@ -126,8 +126,7 @@ jobs:
         key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
 
   stage3-compile:
-    if: github.event.inputs.start_stage <= '3' || github.event.inputs.start_stage == null
-    needs: stage2-feeds
+    if: github.event.inputs.start_stage == '3' || !github.event.inputs.start_stage
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
@@ -138,6 +137,9 @@ jobs:
       with:
         path: ${{ env.OPENWRT_ROOT }}
         key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
+        restore-keys: |
+          openwrt-feeds-
+          openwrt-source-
 
     - name: Install additional dependencies
       run: |
@@ -205,7 +207,7 @@ jobs:
         key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
 
   stage4-upload:
-    if: github.event.inputs.start_stage <= '4' || github.event.inputs.start_stage == null
+    if: github.event.inputs.start_stage == '4' || !github.event.inputs.start_stage
     needs: stage3-compile
     runs-on: ubuntu-22.04
     steps:
