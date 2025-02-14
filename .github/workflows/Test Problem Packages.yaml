@@ -55,7 +55,12 @@ jobs:
     - name: Update and install feeds
       run: |
         cd ${{ env.OPENWRT_ROOT }}
-        echo "src-git helloworld https://github.com/fw876/helloworld" >> feeds.conf.default
+        # 检查是否已存在 helloworld feed
+        if ! grep -q "src-git helloworld" feeds.conf.default; then
+          echo "src-git helloworld https://github.com/fw876/helloworld" >> feeds.conf.default
+        fi
+        echo "Current feeds configuration:"
+        cat feeds.conf.default
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
