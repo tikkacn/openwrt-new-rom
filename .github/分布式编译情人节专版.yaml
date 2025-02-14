@@ -1,4 +1,4 @@
-name: Build X86_64 OpenWrt
+name: 分布式编译情人节专版
 
 on:
   schedule:
