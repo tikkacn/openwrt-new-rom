@@ -235,9 +235,13 @@ jobs:
         # 处理其他文件
         [ -e files ] && mv files files/
         
-        # 执行自定义脚本
-        chmod +x $DIY_P2_SH
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        # 检查并执行自定义脚本
+        if [ -f "$GITHUB_WORKSPACE/$DIY_P2_SH" ]; then
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          $GITHUB_WORKSPACE/$DIY_P2_SH
+        else
+          echo "注意: $DIY_P2_SH 文件不存在，跳过自定义脚本"
+        fi
         
     - name: Download package
       id: package
