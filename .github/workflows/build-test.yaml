@@ -1,4 +1,4 @@
-name: Build X86_64 （分步式）
+name: Build X86_64 OpenWrt（分步式）
 
 on:
   repository_dispatch:
@@ -74,15 +74,34 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        if [ -f "$FEEDS_CONF" ]; then
-          echo "Moving custom feeds configuration..."
-          cp $FEEDS_CONF ${{ env.OPENWRT_ROOT }}/feeds.conf.default
+        # 检查目录是否存在
+        if [ ! -d "${{ env.OPENWRT_ROOT }}" ]; then
+          echo "Error: OpenWrt directory not found at ${{ env.OPENWRT_ROOT }}"
+          echo "Current directory structure:"
+          ls -la ${{ github.workspace }}
+          exit 1
         fi
         
+        # 检查并复制 feeds 配置
+        if [ -f "$FEEDS_CONF" ]; then
+          echo "Copying custom feeds configuration..."
+          echo "Source: $FEEDS_CONF"
+          echo "Destination: ${{ env.OPENWRT_ROOT }}/feeds.conf.default"
+          cp -f "$FEEDS_CONF" "${{ env.OPENWRT_ROOT }}/feeds.conf.default"
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to copy feeds configuration"
+            exit 1
+          fi
+        else
+          echo "No custom feeds configuration found, using default"
+        fi
+        
+        # 执行自定义脚本
         if [ -f "$DIY_P1_SH" ]; then
-          chmod +x $DIY_P1_SH
-          cd ${{ env.OPENWRT_ROOT }}
-          $GITHUB_WORKSPACE/$DIY_P1_SH
+          echo "Executing custom script..."
+          chmod +x "$DIY_P1_SH"
+          cd "${{ env.OPENWRT_ROOT }}"
+          "$GITHUB_WORKSPACE/$DIY_P1_SH"
         fi
 
     - name: Update and Install feeds
@@ -147,7 +166,7 @@ jobs:
         
     - name: Upload compilation logs
       if: steps.compile.outcome != 'success'
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: compilation-logs
         path: /tmp/logs
@@ -173,7 +192,7 @@ jobs:
         key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
 
     - name: Upload bin directory
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
@@ -188,7 +207,7 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
