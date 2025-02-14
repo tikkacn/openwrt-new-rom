@@ -35,33 +35,54 @@ jobs:
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf ${{ env.OPENWRT_ROOT }} openwrt
 
-    - name: Update feeds
+    - name: Setup feeds
       run: |
         cd ${{ env.OPENWRT_ROOT }}
+        # 添加 helloworld feed
+        echo "src-git helloworld https://github.com/fw876/helloworld" >> feeds.conf.default
+        cat feeds.conf.default
+        
+        # 更新和安装 feeds
         ./scripts/feeds update -a
         ./scripts/feeds install -a
+        
+        # 验证包是否存在
+        echo "Checking feeds..."
+        ls -la feeds/helloworld/
+        echo "Checking package directories..."
+        ls -la package/feeds/
+
+    - name: Prepare compilation
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        # 确保配置文件包含必要的包
+        cat >> .config <<EOF
+        CONFIG_PACKAGE_simple-obfs=y
+        CONFIG_PACKAGE_pcre=y
+        CONFIG_PACKAGE_gn=y
+        EOF
+        make defconfig
 
     - name: Test problem packages
       run: |
         cd ${{ env.OPENWRT_ROOT }}
-        make defconfig
         
         echo "Testing simple-obfs..."
-        make package/feeds/helloworld/simple-obfs/compile V=s || {
+        make package/feeds/helloworld/simple-obfs/compile V=99 || {
           echo "simple-obfs failed"
-          cat logs/last.txt
+          find logs/ -type f -exec cat {} \;
         }
         
         echo "Testing pcre..."
-        make package/libs/pcre/compile V=s || {
+        make package/libs/pcre/compile V=99 || {
           echo "pcre failed"
-          cat logs/last.txt
+          find logs/ -type f -exec cat {} \;
         }
         
         echo "Testing gn..."
-        make package/feeds/helloworld/gn/host/compile V=s || {
+        make package/feeds/helloworld/gn/host/compile V=99 || {
           echo "gn failed"
-          cat logs/last.txt
+          find logs/ -type f -exec cat {} \;
         }
 
     - name: Upload logs
@@ -69,4 +90,6 @@ jobs:
       if: always()
       with:
         name: test-logs
-        path: ${{ env.OPENWRT_ROOT }}/logs/
+        path: |
+          ${{ env.OPENWRT_ROOT }}/logs/
+          ${{ env.OPENWRT_ROOT }}/.config
