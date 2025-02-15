@@ -202,8 +202,8 @@ jobs:
         key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
 
   stage3-compile:
-    needs: [check-updates-and-status, stage2-feeds]
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '3'
+    needs: [check-updates-and-status]  # 只依赖状态检查
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '3'
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
@@ -348,7 +348,7 @@ jobs:
 # ==== 第5部分开始 - 承接第4部分 ====
 
   stage4-upload:
-    needs: [check-updates-and-status, stage3-compile]
+    needs: [check-updates-and-status, stage3-compile]  # 如果是从3开始，则依赖3
     if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '4'
     runs-on: ubuntu-22.04
     steps:
