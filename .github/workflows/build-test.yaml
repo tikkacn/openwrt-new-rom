@@ -9,7 +9,7 @@ on:
       manual_start_stage:
         description: 'Start from stage (1-4)'
         required: true
-        default: '3'
+        default: '1'
         type: choice
         options:
           - '1'
@@ -56,7 +56,7 @@ jobs:
         git clone --depth=1 ${{ env.REPO_URL }} temp_dir
         cd temp_dir
         LATEST_HASH=$(git rev-parse HEAD)
-        LAST_HASH=$(curl -s "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$(basename ${{ github.workflow }})/runs?status=completed&conclusion=success" | jq -r '.workflow_runs[0].head_sha')
+        LAST_HASH=$(curl -s "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$(basename ${{ github.workflow }})/runs?status=completed&conclusion=success" | jq -r '.workflow_runs[0].head_sha // ""')
         
         ./scripts/feeds update -a
         FEEDS_UPDATED=$(git status -s feeds.conf.default package/feeds | wc -l)
@@ -78,41 +78,13 @@ jobs:
           echo "start_stage=1" >> $GITHUB_OUTPUT
         fi
 
-# ==== 第1部分结束 - 连接第2部分 ====
-
-# ==== 第2部分开始 - 承接第1部分 ====
   stage1-prepare:
     needs: check-updates-and-status
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '1'
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1')
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
       uses: actions/checkout@main
-
-    - name: Before freeing up disk space
-      run: |
-        echo "Before freeing up disk space"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
-
-    - name: Freeing up disk space
-      uses: easimon/maximize-build-space@master
-      with: 
-        root-reserve-mb: 2048
-        swap-size-mb: 1
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
-
-    - name: Free up disk space complete
-      run: |
-        echo "Free up disk space complete"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
 
     - name: Initialize environment
       env:
@@ -141,49 +113,60 @@ jobs:
         path: ${{ env.OPENWRT_ROOT }}
         key: openwrt-source-${{ github.run_id }}-${{ github.sha }}
 
-# ==== 第2部分结束 - 连接第3部分 ====
-
-# ==== 第3部分开始 - 承接第2部分 ====
-stage3-compile:
-    needs: check-updates-and-status
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '3'
+  stage2-feeds:
+    needs: [check-updates-and-status, stage1-prepare]
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2')
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
       uses: actions/checkout@main
 
-    - name: Before freeing up disk space
-      run: |
-        echo "Before freeing up disk space"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
-
-    - name: Freeing up disk space
-      uses: easimon/maximize-build-space@master
-      with: 
-        root-reserve-mb: 2048
-        swap-size-mb: 1
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
-
-    - name: Free up disk space complete
-      run: |
-        echo "Free up disk space complete"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
-
-    - name: Restore stage1 and stage2 cache
+    - name: Restore stage1 cache
       uses: actions/cache/restore@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
-        key: openwrt-feeds-  # 先尝试恢复stage2的feeds缓存
+        key: openwrt-source-${{ github.run_id }}-${{ github.sha }}
+        fail-on-cache-miss: true
+
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF ${{ env.OPENWRT_ROOT }}/feeds.conf.default
+        cd ${{ env.OPENWRT_ROOT }}
+        ./scripts/feeds clean
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Run DIY script part 1
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        if [ -f "$GITHUB_WORKSPACE/$DIY_P1_SH" ]; then
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH"
+          $GITHUB_WORKSPACE/$DIY_P1_SH
+        else
+          echo "注意: $DIY_P1_SH 文件不存在，跳过自定义脚本"
+        fi
+
+    - name: Cache OpenWrt feeds
+      uses: actions/cache/save@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
+
+  stage3-compile:
+    needs: [check-updates-and-status, stage2-feeds]
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '3')
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@main
+
+    - name: Restore stage2 cache
+      uses: actions/cache/restore@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
         restore-keys: |
-          openwrt-source-    # 如果没有feeds缓存，使用stage1的源码缓存
+          openwrt-source-${{ github.run_id }}-${{ github.sha }}
 
     - name: Install additional dependencies
       run: |
@@ -254,37 +237,6 @@ stage3-compile:
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: Clean and free space before cache save
-      if: steps.compile.outcome == 'success'
-      run: |
-        cd ${{ env.OPENWRT_ROOT }}
-        # 清理编译过程中产生的临时文件
-        rm -rf ./build_dir/host/
-        rm -rf ./build_dir/toolchain-*
-        rm -rf ./staging_dir/host/
-        rm -rf ./staging_dir/toolchain-*
-        rm -rf ./tmp/
-        rm -rf ./dl/
-        rm -rf ./.git/
-        
-        # 系统级清理
-        sudo rm -rf /usr/share/dotnet
-        sudo rm -rf /usr/local/lib/android
-        sudo rm -rf /opt/ghc
-        sudo rm -rf "/usr/local/share/boost"
-        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-        sudo rm -rf /usr/share/swift
-        sudo rm -rf /usr/local/share/chromium
-        sudo rm -rf /usr/local/lib/node_modules
-        sudo rm -rf /opt/hostedtoolcache
-        sudo apt clean
-        docker system prune -af
-        
-        # 显示清理后的空间
-        echo "Remaining disk space after thorough cleaning:"
-        df -h
-        echo "=============================================================================="
-
     - name: Cache firmware
       if: steps.compile.outcome == 'success'
       uses: actions/cache/save@v3
@@ -296,7 +248,7 @@ stage3-compile:
 
   stage4-upload:
     needs: [check-updates-and-status, stage3-compile]
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '4'
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '3' || needs.check-updates-and-status.outputs.start_stage == '4')
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
