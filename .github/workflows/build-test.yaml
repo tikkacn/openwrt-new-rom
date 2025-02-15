@@ -151,9 +151,7 @@ jobs:
 
   stage2-feeds:
     needs: [check-updates-and-status, stage1-prepare]
-    if: |
-      needs.check-updates-and-status.outputs.has_updates == 'true' && 
-      (needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '1')
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '2'
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
@@ -204,8 +202,8 @@ jobs:
         key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
 
   stage3-compile:
-    needs: check-updates-and-status
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '3'
+    needs: [check-updates-and-status, stage2-feeds]
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '3'
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
@@ -351,9 +349,7 @@ jobs:
 
   stage4-upload:
     needs: [check-updates-and-status, stage3-compile]
-    if: |
-      needs.check-updates-and-status.outputs.has_updates == 'true' && 
-      (needs.check-updates-and-status.outputs.start_stage == '4' || needs.check-updates-and-status.outputs.start_stage == '3' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '1')
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage <= '4'
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
