@@ -136,7 +136,6 @@ jobs:
         ls -la ${{ env.OPENWRT_ROOT }}
 
     - name: Cache OpenWrt source code
-      if: needs.check-updates-and-status.outputs.start_stage == '1'
       uses: actions/cache/save@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
@@ -146,23 +145,18 @@ jobs:
 
 # ==== 第3部分开始 - 承接第2部分 ====
   stage2-feeds:
-    needs: [check-updates-and-status, stage1-prepare]
-    if: |
-      needs.check-updates-and-status.outputs.has_updates == 'true' && 
-      (needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2')
+    needs: check-updates-and-status
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '2'
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
       uses: actions/checkout@main
 
-    - name: Restore OpenWrt source code
-      if: needs.check-updates-and-status.outputs.start_stage != '1'
+    - name: Restore stage1 cache
       uses: actions/cache/restore@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
         key: openwrt-source-
-        restore-keys: |
-          openwrt-feeds-
 
     - name: Load custom feeds
       run: |
@@ -191,7 +185,6 @@ jobs:
         ./scripts/feeds install -a
 
     - name: Cache OpenWrt feeds
-      if: needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2'
       uses: actions/cache/save@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
@@ -200,13 +193,8 @@ jobs:
 # ==== 第3部分结束 - 连接第4部分 ====
 # ==== 第4部分开始 - 承接第3部分 ====
   stage3-compile:
-    needs: |
-      ${{ needs.check-updates-and-status.outputs.start_stage == '3' && 
-          fromJSON('["check-updates-and-status"]') ||
-          fromJSON('["check-updates-and-status", "stage2-feeds"]') }}
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && 
-        (needs.check-updates-and-status.outputs.start_stage == '3' || 
-         needs.check-updates-and-status.outputs.start_stage < '3')
+    needs: check-updates-and-status
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '3'
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
@@ -237,14 +225,13 @@ jobs:
         df -hT
         echo "=============================================================================="
 
-    - name: Restore OpenWrt feeds
-      if: needs.check-updates-and-status.outputs.start_stage != '1'
+    - name: Restore stage1 and stage2 cache
       uses: actions/cache/restore@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
-        key: openwrt-feeds-
+        key: openwrt-feeds-  # 先尝试恢复stage2的feeds缓存
         restore-keys: |
-          openwrt-source-
+          openwrt-source-    # 如果没有feeds缓存，使用stage1的源码缓存
 
     - name: Install additional dependencies
       run: |
@@ -348,27 +335,21 @@ jobs:
 
 # ==== 第5部分开始 - 承接第4部分 ====
   stage4-upload:
-    needs: |
-      ${{ needs.check-updates-and-status.outputs.start_stage == '4' && 
-          fromJSON('["check-updates-and-status"]') ||
-          fromJSON('["check-updates-and-status", "stage3-compile"]') }}
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && 
-        (needs.check-updates-and-status.outputs.start_stage == '4' || 
-         needs.check-updates-and-status.outputs.start_stage < '4')
+    needs: check-updates-and-status
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '4'
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
       uses: actions/checkout@main
 
-    - name: Restore firmware
-      if: needs.check-updates-and-status.outputs.start_stage != '1'
+    - name: Restore all previous caches
       uses: actions/cache/restore@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
-        key: openwrt-firmware-
+        key: openwrt-firmware-  # 先尝试恢复stage3的固件缓存
         restore-keys: |
-          openwrt-feeds-
-          openwrt-source-
+          openwrt-feeds-      # 如果没有固件缓存，尝试stage2的feeds缓存
+          openwrt-source-     # 如果没有feeds缓存，使用stage1的源码缓存
 
     - name: Upload bin directory
       uses: actions/upload-artifact@v4
