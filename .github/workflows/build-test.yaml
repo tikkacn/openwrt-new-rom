@@ -78,6 +78,9 @@ jobs:
           echo "start_stage=1" >> $GITHUB_OUTPUT
         fi
 
+# ==== 第1部分结束 - 连接第2部分 ====
+
+# ==== 第2部分开始 - 承接第1部分 ====
   stage1-prepare:
     needs: check-updates-and-status
     if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '1'
@@ -111,10 +114,6 @@ jobs:
         df -hT
         echo "=============================================================================="
 
-# ==== 第1部分结束 - 连接第2部分 ====
-
-# ==== 第2部分开始 - 承接第1部分 ====
-
     - name: Initialize environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -145,6 +144,9 @@ jobs:
           openwrt-source-${{ github.run_id }}-
           openwrt-source-
 
+# ==== 第2部分结束 - 连接第3部分 ====
+
+# ==== 第3部分开始 - 承接第2部分 ====
   stage2-feeds:
     needs: [check-updates-and-status, stage1-prepare]
     if: |
@@ -163,10 +165,6 @@ jobs:
         restore-keys: |
           openwrt-source-${{ github.run_id }}-
           openwrt-source-
-
-# ==== 第2部分结束 - 连接第3部分 ====
-
-# ==== 第3部分开始 - 承接第2部分 ====
 
     - name: Load custom feeds
       run: |
@@ -200,13 +198,10 @@ jobs:
         path: ${{ env.OPENWRT_ROOT }}
         key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
 
+# ==== 第3部分结束 - 连接第4部分 ====
+# ==== 第4部分开始 - 承接第3部分 ====
   stage3-compile:
-    needs: |
-      ${{ 
-        github.event.inputs.manual_start_stage == '3' && 
-        fromJSON('["check-updates-and-status"]') || 
-        fromJSON('["check-updates-and-status", "stage2-feeds"]') 
-      }}
+    needs: [check-updates-and-status, stage2-feeds]
     if: |
       needs.check-updates-and-status.outputs.has_updates == 'true' && 
       (needs.check-updates-and-status.outputs.start_stage == '1' || 
@@ -250,10 +245,6 @@ jobs:
         restore-keys: |
           openwrt-feeds-
           openwrt-source-
-
-# ==== 第3部分结束 - 连接第4部分 ====
-
-# ==== 第4部分开始 - 承接第3部分 ====
 
     - name: Install additional dependencies
       run: |
@@ -300,7 +291,7 @@ jobs:
         else
           echo "注意: $DIY_P2_SH 文件不存在，跳过自定义脚本"
         fi
-        
+
     - name: Download package
       id: package
       run: |
@@ -356,14 +347,8 @@ jobs:
 # ==== 第4部分结束 - 连接第5部分 ====
 
 # ==== 第5部分开始 - 承接第4部分 ====
-
   stage4-upload:
-    needs: |
-      ${{ 
-        github.event.inputs.manual_start_stage == '4' && 
-        fromJSON('["check-updates-and-status"]') || 
-        fromJSON('["check-updates-and-status", "stage3-compile"]') 
-      }}
+    needs: [check-updates-and-status, stage3-compile]
     if: |
       needs.check-updates-and-status.outputs.has_updates == 'true' && 
       (needs.check-updates-and-status.outputs.start_stage == '1' || 
