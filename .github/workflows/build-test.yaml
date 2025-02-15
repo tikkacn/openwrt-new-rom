@@ -144,55 +144,7 @@ jobs:
 # ==== 第2部分结束 - 连接第3部分 ====
 
 # ==== 第3部分开始 - 承接第2部分 ====
-  stage2-feeds:
-    needs: check-updates-and-status
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '2'
-    runs-on: ubuntu-22.04
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@main
-
-    - name: Restore stage1 cache
-      uses: actions/cache/restore@v3
-      with:
-        path: ${{ env.OPENWRT_ROOT }}
-        key: openwrt-source-
-
-    - name: Load custom feeds
-      run: |
-        if [ ! -d "${{ env.OPENWRT_ROOT }}" ]; then
-          echo "Error: OpenWrt directory not found at ${{ env.OPENWRT_ROOT }}"
-          echo "Current directory structure:"
-          ls -la ${{ github.workspace }}
-          exit 1
-        fi
-        
-        if [ -f "$FEEDS_CONF" ]; then
-          echo "Copying custom feeds configuration..."
-          cp -f "$FEEDS_CONF" "${{ env.OPENWRT_ROOT }}/feeds.conf.default"
-        fi
-        
-        if [ -f "$DIY_P1_SH" ]; then
-          chmod +x "$DIY_P1_SH"
-          cd "${{ env.OPENWRT_ROOT }}"
-          "$GITHUB_WORKSPACE/$DIY_P1_SH"
-        fi
-
-    - name: Update and Install feeds
-      run: |
-        cd ${{ env.OPENWRT_ROOT }}
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-
-    - name: Cache OpenWrt feeds
-      uses: actions/cache/save@v3
-      with:
-        path: ${{ env.OPENWRT_ROOT }}
-        key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
-
-# ==== 第3部分结束 - 连接第4部分 ====
-# ==== 第4部分开始 - 承接第3部分 ====
-  stage3-compile:
+stage3-compile:
     needs: check-updates-and-status
     if: needs.check-updates-and-status.outputs.has_updates == 'true' && needs.check-updates-and-status.outputs.start_stage == '3'
     runs-on: ubuntu-22.04
@@ -238,54 +190,40 @@ jobs:
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
         gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
-        file wget python3 python3-pip python3-ply python3-setuptools
-        # 特别为 golang 和 gn 添加依赖
-        sudo -E apt-get -qq install golang-go ninja-build
-        # 确保 ninja 在正确位置
-        sudo mkdir -p /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/staging_dir/host/bin
-        sudo ln -sf $(which ninja) /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/staging_dir/host/bin/ninja
+        file wget python3 python3-pip python3-ply python3-setuptools ninja-build
+
+        # 确保 ninja 在正确的位置
+        sudo mkdir -p ${{ env.OPENWRT_ROOT }}/staging_dir/host/bin
+        sudo ln -sf $(which ninja) ${{ env.OPENWRT_ROOT }}/staging_dir/host/bin/ninja
+        
+        # 验证 ninja 安装
+        ls -la ${{ env.OPENWRT_ROOT }}/staging_dir/host/bin/ninja
+        ${{ env.OPENWRT_ROOT }}/staging_dir/host/bin/ninja --version
+
         # 为 pcre 添加依赖
         sudo -E apt-get -qq install libpcre3-dev
-        # 验证 ninja 安装
-        ls -la /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/staging_dir/host/bin/ninja
-        /home/runner/work/openwrt-new-rom/openwrt-new-rom/openwrt/staging_dir/host/bin/ninja --version
 
     - name: Load custom configuration
       run: |
         cd ${{ env.OPENWRT_ROOT }}
-        # 处理递归依赖问题
         echo "CONFIG_PACKAGE_baresip-mod-avcodec=n" > .config.new
         echo "CONFIG_PACKAGE_baresip-mod-avformat=n" >> .config.new
         
-        # 如果存在自定义配置文件，合并它
         if [ -e $CONFIG_FILE ]; then
           cat $CONFIG_FILE >> .config.new
         fi
         
-        # 使用新的配置文件
         mv .config.new .config
-        
-        # 应用配置
         make defconfig
         
-        # 处理其他文件
         [ -e files ] && mv files files/
         
-        # 检查并执行自定义脚本
         if [ -f "$GITHUB_WORKSPACE/$DIY_P2_SH" ]; then
           chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
           $GITHUB_WORKSPACE/$DIY_P2_SH
         else
           echo "注意: $DIY_P2_SH 文件不存在，跳过自定义脚本"
         fi
-
-    - name: Clean workspace before compilation
-      run: |
-        cd ${{ env.OPENWRT_ROOT }}
-        # 清理可能存在的旧文件
-        rm -rf ./build_dir/host/ ./build_dir/toolchain-* ./staging_dir/host/ ./staging_dir/toolchain-*
-        # 显示清理后的空间
-        df -h
 
     - name: Download package
       id: package
@@ -329,7 +267,7 @@ jobs:
         rm -rf ./dl/
         rm -rf ./.git/
         
-        # 再次运行系统级空间清理
+        # 系统级清理
         sudo rm -rf /usr/share/dotnet
         sudo rm -rf /usr/local/lib/android
         sudo rm -rf /opt/ghc
@@ -346,22 +284,6 @@ jobs:
         echo "Remaining disk space after thorough cleaning:"
         df -h
         echo "=============================================================================="
-
-    - name: Check compilation status
-      if: steps.compile.outcome != 'success'
-      run: |
-        echo "Compilation failed. Uploading logs for debugging..."
-        mkdir -p /tmp/logs
-        free -h > /tmp/logs/memory.txt
-        df -h > /tmp/logs/disk.txt
-        cp ${{ env.OPENWRT_ROOT }}/logs/* /tmp/logs/ || true
-        
-    - name: Upload compilation logs
-      if: steps.compile.outcome != 'success'
-      uses: actions/upload-artifact@v4
-      with:
-        name: compilation-logs
-        path: /tmp/logs
 
     - name: Cache firmware
       if: steps.compile.outcome == 'success'
