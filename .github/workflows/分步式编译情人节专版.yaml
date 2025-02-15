@@ -1,5 +1,5 @@
 # ==== 第1部分开始 ====
-name: Build X86_64 OpenWrt（分步式）
+name: Build X86_64 OpenWrt（分步式并行编译）
 
 on:
   schedule:
