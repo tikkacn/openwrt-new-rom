@@ -136,13 +136,11 @@ jobs:
         ls -la ${{ env.OPENWRT_ROOT }}
 
     - name: Cache OpenWrt source code
+      if: needs.check-updates-and-status.outputs.start_stage == '1'
       uses: actions/cache/save@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
         key: openwrt-source-${{ github.run_id }}-${{ github.sha }}
-        restore-keys: |
-          openwrt-source-${{ github.run_id }}-
-          openwrt-source-
 
 # ==== 第2部分结束 - 连接第3部分 ====
 
@@ -158,13 +156,13 @@ jobs:
       uses: actions/checkout@main
 
     - name: Restore OpenWrt source code
+      if: needs.check-updates-and-status.outputs.start_stage != '1'
       uses: actions/cache/restore@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
-        key: openwrt-source-${{ github.run_id }}-${{ github.sha }}
+        key: openwrt-source-
         restore-keys: |
-          openwrt-source-${{ github.run_id }}-
-          openwrt-source-
+          openwrt-feeds-
 
     - name: Load custom feeds
       run: |
@@ -193,6 +191,7 @@ jobs:
         ./scripts/feeds install -a
 
     - name: Cache OpenWrt feeds
+      if: needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2'
       uses: actions/cache/save@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
@@ -201,12 +200,13 @@ jobs:
 # ==== 第3部分结束 - 连接第4部分 ====
 # ==== 第4部分开始 - 承接第3部分 ====
   stage3-compile:
-    needs: [check-updates-and-status, stage2-feeds]
-    if: |
-      needs.check-updates-and-status.outputs.has_updates == 'true' && 
-      (needs.check-updates-and-status.outputs.start_stage == '1' || 
-       needs.check-updates-and-status.outputs.start_stage == '2' || 
-       needs.check-updates-and-status.outputs.start_stage == '3')
+    needs: |
+      ${{ needs.check-updates-and-status.outputs.start_stage == '3' && 
+          fromJSON('["check-updates-and-status"]') ||
+          fromJSON('["check-updates-and-status", "stage2-feeds"]') }}
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && 
+        (needs.check-updates-and-status.outputs.start_stage == '3' || 
+         needs.check-updates-and-status.outputs.start_stage < '3')
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
@@ -238,12 +238,12 @@ jobs:
         echo "=============================================================================="
 
     - name: Restore OpenWrt feeds
+      if: needs.check-updates-and-status.outputs.start_stage != '1'
       uses: actions/cache/restore@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
-        key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
+        key: openwrt-feeds-
         restore-keys: |
-          openwrt-feeds-
           openwrt-source-
 
     - name: Install additional dependencies
@@ -348,23 +348,27 @@ jobs:
 
 # ==== 第5部分开始 - 承接第4部分 ====
   stage4-upload:
-    needs: [check-updates-and-status, stage3-compile]
-    if: |
-      needs.check-updates-and-status.outputs.has_updates == 'true' && 
-      (needs.check-updates-and-status.outputs.start_stage == '1' || 
-       needs.check-updates-and-status.outputs.start_stage == '2' || 
-       needs.check-updates-and-status.outputs.start_stage == '3' || 
-       needs.check-updates-and-status.outputs.start_stage == '4')
+    needs: |
+      ${{ needs.check-updates-and-status.outputs.start_stage == '4' && 
+          fromJSON('["check-updates-and-status"]') ||
+          fromJSON('["check-updates-and-status", "stage3-compile"]') }}
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && 
+        (needs.check-updates-and-status.outputs.start_stage == '4' || 
+         needs.check-updates-and-status.outputs.start_stage < '4')
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout repository
       uses: actions/checkout@main
 
     - name: Restore firmware
+      if: needs.check-updates-and-status.outputs.start_stage != '1'
       uses: actions/cache/restore@v3
       with:
         path: ${{ env.OPENWRT_ROOT }}
-        key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
+        key: openwrt-firmware-
+        restore-keys: |
+          openwrt-feeds-
+          openwrt-source-
 
     - name: Upload bin directory
       uses: actions/upload-artifact@v4
