@@ -98,13 +98,22 @@ jobs:
         df -h
         
         # 删除不需要的大型软件包
-        sudo apt-get remove --purge -y ghc dotnet-sdk llvm php azure-cli google-cloud-sdk mongodb-org powershell
+        REMOVE_PKGS="ghc dotnet-sdk llvm php azure-cli google-cloud-sdk mongodb-org powershell"
+        for PKG in $REMOVE_PKGS; do
+          if dpkg -l | grep -q $PKG; then
+            sudo apt-get remove --purge -y $PKG
+          fi
+        done
         sudo apt-get autoremove -y
         sudo apt-get clean
-        
+
         # 删除大型目录
-        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell
-        sudo rm -rf /usr/share/gradle* /usr/share/maven /usr/share/swift /usr/local/.ghcup
+        REMOVE_DIRS="/usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/gradle* /usr/share/maven /usr/share/swift /usr/local/.ghcup"
+        for DIR in $REMOVE_DIRS; do
+          if [ -d $DIR ]; then
+            sudo rm -rf $DIR
+          fi
+        done
         
         # 准备工作目录
         sudo mkdir -p ${{ env.WORKDIR }}
