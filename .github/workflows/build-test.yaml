@@ -268,11 +268,12 @@ jobs:
           esac
 
       - name: Upload Package Chunk
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: packages-chunk-${{ matrix.chunk }}
           path: ${{ env.BUILD_ROOT }}/openwrt/bin
           retention-days: 1
+          compression-level: 6
 
   build-firmware:
     needs: build-packages
@@ -291,9 +292,10 @@ jobs:
           key: openwrt-source-${{ github.sha }}
 
       - name: Download Package Chunks
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: ${{ env.BUILD_ROOT }}/chunks
+          merge-multiple: true
 
       - name: Merge Chunks and Build Firmware
         id: compile
@@ -317,12 +319,13 @@ jobs:
           echo "FIRMWARE=$PWD" >> $GITHUB_ENV
 
       - name: Upload Firmware
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
         with:
           name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
           path: ${{ env.FIRMWARE }}
           retention-days: 7
+          compression-level: 6
 
       - name: Generate Release Tag
         id: tag
