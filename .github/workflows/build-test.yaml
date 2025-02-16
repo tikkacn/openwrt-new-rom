@@ -28,7 +28,6 @@ on:
           - '3'
           - '4'
 
-# 限制权限
 permissions:
   contents: write  # 需要写权限用于创建releases
   packages: read
@@ -47,10 +46,11 @@ env:
   TZ: Asia/Shanghai
   WORKDIR: /mnt/openwrt
   OPENWRT_ROOT: /mnt/openwrt/openwrt
-  # 新增环境变量
   RETRY_COUNT: 3
   RETRY_WAIT: 30
   TIMEOUT: 600
+
+#################### 第一段结束 ####################
 
 jobs:
   check-updates-and-status:
@@ -77,7 +77,6 @@ jobs:
           cd temp_dir
           LATEST_HASH=$(git rev-parse HEAD)
           
-          # Use the GitHub API to get the latest successful workflow run's head SHA.
           API_URL="https://api.github.com/repos/${{ github.repository }}/actions/workflows/${{ github.workflow }}/runs?status=completed&conclusion=success&per_page=1"
           LAST_HASH=$(curl -s "$API_URL" | jq -r '.workflow_runs[0].head_sha // ""')
           
@@ -104,7 +103,7 @@ jobs:
             echo "start_stage=1" >> $GITHUB_OUTPUT
           fi
 
-  stage1-prepare:
+stage1-prepare:
     needs: check-updates-and-status
     if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1')
     runs-on: ubuntu-22.04
@@ -204,7 +203,8 @@ jobs:
 
           ./scripts/feeds install -a
 
-      - name: Run DIY script part 1
+#################### 第二段结束 ####################
+- name: Run DIY script part 1
         run: |
           cd ${{ env.OPENWRT_ROOT }}
           if [ -f "$GITHUB_WORKSPACE/$DIY_P1_SH" ]; then
@@ -270,7 +270,7 @@ jobs:
           mv .config.new .config
           make defconfig
 
-          [ -e files ] && mv files files/
+          [ -d files ] && mv files files/
 
           if [ -f "$GITHUB_WORKSPACE/$DIY_P2_SH" ]; then
             chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
@@ -400,31 +400,18 @@ jobs:
         with:
           path: |
             ${{ env.OPENWRT_ROOT }}/bin/targets
-        key: openwrt-firmware-${{ runner.os }}-${{ github.sha }}
-        fail-on-cache-miss: true
-
-      - name: Check firmware existence
-        id: check-firmware
-        run: |
-          if [ -d "${{ env.OPENWRT_ROOT }}/bin/targets" ]; then
-            echo "firmware_exists=true" >> $GITHUB_OUTPUT
-            echo "Firmware directory found"
-          else
-            echo "::error::Firmware directory not found"
-            exit 1
-          fi
+          key: openwrt-firmware-${{ runner.os }}-${{ github.sha }}
+          fail-on-cache-miss: true
 
       - name: Upload bin directory
         uses: actions/upload-artifact@v3
-        if: env.UPLOAD_BIN_DIR == 'true' && steps.check-firmware.outputs.firmware_exists == 'true'
+        if: env.UPLOAD_BIN_DIR == 'true'
         with:
           name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
           path: ${{ env.OPENWRT_ROOT }}/bin
-          retention-days: 5
 
       - name: Organize files
         id: organize
-        if: steps.check-firmware.outputs.firmware_exists == 'true'
         run: |
           cd ${{ env.OPENWRT_ROOT }}/bin/targets/*/*
           rm -rf packages
@@ -438,7 +425,6 @@ jobs:
         with:
           name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
           path: ${{ env.FIRMWARE }}
-          retention-days: 5
 
       - name: Generate release tag
         id: tag
@@ -447,19 +433,18 @@ jobs:
           RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")
           echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
 
-          # 创建发布说明
           cat > release.txt <<EOL
-## OpenWrt Firmware - Build $(date +"%Y.%m.%d-%H%M")
-### Build Information
-- Build Date: $(date)
-- Build Type: Automated Build
-- Target Device: ${{ env.DEVICE_NAME }}
-### SHA256 Checksums
-$(cd ${{ env.FIRMWARE }} && find . -type f -name "*.bin" -o -name "*.img" | while read file; do echo "- ${file#./}: $(sha256sum "$file" | cut -d' ' -f1)"; done)
-### Notes
-- This is an automated build, please test before using in production
-- Report any issues on the GitHub repository
-EOL
+          ## OpenWrt Firmware - Build $(date +"%Y.%m.%d-%H%M")
+          ### Build Information
+          - Build Date: $(date)
+          - Build Type: Automated Build
+          - Target Device: ${{ env.DEVICE_NAME }}
+          ### SHA256 Checksums
+          $(cd ${{ env.FIRMWARE }} && find . -type f -name "*.bin" -o -name "*.img" | while read file; do echo "- ${file#./}: $(sha256sum "$file" | cut -d' ' -f1)"; done)
+          ### Notes
+          - This is an automated build, please test before using in production
+          - Report any issues on the GitHub repository
+          EOL
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Upload firmware to release
@@ -471,8 +456,6 @@ EOL
           tag_name: ${{ steps.tag.outputs.release_tag }}
           body_path: release.txt
           files: ${{ env.FIRMWARE }}/*
-          draft: false
-          prerelease: false
 
       - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v2
@@ -488,28 +471,3 @@ EOL
           delete_tags: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Delete old artifacts
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const days = 5;
-            const ms = days * 24 * 60 * 60 * 1000;
-            const now = new Date();
-
-            const artifacts = await github.rest.actions.listArtifactsForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-            });
-
-            for (const artifact of artifacts.data.artifacts) {
-              const created = new Date(artifact.created_at);
-              if (now - created > ms) {
-                console.log(`Deleting artifact: ${artifact.name}`);
-                await github.rest.actions.deleteArtifact({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  artifact_id: artifact.id,
-                });
-              }
-            }
