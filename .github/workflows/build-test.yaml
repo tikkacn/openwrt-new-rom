@@ -214,7 +214,7 @@ jobs:
         restore-keys: |
           openwrt-feeds-${{ runner.os }}-${{ hashFiles('**/feeds.conf.default') }}-
           openwrt-feeds-${{ runner.os }}-
-	stage3-compile:
+  stage3-compile:
     needs: [check-updates-and-status, stage2-feeds]
     if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '3')
     runs-on: ubuntu-22.04
