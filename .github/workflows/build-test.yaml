@@ -131,4 +131,266 @@ jobs:
 
   stage2-feeds:
     needs: [check-updates-and-status, stage1-prepare]
-    if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check ▋
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2')
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@main
+
+    - name: Restore stage1 cache
+      uses: actions/cache/restore@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-source-${{ github.run_id }}-${{ github.sha }}
+        fail-on-cache-miss: true
+
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF ${{ env.OPENWRT_ROOT }}/feeds.conf.default
+        cd ${{ env.OPENWRT_ROOT }}
+        ./scripts/feeds clean
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Run DIY script part 1
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        if [ -f "$GITHUB_WORKSPACE/$DIY_P1_SH" ]; then
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH"
+          $GITHUB_WORKSPACE/$DIY_P1_SH
+        else
+          echo "注意: $DIY_P1_SH 文件不存在，跳过自定义脚本"
+        fi
+
+    - name: Cache OpenWrt feeds
+      uses: actions/cache/save@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
+
+  stage3-compile:
+    needs: [check-updates-and-status, stage2-feeds]
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '3')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360  # 设置6小时总超时
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@main
+
+    - name: Restore stage2 cache
+      uses: actions/cache/restore@v3
+      with:
+        path: ${{ env.OPENWRT_ROOT }}
+        key: openwrt-feeds-${{ github.run_id }}-${{ github.sha }}
+        restore-keys: |
+          openwrt-source-${{ github.run_id }}-${{ github.sha }}
+
+    - name: Install additional dependencies
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+        gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
+        file wget python3 python3-pip python3-ply python3-setuptools ninja-build
+
+        # 确保 ninja 在正确的位置
+        sudo mkdir -p ${{ env.OPENWRT_ROOT }}/staging_dir/host/bin
+        sudo ln -sf $(which ninja) ${{ env.OPENWRT_ROOT }}/staging_dir/host/bin/ninja
+        
+        # 验证 ninja 安装
+        ls -la ${{ env.OPENWRT_ROOT }}/staging_dir/host/bin/ninja
+        ${{ env.OPENWRT_ROOT }}/staging_dir/host/bin/ninja --version
+
+        # 为 pcre 添加依赖
+        sudo -E apt-get -qq install libpcre3-dev
+
+    - name: Load custom configuration
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        echo "CONFIG_PACKAGE_baresip-mod-avcodec=n" > .config.new
+        echo "CONFIG_PACKAGE_baresip-mod-avformat=n" >> .config.new
+        
+        if [ -e $CONFIG_FILE ]; then
+          cat $CONFIG_FILE >> .config.new
+        fi
+        
+        mv .config.new .config
+        make defconfig
+        
+        [ -e files ] && mv files files/
+        
+        if [ -f "$GITHUB_WORKSPACE/$DIY_P2_SH" ]; then
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          $GITHUB_WORKSPACE/$DIY_P2_SH
+        else
+          echo "注意: $DIY_P2_SH 文件不存在，跳过自定义脚本"
+        fi
+
+    - name: Download package
+      id: package
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        make defconfig
+        
+        # 设置下载重试和超时
+        download_with_retry() {
+          local package=$1
+          local max_attempts=3
+          local timeout=600  # 10分钟超时
+          
+          for attempt in $(seq 1 $max_attempts); do
+            echo "Downloading $package (Attempt $attempt of $max_attempts)..."
+            if timeout $timeout make package/utils/${package}/download V=s; then
+              echo "Successfully downloaded $package"
+              return 0
+            else
+              echo "Failed to download $package on attempt $attempt"
+              sleep 30
+            fi
+          done
+          return 1
+        }
+        
+        # 首先尝试并行下载所有包
+        if ! timeout 1800 make download -j8; then
+          echo "Parallel download failed, switching to sequential download for problematic packages..."
+          
+          # 针对性下载可能出问题的包
+          problem_packages=(
+            "busybox"
+            "e2fsprogs"
+            "f2fs-tools"
+            "jsonfilter"
+            "lua"
+            "util-linux"
+          )
+          
+          for pkg in "${problem_packages[@]}"; do
+            if [ ! -f "dl/${pkg}*.tar.*" ]; then
+              echo "=== Downloading $pkg ==="
+              download_with_retry "$pkg"
+            fi
+          done
+        fi
+        
+        # 检查是否有下载失败的文件
+        failed_files=$(find dl -size -1024c)
+        if [ ! -z "$failed_files" ]; then
+          echo "Warning: Some files failed to download:"
+          echo "$failed_files"
+          find dl -size -1024c -exec rm -f {} \;
+        fi
+
+    - name: Compile firmware
+      id: compile
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}
+        echo "Working directory space:"
+        df -h ${{ env.WORKDIR }}
+        
+        # 设置临时目录到工作目录
+        export TMPDIR=${{ env.WORKDIR }}/tmp
+        mkdir -p $TMPDIR
+        
+        # 启用 ccache
+        export USE_CCACHE=1
+        export CCACHE_DIR=${{ env.WORKDIR }}/.ccache
+        mkdir -p $CCACHE_DIR
+        
+        echo -e "$(nproc) thread compile"
+        # 先编译 gn，因为它是主机工具
+        make package/feeds/helloworld/gn/host/compile -j1 V=s || true
+        # 主编译过程
+        make -j$(($(nproc) + 1)) || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Cache firmware
+      if: steps.compile.outcome == 'success'
+      uses: actions/cache/save@v3
+      with:
+        path: |
+          ${{ env.OPENWRT_ROOT }}/bin/targets
+          !${{ env.OPENWRT_ROOT }}/bin/targets/**/packages
+        key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
+
+  stage4-upload:
+    needs: [check-updates-and-status, stage3-compile]
+    if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '3' || needs.check-updates-and-status.outputs.start_stage == '4')
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@main
+
+    - name: Restore firmware cache
+      uses: actions/cache/restore@v3
+      with:
+        path: |
+          ${{ env.OPENWRT_ROOT }}/bin/targets
+        key: openwrt-firmware-${{ github.run_id }}-${{ github.sha }}
+        fail-on-cache-miss: true
+
+    - name: Check firmware existence
+      id: check-firmware
+      run: |
+        if [ ! -d "${{ env.OPENWRT_ROOT }}/bin/targets" ]; then
+          echo "::error::Firmware directory not found"
+          exit 1
+        fi
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@v3
+      if: env.UPLOAD_BIN_DIR == 'true' && steps.check-firmware.outputs.firmware_exists == 'true'
+      with:
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.OPENWRT_ROOT }}/bin
+
+    - name: Organize files
+      id: organize
+      if: steps.check-firmware.outputs.firmware_exists == 'true'
+      run: |
+        cd ${{ env.OPENWRT_ROOT }}/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@v3
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && steps.organize.outputs.status == 'success'
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v1
+      if: steps.tag.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
+
+    - name: Remove old releases
+      uses: dev-drprasad/delete-older-releases@v0.1.0
+      if: env.UPLOAD_RELEASE == 'true'
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
