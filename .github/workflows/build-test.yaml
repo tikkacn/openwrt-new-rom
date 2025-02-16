@@ -17,19 +17,16 @@ env:
   UPLOAD_WETRANSFER: false
   UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
-  # 定义构建目录在大容量磁盘上
   BUILD_ROOT: /home/runner/work/openwrt-new-rom/openwrt-new-rom
 
 jobs:
   prepare:
     runs-on: ubuntu-22.04
     steps:
-      - name: Before freeing up disk space
+      - name: Space Information Before Cleanup
         run: |
           echo "Before cleaning:"
           df -hT
-          echo "Available storage on build volume:"
-          df -h ${{ env.BUILD_ROOT }}
 
       - name: "Optimize Disk Space"
         uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
@@ -63,21 +60,24 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
-      - name: Prepare build directory
+      - name: Space Information After Cleanup
         run: |
-          sudo mkdir -p ${{ env.BUILD_ROOT }}
-          sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          echo "Build directory ready at ${{ env.BUILD_ROOT }}"
-          df -h ${{ env.BUILD_ROOT }}
+          echo "After cleaning:"
+          df -hT
 
       - name: Checkout
         uses: actions/checkout@main
-        with:
-          path: ${{ env.BUILD_ROOT }}/source
+
+      - name: Prepare Build Environment
+        run: |
+          sudo mkdir -p ${{ env.BUILD_ROOT }}
+          sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
+          cd ${{ env.BUILD_ROOT }}
 
       - name: Initialization environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          cd ${{ env.BUILD_ROOT }}
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
           bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
@@ -86,81 +86,95 @@ jobs:
           mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
           libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
           vim wget xmlto xxd zlib1g-dev python3-setuptools
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "$TZ"
 
       - name: Clone source code
         run: |
           cd ${{ env.BUILD_ROOT }}
           git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+          ln -sf ${{ env.BUILD_ROOT }}/openwrt $GITHUB_WORKSPACE/openwrt
 
       - name: Load custom feeds
         run: |
-          cd ${{ env.BUILD_ROOT }}
-          [ -e source/$FEEDS_CONF ] && mv source/$FEEDS_CONF openwrt/feeds.conf.default
-          chmod +x source/$DIY_P1_SH
+          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+          chmod +x $DIY_P1_SH
           cd openwrt
-          ${{ env.BUILD_ROOT }}/source/$DIY_P1_SH
+          $GITHUB_WORKSPACE/$DIY_P1_SH
 
-      - name: Update and Install feeds
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+      - name: Update feeds
+        run: cd openwrt && ./scripts/feeds update -a
+
+      - name: Install feeds
+        run: cd openwrt && ./scripts/feeds install -a
 
       - name: Load custom configuration
         run: |
-          cd ${{ env.BUILD_ROOT }}
-          [ -e source/files ] && mv source/files openwrt/files
-          [ -e source/$CONFIG_FILE ] && mv source/$CONFIG_FILE openwrt/.config
-          chmod +x source/$DIY_P2_SH
+          [ -e files ] && mv files openwrt/files
+          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+          chmod +x $DIY_P2_SH
           cd openwrt
-          ${{ env.BUILD_ROOT }}/source/$DIY_P2_SH
+          $GITHUB_WORKSPACE/$DIY_P2_SH
 
       - name: Download package
         id: package
         run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
+          cd openwrt
           make defconfig
           make download -j8
           find dl -size -1024c -exec rm -f {} \;
 
-      - name: Cache OpenWrt
+      - name: Cache OpenWrt Source
         uses: actions/cache@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-${{ github.sha }}
+          key: openwrt-source-${{ github.sha }}
+          restore-keys: |
+            openwrt-source-
+
+      - name: Generate OpenWrt Info
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          echo "OPENWRT_ROOT=$PWD" >> $GITHUB_ENV
+          echo "::set-output name=source_dir::$PWD"
 
   build-tools:
     needs: prepare
     runs-on: ubuntu-22.04
     steps:
-      - name: Space cleanup and preparation
+      - name: Space Cleanup
         run: |
           sudo mkdir -p ${{ env.BUILD_ROOT }}
           sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          
-          # 运行空间清理脚本
-          echo "Before cleaning:"
-          df -hT
-          
-          # 运行两个清理工具
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          docker rmi $(docker images -q) || true
+          df -h ${{ env.BUILD_ROOT }}
 
-      - name: Restore cache
+      - name: Restore OpenWrt Source
         uses: actions/cache@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-${{ github.sha }}
+          key: openwrt-source-${{ github.sha }}
+          restore-keys: |
+            openwrt-source-
 
-      - name: Compile tools
+      - name: Verify OpenWrt Directory
+        run: |
+          if [ ! -d "${{ env.BUILD_ROOT }}/openwrt" ]; then
+            echo "ERROR: OpenWrt directory not found!"
+            exit 1
+          fi
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          echo "OpenWrt directory contents:"
+          ls -la
+
+      - name: Compile tools and toolchain
         run: |
           cd ${{ env.BUILD_ROOT }}/openwrt
+          echo "Starting tools compilation in $(pwd)"
           make tools/install -j$(nproc)
           make toolchain/install -j$(nproc)
-          # 清理不需要的文件
-          find build_dir/host -name '.built*' -exec rm -f {} \;
 
-      - name: Cache tools
+      - name: Cache Tools and Toolchain
         uses: actions/cache@v3
         with:
           path: |
@@ -176,24 +190,29 @@ jobs:
         chunk: [1, 2, 3]
       fail-fast: false
     steps:
-      - name: Space cleanup and preparation
+      - name: Space Cleanup
         run: |
           sudo mkdir -p ${{ env.BUILD_ROOT }}
           sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          
-          # 清理空间
-          echo "Before cleaning:"
-          df -hT
-          
-          # 运行清理工具
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          docker rmi $(docker images -q) || true
+          df -h ${{ env.BUILD_ROOT }}
 
-      - name: Restore caches
+      - name: Restore OpenWrt and Tools Cache
         uses: actions/cache@v3
         with:
-          path: ${{ env.BUILD_ROOT }}/openwrt
+          path: |
+            ${{ env.BUILD_ROOT }}/openwrt
+            ${{ env.BUILD_ROOT }}/openwrt/staging_dir
+            ${{ env.BUILD_ROOT }}/openwrt/build_dir
           key: openwrt-tools-${{ github.sha }}
+          restore-keys: |
+            openwrt-tools-
+            openwrt-source-
+
+      - name: Verify Build Environment
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt || exit 1
+          echo "Build environment ready in $(pwd)"
+          ls -la
 
       - name: Compile packages (Chunk ${{ matrix.chunk }})
         run: |
@@ -209,11 +228,8 @@ jobs:
               make package/compile -j$(nproc)
               ;;
           esac
-          
-          # 清理编译过程中的临时文件
-          rm -rf build_dir/target-*/tmp
 
-      - name: Save chunk result
+      - name: Upload Package Chunk
         uses: actions/upload-artifact@v3
         with:
           name: packages-chunk-${{ matrix.chunk }}
@@ -224,45 +240,45 @@ jobs:
     needs: build-packages
     runs-on: ubuntu-22.04
     steps:
-      - name: Space cleanup and preparation
+      - name: Space Cleanup
         run: |
           sudo mkdir -p ${{ env.BUILD_ROOT }}
           sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
           df -h ${{ env.BUILD_ROOT }}
 
-      - name: Restore OpenWrt cache
+      - name: Restore OpenWrt Source
         uses: actions/cache@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-${{ github.sha }}
+          key: openwrt-source-${{ github.sha }}
 
-      - name: Download package chunks
+      - name: Download Package Chunks
         uses: actions/download-artifact@v3
         with:
           path: ${{ env.BUILD_ROOT }}/chunks
 
-      - name: Merge chunks and build firmware
+      - name: Merge Chunks and Build Firmware
         id: compile
         run: |
-          cd ${{ env.BUILD_ROOT }}
-          mkdir -p openwrt/bin
-          cp -r chunks/packages-chunk-*/* openwrt/bin/
-          cd openwrt
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          mkdir -p bin
+          cp -r ../chunks/packages-chunk-*/* bin/
           make package/index
+          echo "Building firmware with $(nproc) threads"
           make -j$(nproc) || make -j1 V=s
           echo "status=success" >> $GITHUB_OUTPUT
           grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
           [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-      - name: Organize files
+      - name: Organize Files
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
         run: |
           cd ${{ env.BUILD_ROOT }}/openwrt/bin/targets/*/*
           rm -rf packages
           echo "FIRMWARE=$PWD" >> $GITHUB_ENV
 
-      - name: Upload firmware
+      - name: Upload Firmware
         uses: actions/upload-artifact@v3
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
         with:
@@ -270,14 +286,14 @@ jobs:
           path: ${{ env.FIRMWARE }}
           retention-days: 7
 
-      - name: Generate release tag
+      - name: Generate Release Tag
         id: tag
         if: env.UPLOAD_RELEASE == 'true' && !cancelled()
         run: |
           echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
           touch release.txt
 
-      - name: Upload firmware to release
+      - name: Upload Firmware to Release
         uses: softprops/action-gh-release@v1
         if: steps.tag.outputs.status == 'success' && !cancelled()
         env:
@@ -291,20 +307,20 @@ jobs:
     needs: build-firmware
     runs-on: ubuntu-22.04
     steps:
-      - name: Delete workflow artifacts
+      - name: Delete Workflow Artifacts
         uses: geekyeggo/delete-artifact@v2
         with:
           name: |
             packages-chunk-*
           failOnError: false
 
-      - name: Delete old workflow runs
+      - name: Delete Old Workflow Runs
         uses: Mattraks/delete-workflow-runs@v2
         with:
           retain_days: 1
           keep_minimum_runs: 3
 
-      - name: Remove old Releases
+      - name: Remove Old Releases
         uses: dev-drprasad/delete-older-releases@v0.1.0
         if: env.UPLOAD_RELEASE == 'true'
         with:
