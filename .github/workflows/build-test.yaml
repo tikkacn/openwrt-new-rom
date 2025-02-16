@@ -98,7 +98,7 @@ jobs:
         df -h
         
         # 删除不需要的大型软件包
-        sudo apt-get remove --purge -y ghc dotnet-sdk-5.0 llvm* php* azure-cli google-cloud-sdk mongodb-org powershell
+        sudo apt-get remove --purge -y ghc dotnet-sdk llvm php azure-cli google-cloud-sdk mongodb-org powershell
         sudo apt-get autoremove -y
         sudo apt-get clean
         
