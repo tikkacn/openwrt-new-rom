@@ -1,4 +1,4 @@
-name: Build OpenWrt（分步式）
+name: Build OpenWrt
 
 on:
   repository_dispatch:
@@ -111,11 +111,23 @@ jobs:
 
       - name: Load custom configuration
         run: |
-          [ -e files ] && mv files openwrt/files
-          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+          # 确保 .config 文件复制到正确位置
+          echo "Copying .config file..."
+          [ -e files ] && mv files ${{ env.BUILD_ROOT }}/openwrt/files
+          cp $GITHUB_WORKSPACE/.config ${{ env.BUILD_ROOT }}/openwrt/.config
           chmod +x $DIY_P2_SH
-          cd openwrt
+          cd ${{ env.BUILD_ROOT }}/openwrt
           $GITHUB_WORKSPACE/$DIY_P2_SH
+          
+          # 验证 .config 文件是否已复制
+          if [ -f ".config" ]; then
+            echo ".config file successfully copied"
+            echo "Contents of .config file:"
+            head -n 5 .config
+          else
+            echo "ERROR: Failed to copy .config file"
+            exit 1
+          fi
 
       - name: Download package
         id: package
@@ -162,6 +174,8 @@ jobs:
             exit 1
           fi
           echo "Found .config file"
+          echo "First few lines of .config:"
+          head -n 5 .config
 
       - name: Setup Build Environment
         run: |
