@@ -133,12 +133,6 @@ jobs:
           restore-keys: |
             openwrt-source-
 
-      - name: Generate OpenWrt Info
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
-          echo "OPENWRT_ROOT=$PWD" >> $GITHUB_ENV
-          echo "::set-output name=source_dir::$PWD"
-
   build-tools:
     needs: prepare
     runs-on: ubuntu-22.04
@@ -157,15 +151,23 @@ jobs:
           restore-keys: |
             openwrt-source-
 
-      - name: Verify OpenWrt Directory
+      - name: Verify OpenWrt Directory and Config
         run: |
-          if [ ! -d "${{ env.BUILD_ROOT }}/openwrt" ]; then
-            echo "ERROR: OpenWrt directory not found!"
-            exit 1
-          fi
-          cd ${{ env.BUILD_ROOT }}/openwrt
+          cd ${{ env.BUILD_ROOT }}/openwrt || exit 1
           echo "OpenWrt directory contents:"
           ls -la
+          
+          if [ ! -f ".config" ]; then
+            echo "ERROR: .config file not found!"
+            exit 1
+          fi
+          echo "Found .config file"
+
+      - name: Setup Build Environment
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          make defconfig
+          echo "Build environment configured"
 
       - name: Compile tools and toolchain
         run: |
