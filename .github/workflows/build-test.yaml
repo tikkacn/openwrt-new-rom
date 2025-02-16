@@ -214,8 +214,7 @@ jobs:
         restore-keys: |
           openwrt-feeds-${{ runner.os }}-${{ hashFiles('**/feeds.conf.default') }}-
           openwrt-feeds-${{ runner.os }}-
-
-  stage3-compile:
+		stage3-compile:
     needs: [check-updates-and-status, stage2-feeds]
     if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '3')
     runs-on: ubuntu-22.04
@@ -271,7 +270,7 @@ jobs:
           echo "::warning::$DIY_P2_SH file not found, skipping custom script"
         fi
 
-- name: Download package
+    - name: Download package
       id: package
       run: |
         cd ${{ env.OPENWRT_ROOT }}
@@ -353,7 +352,7 @@ jobs:
         # 先编译 gn
         make package/feeds/helloworld/gn/host/compile -j1 V=s || true
         
-# 主编译过程
+        # 主编译过程
         if ! make -j$JOBS; then
           echo "::warning::Parallel build failed, trying with single thread"
           if ! make -j1 V=s; then
@@ -367,23 +366,6 @@ jobs:
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: Check build status and generate summary
-      if: steps.compile.outcome == 'success'
-      run: |
-        cd ${{ env.OPENWRT_ROOT }}
-        if [ -d "bin/targets" ]; then
-          echo "=== Build Summary ===" > build_summary.txt
-          echo "Date: $(date)" >> build_summary.txt
-          echo "OpenWrt Version: $(cat version)" >> build_summary.txt
-          echo "Target: $(grep '^CONFIG_TARGET_.*=y' .config | head -n 1)" >> build_summary.txt
-          echo "Size: $(du -sh bin/targets)" >> build_summary.txt
-          echo "SHA256 Hashes:" >> build_summary.txt
-          find bin/targets -type f -name "*.bin" -o -name "*.img" | xargs sha256sum >> build_summary.txt
-        else
-          echo "::error::Build failed - output directory not found"
-          exit 1
-        fi
-
     - name: Cache firmware
       if: steps.compile.outcome == 'success'
       uses: actions/cache@v3
@@ -392,10 +374,8 @@ jobs:
           ${{ env.OPENWRT_ROOT }}/bin/targets
           !${{ env.OPENWRT_ROOT }}/bin/targets/**/packages
         key: openwrt-firmware-${{ runner.os }}-${{ github.sha }}
-        restore-keys: |
-          openwrt-firmware-${{ runner.os }}-
 
-  stage4-upload:
+		stage4-upload:
     needs: [check-updates-and-status, stage3-compile]
     if: needs.check-updates-and-status.outputs.has_updates == 'true' && (needs.check-updates-and-status.outputs.start_stage == '1' || needs.check-updates-and-status.outputs.start_stage == '2' || needs.check-updates-and-status.outputs.start_stage == '3' || needs.check-updates-and-status.outputs.start_stage == '4')
     runs-on: ubuntu-22.04
