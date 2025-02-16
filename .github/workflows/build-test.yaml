@@ -168,31 +168,36 @@ jobs:
           openwrt-source-${{ runner.os }}-
         fail-on-cache-miss: true
 
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF ${{ env.OPENWRT_ROOT }}/feeds.conf.default
-        cd ${{ env.OPENWRT_ROOT }}
-        ./scripts/feeds clean
-        
-        # 使用重试机制更新 feeds
-        update_feeds_with_retry() {
-          for i in $(seq 1 ${{ env.RETRY_COUNT }}); do
-            echo "Updating feeds attempt $i of ${{ env.RETRY_COUNT }}"
-            if ./scripts/feeds update -a; then
-              return 0
-            fi
-            sleep ${{ env.RETRY_WAIT }}
-          done
-          return 1
-        }
-        
-        if ! update_feeds_with_retry; then
-          echo "::error::Failed to update feeds after ${{ env.RETRY_COUNT }} attempts"
-          exit 1
+- name: Load custom feeds
+  run: |
+    if [ -e $FEEDS_CONF ]; then
+      mv $FEEDS_CONF ${{ env.OPENWRT_ROOT }}/feeds.conf.default
+    else
+      echo "::error:: $FEEDS_CONF file not found"
+      exit 1
+    fi
+    cd ${{ env.OPENWRT_ROOT }}
+    ./scripts/feeds clean
+    
+    # 使用重试机制更新 feeds
+    update_feeds_with_retry() {
+      for i in $(seq 1 ${{ env.RETRY_COUNT }}); do
+        echo "Updating feeds attempt $i of ${{ env.RETRY_COUNT }}"
+        if ./scripts/feeds update -a; then
+          return 0
         fi
-        
-        ./scripts/feeds install -a
-
+        sleep ${{ env.RETRY_WAIT }}
+      done
+      return 1
+    }
+    
+    if ! update_feeds_with_retry; then
+      echo "::error::Failed to update feeds after ${{ env.RETRY_COUNT }} attempts"
+      exit 1
+    fi
+    
+    ./scripts/feeds install -a
+    
     - name: Run DIY script part 1
       run: |
         cd ${{ env.OPENWRT_ROOT }}
