@@ -271,7 +271,7 @@ jobs:
           echo "::warning::$DIY_P2_SH file not found, skipping custom script"
         fi
 
-    - name: Download package
+- name: Download package
       id: package
       run: |
         cd ${{ env.OPENWRT_ROOT }}
@@ -298,7 +298,7 @@ jobs:
         if ! timeout 1800 make download -j8; then
           echo "Parallel download failed, switching to sequential download..."
           
-          # 针对性下载可能出问题的包
+          # 定义问题包列表
           problem_packages=(
             "busybox"
             "e2fsprogs"
@@ -308,6 +308,7 @@ jobs:
             "util-linux"
           )
           
+          # 逐个下载问题包
           for pkg in "${problem_packages[@]}"; do
             if [ ! -f "dl/${pkg}*.tar.*" ]; then
               if ! download_with_retry "$pkg"; then
