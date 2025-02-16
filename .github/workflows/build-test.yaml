@@ -1,4 +1,4 @@
-name: Build OpenWrt（分步式）
+name: Build OpenWrt
 
 on:
   repository_dispatch:
@@ -17,6 +17,8 @@ env:
   UPLOAD_WETRANSFER: false
   UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
+  # 定义构建目录在大容量磁盘上
+  BUILD_ROOT: /home/runner/work/openwrt-new-rom/openwrt-new-rom
 
 jobs:
   prepare:
@@ -24,10 +26,10 @@ jobs:
     steps:
       - name: Before freeing up disk space
         run: |
-          echo "Before freeing up disk space"
-          echo "=============================================================================="
+          echo "Before cleaning:"
           df -hT
-          echo "=============================================================================="
+          echo "Available storage on build volume:"
+          df -h ${{ env.BUILD_ROOT }}
 
       - name: "Optimize Disk Space"
         uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
@@ -61,20 +63,21 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
-      - name: Free up disk space complete
+      - name: Prepare build directory
         run: |
-          echo "Free up disk space complete"
-          echo "=============================================================================="
-          df -hT
-          echo "=============================================================================="
+          sudo mkdir -p ${{ env.BUILD_ROOT }}
+          sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
+          echo "Build directory ready at ${{ env.BUILD_ROOT }}"
+          df -h ${{ env.BUILD_ROOT }}
 
       - name: Checkout
         uses: actions/checkout@main
+        with:
+          path: ${{ env.BUILD_ROOT }}/source
 
       - name: Initialization environment
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
+          cd ${{ env.BUILD_ROOT }}
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
           bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
@@ -83,119 +86,86 @@ jobs:
           mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
           libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
           vim wget xmlto xxd zlib1g-dev python3-setuptools
-          sudo -E apt-get -qq autoremove --purge
-          sudo -E apt-get -qq clean
-          sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
-          /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
-          sudo timedatectl set-timezone "$TZ"
-          sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
       - name: Clone source code
         run: |
+          cd ${{ env.BUILD_ROOT }}
           git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
 
       - name: Load custom feeds
         run: |
-          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-          chmod +x $DIY_P1_SH
+          cd ${{ env.BUILD_ROOT }}
+          [ -e source/$FEEDS_CONF ] && mv source/$FEEDS_CONF openwrt/feeds.conf.default
+          chmod +x source/$DIY_P1_SH
           cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P1_SH
+          ${{ env.BUILD_ROOT }}/source/$DIY_P1_SH
 
       - name: Update and Install feeds
         run: |
-          cd openwrt
+          cd ${{ env.BUILD_ROOT }}/openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Load custom configuration
         run: |
-          [ -e files ] && mv files openwrt/files
-          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-          chmod +x $DIY_P2_SH
+          cd ${{ env.BUILD_ROOT }}
+          [ -e source/files ] && mv source/files openwrt/files
+          [ -e source/$CONFIG_FILE ] && mv source/$CONFIG_FILE openwrt/.config
+          chmod +x source/$DIY_P2_SH
           cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P2_SH
+          ${{ env.BUILD_ROOT }}/source/$DIY_P2_SH
 
       - name: Download package
         id: package
         run: |
-          cd openwrt
+          cd ${{ env.BUILD_ROOT }}/openwrt
           make defconfig
           make download -j8
-          find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
 
       - name: Cache OpenWrt
         uses: actions/cache@v3
         with:
-          path: |
-            openwrt
-            !openwrt/dl
-            !openwrt/build_dir
-            !openwrt/staging_dir
-            !openwrt/tmp
+          path: ${{ env.BUILD_ROOT }}/openwrt
           key: openwrt-${{ github.sha }}
 
   build-tools:
     needs: prepare
     runs-on: ubuntu-22.04
     steps:
-      - name: Before freeing up disk space
+      - name: Space cleanup and preparation
         run: |
-          echo "Before freeing up disk space"
-          echo "=============================================================================="
+          sudo mkdir -p ${{ env.BUILD_ROOT }}
+          sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
+          
+          # 运行空间清理脚本
+          echo "Before cleaning:"
           df -hT
-          echo "=============================================================================="
-
-      - name: "Optimize Disk Space"
-        uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
-        with:
-          operate_sudo: "True"
-          general_include: ".+"
-          general_exclude: |-
-            ^GCC$
-            ^G\+\+$
-            Clang
-            LLVM
-          docker_include: ".+"
-          docker_prune: "True"
-          docker_clean: "True"
-          apt_prune: "True"
-          apt_clean: "True"
-          homebrew_prune: "True"
-          homebrew_clean: "True"
-          npm_prune: "True"
-          npm_clean: "True"
-          os_swap: "True"
-
-      - name: Freeing up disk space
-        uses: easimon/maximize-build-space@master
-        with: 
-          root-reserve-mb: 2048
-          swap-size-mb: 1
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
+          
+          # 运行两个清理工具
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          docker rmi $(docker images -q) || true
 
       - name: Restore cache
         uses: actions/cache@v3
         with:
-          path: openwrt
+          path: ${{ env.BUILD_ROOT }}/openwrt
           key: openwrt-${{ github.sha }}
 
       - name: Compile tools
         run: |
-          cd openwrt
+          cd ${{ env.BUILD_ROOT }}/openwrt
           make tools/install -j$(nproc)
           make toolchain/install -j$(nproc)
+          # 清理不需要的文件
+          find build_dir/host -name '.built*' -exec rm -f {} \;
 
       - name: Cache tools
         uses: actions/cache@v3
         with:
           path: |
-            openwrt/staging_dir
-            openwrt/build_dir
+            ${{ env.BUILD_ROOT }}/openwrt/staging_dir
+            ${{ env.BUILD_ROOT }}/openwrt/build_dir
           key: openwrt-tools-${{ github.sha }}
 
   build-packages:
@@ -206,138 +176,75 @@ jobs:
         chunk: [1, 2, 3]
       fail-fast: false
     steps:
-      - name: Before freeing up disk space
+      - name: Space cleanup and preparation
         run: |
-          echo "Before freeing up disk space"
-          echo "=============================================================================="
+          sudo mkdir -p ${{ env.BUILD_ROOT }}
+          sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
+          
+          # 清理空间
+          echo "Before cleaning:"
           df -hT
-          echo "=============================================================================="
-
-      - name: "Optimize Disk Space"
-        uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
-        with:
-          operate_sudo: "True"
-          general_include: ".+"
-          general_exclude: |-
-            ^GCC$
-            ^G\+\+$
-            Clang
-            LLVM
-          docker_include: ".+"
-          docker_prune: "True"
-          docker_clean: "True"
-          apt_prune: "True"
-          apt_clean: "True"
-          homebrew_prune: "True"
-          homebrew_clean: "True"
-          npm_prune: "True"
-          npm_clean: "True"
-          os_swap: "True"
-
-      - name: Freeing up disk space
-        uses: easimon/maximize-build-space@master
-        with: 
-          root-reserve-mb: 2048
-          swap-size-mb: 1
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
+          
+          # 运行清理工具
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          docker rmi $(docker images -q) || true
 
       - name: Restore caches
         uses: actions/cache@v3
         with:
-          path: |
-            openwrt
-            openwrt/staging_dir
-            openwrt/build_dir
+          path: ${{ env.BUILD_ROOT }}/openwrt
           key: openwrt-tools-${{ github.sha }}
 
       - name: Compile packages (Chunk ${{ matrix.chunk }})
         run: |
-          cd openwrt
+          cd ${{ env.BUILD_ROOT }}/openwrt
           case ${{ matrix.chunk }} in
             1)
-              echo "===== 编译 Node.js 相关包 ====="
               make package/feeds/packages/{node,npm,libnghttp2,icu}/compile -j$(nproc)
               ;;
             2)
-              echo "===== 编译 Python/PHP/Ruby 相关包 ====="
               make package/feeds/packages/{python*,ruby,perl,php*}/compile -j$(nproc)
               ;;
             3)
-              echo "===== 编译其他包 ====="
               make package/compile -j$(nproc)
               ;;
           esac
+          
+          # 清理编译过程中的临时文件
+          rm -rf build_dir/target-*/tmp
 
       - name: Save chunk result
         uses: actions/upload-artifact@v3
         with:
           name: packages-chunk-${{ matrix.chunk }}
-          path: |
-            openwrt/bin/packages
-            openwrt/bin/targets
+          path: ${{ env.BUILD_ROOT }}/openwrt/bin
           retention-days: 1
 
   build-firmware:
     needs: build-packages
     runs-on: ubuntu-22.04
     steps:
-      - name: Before freeing up disk space
+      - name: Space cleanup and preparation
         run: |
-          echo "Before freeing up disk space"
-          echo "=============================================================================="
-          df -hT
-          echo "=============================================================================="
-
-      - name: "Optimize Disk Space"
-        uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
-        with:
-          operate_sudo: "True"
-          general_include: ".+"
-          general_exclude: |-
-            ^GCC$
-            ^G\+\+$
-            Clang
-            LLVM
-          docker_include: ".+"
-          docker_prune: "True"
-          docker_clean: "True"
-          apt_prune: "True"
-          apt_clean: "True"
-          homebrew_prune: "True"
-          homebrew_clean: "True"
-          npm_prune: "True"
-          npm_clean: "True"
-          os_swap: "True"
-
-      - name: Freeing up disk space
-        uses: easimon/maximize-build-space@master
-        with: 
-          root-reserve-mb: 2048
-          swap-size-mb: 1
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
+          sudo mkdir -p ${{ env.BUILD_ROOT }}
+          sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
+          df -h ${{ env.BUILD_ROOT }}
 
       - name: Restore OpenWrt cache
         uses: actions/cache@v3
         with:
-          path: openwrt
+          path: ${{ env.BUILD_ROOT }}/openwrt
           key: openwrt-${{ github.sha }}
 
       - name: Download package chunks
         uses: actions/download-artifact@v3
         with:
-          path: chunks
+          path: ${{ env.BUILD_ROOT }}/chunks
 
       - name: Merge chunks and build firmware
         id: compile
         run: |
+          cd ${{ env.BUILD_ROOT }}
           mkdir -p openwrt/bin
           cp -r chunks/packages-chunk-*/* openwrt/bin/
           cd openwrt
@@ -348,25 +255,20 @@ jobs:
           [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-      - name: Check space usage
-        if: (!cancelled())
-        run: df -hT
-
       - name: Organize files
-        id: organize
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
         run: |
-          cd openwrt/bin/targets/*/*
+          cd ${{ env.BUILD_ROOT }}/openwrt/bin/targets/*/*
           rm -rf packages
           echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-          echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: Upload firmware directory
-        uses: actions/upload-artifact@main
-        if: steps.organize.outputs.status == 'success' && !cancelled()
+      - name: Upload firmware
+        uses: actions/upload-artifact@v3
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
         with:
           name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
           path: ${{ env.FIRMWARE }}
+          retention-days: 7
 
       - name: Generate release tag
         id: tag
@@ -374,9 +276,6 @@ jobs:
         run: |
           echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
           touch release.txt
-          [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-          [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
-          echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Upload firmware to release
         uses: softprops/action-gh-release@v1
