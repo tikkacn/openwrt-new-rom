@@ -1,4 +1,4 @@
-name: Build OpenWrt（分步式）
+name: Build OpenWrt
 
 on:
   repository_dispatch:
@@ -234,23 +234,42 @@ jobs:
           sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
           df -h ${{ env.BUILD_ROOT }}
 
-      - name: Restore OpenWrt and Tools Cache
+      - name: Restore OpenWrt Source
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.BUILD_ROOT }}/openwrt
+          key: openwrt-source-${{ github.sha }}
+          restore-keys: |
+            openwrt-source-
+
+      - name: Restore Tools and Toolchain
         uses: actions/cache@v3
         with:
           path: |
-            ${{ env.BUILD_ROOT }}/openwrt
             ${{ env.BUILD_ROOT }}/openwrt/staging_dir
             ${{ env.BUILD_ROOT }}/openwrt/build_dir
           key: openwrt-tools-${{ github.sha }}
           restore-keys: |
             openwrt-tools-
-            openwrt-source-
 
       - name: Verify Build Environment
         run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt || exit 1
+          cd ${{ env.BUILD_ROOT }}
+          if [ ! -d "openwrt" ]; then
+            echo "ERROR: OpenWrt directory not found!"
+            echo "Current directory contents:"
+            ls -la
+            exit 1
+          fi
+          cd openwrt || exit 1
           echo "Build environment ready in $(pwd)"
           ls -la
+          
+          if [ ! -f ".config" ]; then
+            echo "ERROR: .config file not found!"
+            exit 1
+          fi
+          echo "Found .config file"
 
       - name: Compile packages (Chunk ${{ matrix.chunk }})
         run: |
