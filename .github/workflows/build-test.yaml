@@ -67,12 +67,16 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@main
+        with:
+          path: source
 
       - name: Prepare Build Environment
         run: |
           sudo mkdir -p ${{ env.BUILD_ROOT }}
           sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
           cd ${{ env.BUILD_ROOT }}
+          echo "Build root prepared: $(pwd)"
+          ls -la
 
       - name: Initialization environment
         env:
@@ -94,45 +98,63 @@ jobs:
         run: |
           cd ${{ env.BUILD_ROOT }}
           git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-          ln -sf ${{ env.BUILD_ROOT }}/openwrt $GITHUB_WORKSPACE/openwrt
+          echo "Source code cloned to $(pwd)/openwrt"
+          ls -la openwrt
+
+      - name: Copy Configuration Files
+        run: |
+          echo "Copying configuration files..."
+          cd ${{ env.BUILD_ROOT }}
+          
+          # 复制 .config 文件
+          echo "Copying .config file from source directory..."
+          cp source/.config openwrt/.config
+          
+          # 复制其他文件
+          [ -d "source/files" ] && cp -r source/files openwrt/files
+          
+          # 验证复制是否成功
+          if [ -f "openwrt/.config" ]; then
+            echo ".config file successfully copied"
+            echo "Contents of .config:"
+            head -n 5 openwrt/.config
+          else
+            echo "ERROR: Failed to copy .config file"
+            echo "Current directory: $(pwd)"
+            echo "Source directory contents:"
+            ls -la source/
+            exit 1
+          fi
 
       - name: Load custom feeds
         run: |
-          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-          chmod +x $DIY_P1_SH
+          cd ${{ env.BUILD_ROOT }}
+          [ -e source/$FEEDS_CONF ] && cp source/$FEEDS_CONF openwrt/feeds.conf.default
+          chmod +x source/$DIY_P1_SH
           cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P1_SH
+          ${{ env.BUILD_ROOT }}/source/$DIY_P1_SH
 
       - name: Update feeds
-        run: cd openwrt && ./scripts/feeds update -a
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          ./scripts/feeds update -a
 
       - name: Install feeds
-        run: cd openwrt && ./scripts/feeds install -a
-
-      - name: Load custom configuration
         run: |
-          # 确保 .config 文件复制到正确位置
-          echo "Copying .config file..."
-          [ -e files ] && mv files ${{ env.BUILD_ROOT }}/openwrt/files
-          cp $GITHUB_WORKSPACE/.config ${{ env.BUILD_ROOT }}/openwrt/.config
-          chmod +x $DIY_P2_SH
           cd ${{ env.BUILD_ROOT }}/openwrt
-          $GITHUB_WORKSPACE/$DIY_P2_SH
-          
-          # 验证 .config 文件是否已复制
-          if [ -f ".config" ]; then
-            echo ".config file successfully copied"
-            echo "Contents of .config file:"
-            head -n 5 .config
-          else
-            echo "ERROR: Failed to copy .config file"
-            exit 1
-          fi
+          ./scripts/feeds install -a
+
+      - name: Run Custom Script
+        run: |
+          cd ${{ env.BUILD_ROOT }}
+          chmod +x source/$DIY_P2_SH
+          cd openwrt
+          ${{ env.BUILD_ROOT }}/source/$DIY_P2_SH
 
       - name: Download package
         id: package
         run: |
-          cd openwrt
+          cd ${{ env.BUILD_ROOT }}/openwrt
           make defconfig
           make download -j8
           find dl -size -1024c -exec rm -f {} \;
