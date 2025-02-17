@@ -1,4 +1,4 @@
-name: Build OpenWrt（分步式）
+name: Build OpenWrt（分步式优化版）
 
 on:
   repository_dispatch:
@@ -18,6 +18,8 @@ env:
   UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
   BUILD_ROOT: /home/runner/work/openwrt-new-rom/openwrt-new-rom
+  RETRY_COUNT: 3
+  SLEEP_INTERVAL: 30
 
 jobs:
   prepare:
@@ -27,43 +29,31 @@ jobs:
         run: |
           echo "Before cleaning:"
           df -hT
+          free -h
 
-      - name: "Optimize Disk Space"
-        uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
-        with:
-          operate_sudo: "True"
-          general_include: ".+"
-          general_exclude: |-
-            ^GCC$
-            ^G\+\+$
-            Clang
-            LLVM
-          docker_include: ".+"
-          docker_prune: "True"
-          docker_clean: "True"
-          apt_prune: "True"
-          apt_clean: "True"
-          homebrew_prune: "True"
-          homebrew_clean: "True"
-          npm_prune: "True"
-          npm_clean: "True"
-          os_swap: "True"
-
-      - name: Freeing up disk space
-        uses: easimon/maximize-build-space@master
-        with: 
-          root-reserve-mb: 2048
-          swap-size-mb: 1
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
+      - name: Enhanced Disk Space Optimization
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/gradle*
+          sudo rm -rf /usr/local/share/powershell
+          sudo apt-get clean
+          docker system prune -af
+          sudo swapoff -a
+          sudo rm -f /swapfile
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
 
       - name: Space Information After Cleanup
         run: |
           echo "After cleaning:"
           df -hT
+          free -h
 
       - name: Checkout
         uses: actions/checkout@main
@@ -76,72 +66,55 @@ jobs:
           sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
           cd ${{ env.BUILD_ROOT }}
           echo "Build root prepared: $(pwd)"
-          ls -la
 
-      - name: Initialization environment
+      - name: Enhanced Environment Setup
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo -E apt-get -qq update
-          sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
-          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev python3-setuptools
+          sudo -E apt-get -qq install $(cat <<-EOF
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential
+            bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext
+            gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev
+            libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz
+            mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7
+            python3 python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools
+            subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+            python3-setuptools
+          EOF
+          )
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
           sudo timedatectl set-timezone "$TZ"
 
-      - name: Clone source code
+      - name: Clone Source Code
         run: |
           cd ${{ env.BUILD_ROOT }}
           git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
           echo "Source code cloned to $(pwd)/openwrt"
-          ls -la openwrt
 
-      - name: Copy Configuration Files
+      - name: Enhanced Config Copy
         run: |
-          echo "Copying configuration files..."
           cd ${{ env.BUILD_ROOT }}
-          
-          # 复制 .config 文件
-          echo "Copying .config file from source directory..."
-          cp source/.config openwrt/.config
-          
-          # 复制其他文件
+          echo "Copying configuration files..."
+          [ -f "source/.config" ] && cp source/.config openwrt/.config
           [ -d "source/files" ] && cp -r source/files openwrt/files
           
-          # 验证复制是否成功
-          if [ -f "openwrt/.config" ]; then
-            echo ".config file successfully copied"
-            echo "Contents of .config:"
-            head -n 5 openwrt/.config
-          else
-            echo "ERROR: Failed to copy .config file"
-            echo "Current directory: $(pwd)"
-            echo "Source directory contents:"
-            ls -la source/
+          if [ ! -f "openwrt/.config" ]; then
+            echo "ERROR: .config file not found!"
             exit 1
           fi
+          echo ".config file verified"
 
-      - name: Load custom feeds
+      - name: Load and Update Feeds
         run: |
           cd ${{ env.BUILD_ROOT }}
           [ -e source/$FEEDS_CONF ] && cp source/$FEEDS_CONF openwrt/feeds.conf.default
           chmod +x source/$DIY_P1_SH
           cd openwrt
           ${{ env.BUILD_ROOT }}/source/$DIY_P1_SH
-
-      - name: Update feeds
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
           ./scripts/feeds update -a
-
-      - name: Install feeds
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
           ./scripts/feeds install -a
 
       - name: Run Custom Script
@@ -151,76 +124,79 @@ jobs:
           cd openwrt
           ${{ env.BUILD_ROOT }}/source/$DIY_P2_SH
 
-      - name: Download package
+      - name: Download Package
         id: package
         run: |
           cd ${{ env.BUILD_ROOT }}/openwrt
           make defconfig
-          make download -j8
+          make download -j8 || make download -j1 V=s
           find dl -size -1024c -exec rm -f {} \;
 
-      - name: Cache OpenWrt Source
+      - name: Enhanced Source Cache
         uses: actions/cache@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-source-${{ github.sha }}
+          key: openwrt-source-${{ github.sha }}-${{ github.run_id }}
           restore-keys: |
+            openwrt-source-${{ github.sha }}-
             openwrt-source-
 
   build-tools:
     needs: prepare
     runs-on: ubuntu-22.04
     steps:
-      - name: Space Cleanup
+      - name: Restore Build Environment
         run: |
           sudo mkdir -p ${{ env.BUILD_ROOT }}
           sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          df -h ${{ env.BUILD_ROOT }}
+          echo "Available resources:"
+          df -h
+          free -h
 
       - name: Restore OpenWrt Source
         uses: actions/cache@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-source-${{ github.sha }}
+          key: openwrt-source-${{ github.sha }}-${{ github.run_id }}
           restore-keys: |
+            openwrt-source-${{ github.sha }}-
             openwrt-source-
 
-      - name: Verify OpenWrt Directory and Config
+      - name: Build Tools and Toolchain
         run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt || exit 1
-          echo "OpenWrt directory contents:"
-          ls -la
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          for attempt in $(seq 1 $RETRY_COUNT); do
+            echo "Building tools (attempt $attempt)"
+            if make tools/install -j$(nproc); then
+              break
+            elif [ $attempt -eq $RETRY_COUNT ]; then
+              echo "Failed to build tools after $RETRY_COUNT attempts"
+              exit 1
+            fi
+            echo "Retrying after $SLEEP_INTERVAL seconds..."
+            sleep $SLEEP_INTERVAL
+          done
           
-          if [ ! -f ".config" ]; then
-            echo "ERROR: .config file not found!"
-            exit 1
-          fi
-          echo "Found .config file"
-          echo "First few lines of .config:"
-          head -n 5 .config
+          for attempt in $(seq 1 $RETRY_COUNT); do
+            echo "Building toolchain (attempt $attempt)"
+            if make toolchain/install -j$(nproc); then
+              break
+            elif [ $attempt -eq $RETRY_COUNT ]; then
+              echo "Failed to build toolchain after $RETRY_COUNT attempts"
+              exit 1
+            fi
+            echo "Retrying after $SLEEP_INTERVAL seconds..."
+            sleep $SLEEP_INTERVAL
+          done
 
-      - name: Setup Build Environment
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
-          make defconfig
-          echo "Build environment configured"
-
-      - name: Compile tools and toolchain
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
-          echo "Starting tools compilation in $(pwd)"
-          make tools/install -j$(nproc)
-          make toolchain/install -j$(nproc)
-
-      - name: Cache Tools and Toolchain
+      - name: Cache Build Tools
         uses: actions/cache@v3
         with:
           path: |
             ${{ env.BUILD_ROOT }}/openwrt/staging_dir
             ${{ env.BUILD_ROOT }}/openwrt/build_dir
-          key: openwrt-tools-${{ github.sha }}
-
-  build-packages:
+          key: openwrt-tools-${{ github.sha }}-${{ github.run_id }}
+build-packages:
     needs: build-tools
     runs-on: ubuntu-22.04
     strategy:
@@ -228,72 +204,85 @@ jobs:
         chunk: [1, 2, 3, 4]
       fail-fast: false
     steps:
-      - name: Space Cleanup
+      - name: Prepare Build Environment
         run: |
           sudo mkdir -p ${{ env.BUILD_ROOT }}
           sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          df -h ${{ env.BUILD_ROOT }}
+          df -h
+          free -h
 
       - name: Restore OpenWrt Source
         uses: actions/cache@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-source-${{ github.sha }}
-          restore-keys: |
-            openwrt-source-
+          key: openwrt-source-${{ github.sha }}-${{ github.run_id }}
 
-      - name: Restore Tools and Toolchain
+      - name: Restore Build Tools
         uses: actions/cache@v3
         with:
           path: |
             ${{ env.BUILD_ROOT }}/openwrt/staging_dir
             ${{ env.BUILD_ROOT }}/openwrt/build_dir
-          key: openwrt-tools-${{ github.sha }}
-          restore-keys: |
-            openwrt-tools-
+          key: openwrt-tools-${{ github.sha }}-${{ github.run_id }}
 
-      - name: Verify Build Environment
+      - name: Optimize Build Environment
         run: |
           cd ${{ env.BUILD_ROOT }}
-          if [ ! -d "openwrt" ]; then
-            echo "ERROR: OpenWrt directory not found!"
-            echo "Current directory contents:"
-            ls -la
-            exit 1
-          fi
-          cd openwrt || exit 1
-          echo "Build environment ready in $(pwd)"
-          ls -la
-          
-          if [ ! -f ".config" ]; then
-            echo "ERROR: .config file not found!"
-            exit 1
-          fi
-          echo "Found .config file"
+          sudo rm -rf /usr/share/dotnet
+          sudo swapoff -a
+          sudo rm -f /swapfile
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap status:"
+          free -h
 
-      - name: Compile packages (Chunk ${{ matrix.chunk }})
+      - name: Build Packages (Chunk ${{ matrix.chunk }})
         run: |
           cd ${{ env.BUILD_ROOT }}/openwrt
+          
+          build_with_retry() {
+            local package=$1
+            for attempt in $(seq 1 $RETRY_COUNT); do
+              echo "Building $package (attempt $attempt)"
+              if make -j1 V=s $package; then
+                return 0
+              elif [ $attempt -eq $RETRY_COUNT ]; then
+                echo "Failed to build $package after $RETRY_COUNT attempts"
+                return 1
+              fi
+              echo "Retrying after $SLEEP_INTERVAL seconds..."
+              sleep $SLEEP_INTERVAL
+            done
+          }
+          
           case ${{ matrix.chunk }} in
             1)
               # 基础依赖包
-              make -j1 V=s package/libs/toolchain/compile
-              make -j1 V=s package/libs/mbedtls/compile
-              make -j1 V=s package/libs/zlib/compile
+              for pkg in "package/libs/toolchain/compile" "package/libs/mbedtls/compile" "package/libs/zlib/compile"; do
+                build_with_retry $pkg || exit 1
+              done
               ;;
             2)
-              # Node.js 相关
-              make -j1 V=s package/feeds/packages/node/compile
-              make -j1 V=s package/feeds/packages/npm/compile
-              make -j1 V=s package/feeds/packages/libnghttp2/compile
+              # Node.js 相关（调整编译顺序）
+              build_with_retry "package/feeds/packages/libnghttp2/compile" || exit 1
+              sleep $SLEEP_INTERVAL
+              build_with_retry "package/feeds/packages/node/compile" || exit 1
+              sleep $SLEEP_INTERVAL
+              build_with_retry "package/feeds/packages/npm/compile" || exit 1
               ;;
             3)
               # Python 相关
-              make -j1 V=s package/feeds/packages/python3/compile
-              make -j1 V=s package/feeds/packages/python3-pip/compile
+              build_with_retry "package/feeds/packages/python3/compile" || exit 1
+              sleep $SLEEP_INTERVAL
+              build_with_retry "package/feeds/packages/python3-pip/compile" || exit 1
               ;;
             4)
-              # 其他包
+              # 其他包（分批编译）
+              echo "Building remaining packages..."
+              make -j1 V=s package/libs/*/compile || echo "Some libs failed but continuing..."
+              sleep $SLEEP_INTERVAL
               make -j1 V=s package/compile || make -j1 V=sc package/compile
               ;;
           esac
@@ -310,17 +299,17 @@ jobs:
     needs: build-packages
     runs-on: ubuntu-22.04
     steps:
-      - name: Space Cleanup
+      - name: Prepare Environment
         run: |
           sudo mkdir -p ${{ env.BUILD_ROOT }}
           sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          df -h ${{ env.BUILD_ROOT }}
+          df -h
 
       - name: Restore OpenWrt Source
         uses: actions/cache@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-source-${{ github.sha }}
+          key: openwrt-source-${{ github.sha }}-${{ github.run_id }}
 
       - name: Download Package Chunks
         uses: actions/download-artifact@v4
@@ -328,16 +317,26 @@ jobs:
           path: ${{ env.BUILD_ROOT }}/chunks
           merge-multiple: true
 
-      - name: Merge Chunks and Build Firmware
+      - name: Build Firmware
         id: compile
         run: |
           cd ${{ env.BUILD_ROOT }}/openwrt
           mkdir -p bin
           cp -r ../chunks/packages-chunk-*/* bin/
           make package/index
-          echo "Building firmware with $(nproc) threads"
-          make -j$(nproc) || make -j1 V=s
-          echo "status=success" >> $GITHUB_OUTPUT
+          echo "Building firmware..."
+          for attempt in $(seq 1 $RETRY_COUNT); do
+            echo "Firmware build attempt $attempt"
+            if make -j$(nproc) || make -j1 V=s; then
+              echo "status=success" >> $GITHUB_OUTPUT
+              break
+            elif [ $attempt -eq $RETRY_COUNT ]; then
+              echo "Failed to build firmware after $RETRY_COUNT attempts"
+              exit 1
+            fi
+            echo "Retrying after $SLEEP_INTERVAL seconds..."
+            sleep $SLEEP_INTERVAL
+          done
           grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
           [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
