@@ -295,7 +295,7 @@ build-packages:
           retention-days: 1
           compression-level: 6
 
-  build-firmware:
+build-firmware:
     needs: build-packages
     runs-on: ubuntu-22.04
     steps:
