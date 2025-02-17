@@ -225,7 +225,7 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        chunk: [1, 2, 3]
+        chunk: [1, 2, 3, 4]
       fail-fast: false
     steps:
       - name: Space Cleanup
@@ -276,13 +276,25 @@ jobs:
           cd ${{ env.BUILD_ROOT }}/openwrt
           case ${{ matrix.chunk }} in
             1)
-              make package/feeds/packages/{node,npm,libnghttp2,icu}/compile -j$(nproc)
+              # 基础依赖包
+              make -j1 V=s package/libs/toolchain/compile
+              make -j1 V=s package/libs/mbedtls/compile
+              make -j1 V=s package/libs/zlib/compile
               ;;
             2)
-              make package/feeds/packages/{python*,ruby,perl,php*}/compile -j$(nproc)
+              # Node.js 相关
+              make -j1 V=s package/feeds/packages/node/compile
+              make -j1 V=s package/feeds/packages/npm/compile
+              make -j1 V=s package/feeds/packages/libnghttp2/compile
               ;;
             3)
-              make package/compile -j$(nproc)
+              # Python 相关
+              make -j1 V=s package/feeds/packages/python3/compile
+              make -j1 V=s package/feeds/packages/python3-pip/compile
+              ;;
+            4)
+              # 其他包
+              make -j1 V=s package/compile || make -j1 V=sc package/compile
               ;;
           esac
 
