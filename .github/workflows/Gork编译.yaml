@@ -34,8 +34,8 @@ jobs:
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 1024
-          swap-size-mb: 2048
+          root-reserve-mb: 512
+          swap-size-mb: 4096
           build-mount-path: ${{ env.BUILD_ROOT }}
           remove-dotnet: 'true'
           remove-android: 'true'
@@ -131,10 +131,12 @@ jobs:
 
       - name: Cache Source and Downloads
         continue-on-error: true
-        uses: actions/cache/save@v3
-        with:
-          path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-source-${{ github.sha }}-${{ github.run_id }}
+        run: |
+          cd ${{ env.BUILD_ROOT }}
+          mkdir -p cache_backup
+          rsync -av openwrt/ cache_backup/
+          tar -czf cache_backup.tar.gz cache_backup
+          echo "Cache backup created: $(du -sh cache_backup.tar.gz)"
 
       - name: Space Information After Prepare
         run: |
@@ -146,17 +148,29 @@ jobs:
     needs: prepare
     runs-on: ubuntu-22.04
     steps:
+      - name: Space Information Before
+        run: |
+          echo "Before setup:"
+          df -hT
+          free -h
+
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 2048
-          swap-size-mb: 1024
+          root-reserve-mb: 512
+          swap-size-mb: 4096
           build-mount-path: ${{ env.BUILD_ROOT }}
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
           remove-docker-images: 'true'
+
+      - name: Space Information After
+        run: |
+          echo "After setup:"
+          df -hT
+          free -h
 
       - name: Prepare Build Directory
         run: |
@@ -167,13 +181,18 @@ jobs:
 
       - name: Restore Cache
         id: cache-restore
-        uses: actions/cache/restore@v3
-        with:
-          path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-source-${{ github.sha }}-${{ github.run_id }}
+        run: |
+          cd ${{ env.BUILD_ROOT }}
+          if [ -f "cache_backup.tar.gz" ]; then
+            tar -xzf cache_backup.tar.gz
+            rsync -av cache_backup/ openwrt/
+            echo "Cache restored from backup"
+          else
+            echo "No cache backup found"
+          fi
 
       - name: Clone Source Code If Cache Fails
-        if: steps.cache-restore.outputs.cache-hit != 'true'
+        if: steps.cache-restore.outcome != 'success'
         run: |
           cd ${{ env.BUILD_ROOT }}
           git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
@@ -208,7 +227,7 @@ jobs:
           for target in tools/install toolchain/install; do
             for attempt in $(seq 1 $RETRY_COUNT); do
               echo "Building $target (attempt $attempt)"
-              if make -j$(nproc) V=s $target; then
+              if make -j1 V=s $target; then
                 break
               elif [ $attempt -eq $RETRY_COUNT ]; then
                 echo "Failed to build $target after $RETRY_COUNT attempts"
@@ -220,11 +239,27 @@ jobs:
             done
           done
 
+      - name: Clean Up Intermediate Files
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          find bin -type f -name "*.ipk" -delete
+          find bin -type f -name "*.deb" -delete
+          find bin -type f -name "*.tar.gz" -delete
+
+      - name: Space Information After Build
+        run: |
+          echo "After build:"
+          df -hT
+          free -h
+
       - name: Cache Build Results
-        uses: actions/cache/save@v3
-        with:
-          path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-base-${{ github.sha }}-${{ github.run_id }}
+        continue-on-error: true
+        run: |
+          cd ${{ env.BUILD_ROOT }}
+          mkdir -p cache_backup
+          rsync -av openwrt/ cache_backup/
+          tar -czf cache_backup.tar.gz cache_backup
+          echo "Cache backup created: $(du -sh cache_backup.tar.gz)"
 
   build-packages:
     needs: build-base
@@ -234,17 +269,29 @@ jobs:
         chunk: [1, 2, 3]
       fail-fast: false
     steps:
+      - name: Space Information Before
+        run: |
+          echo "Before setup:"
+          df -hT
+          free -h
+
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 2048
-          swap-size-mb: 1024
+          root-reserve-mb: 512
+          swap-size-mb: 4096
           build-mount-path: ${{ env.BUILD_ROOT }}
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
           remove-docker-images: 'true'
+
+      - name: Space Information After
+        run: |
+          echo "After setup:"
+          df -hT
+          free -h
 
       - name: Prepare Build Directory
         run: |
@@ -255,13 +302,18 @@ jobs:
 
       - name: Restore Cache
         id: cache-restore
-        uses: actions/cache/restore@v3
-        with:
-          path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-base-${{ github.sha }}-${{ github.run_id }}
+        run: |
+          cd ${{ env.BUILD_ROOT }}
+          if [ -f "cache_backup.tar.gz" ]; then
+            tar -xzf cache_backup.tar.gz
+            rsync -av cache_backup/ openwrt/
+            echo "Cache restored from backup"
+          else
+            echo "No cache backup found"
+          fi
 
       - name: Clone Source Code If Cache Fails
-        if: steps.cache-restore.outputs.cache-hit != 'true'
+        if: steps.cache-restore.outcome != 'success'
         run: |
           cd ${{ env.BUILD_ROOT }}
           git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
@@ -339,6 +391,19 @@ jobs:
               ;;
           esac
 
+      - name: Clean Up Intermediate Files
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          find bin -type f -name "*.ipk" -delete
+          find bin -type f -name "*.deb" -delete
+          find bin -type f -name "*.tar.gz" -delete
+
+      - name: Space Information After Build
+        run: |
+          echo "After build:"
+          df -hT
+          free -h
+
       - name: Verify Build Results
         run: |
           echo "Package build results:"
@@ -355,17 +420,29 @@ jobs:
     needs: build-packages
     runs-on: ubuntu-22.04
     steps:
+      - name: Space Information Before
+        run: |
+          echo "Before setup:"
+          df -hT
+          free -h
+
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 2048
-          swap-size-mb: 1024
+          root-reserve-mb: 512
+          swap-size-mb: 4096
           build-mount-path: ${{ env.BUILD_ROOT }}
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
           remove-docker-images: 'true'
+
+      - name: Space Information After
+        run: |
+          echo "After setup:"
+          df -hT
+          free -h
 
       - name: Prepare Build Directory
         run: |
@@ -376,13 +453,18 @@ jobs:
 
       - name: Restore Cache
         id: cache-restore
-        uses: actions/cache/restore@v3
-        with:
-          path: ${{ env.BUILD_ROOT }}/openwrt
-          key: openwrt-base-${{ github.sha }}-${{ github.run_id }}
+        run: |
+          cd ${{ env.BUILD_ROOT }}
+          if [ -f "cache_backup.tar.gz" ]; then
+            tar -xzf cache_backup.tar.gz
+            rsync -av cache_backup/ openwrt/
+            echo "Cache restored from backup"
+          else
+            echo "No cache backup found"
+          fi
 
       - name: Clone Source Code If Cache Fails
-        if: steps.cache-restore.outputs.cache-hit != 'true'
+        if: steps.cache-restore.outcome != 'success'
         run: |
           cd ${{ env.BUILD_ROOT }}
           git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
@@ -434,7 +516,7 @@ jobs:
           for attempt in $(seq 1 $RETRY_COUNT); do
             echo "Firmware build attempt $attempt"
             df -h
-            if make -j$(nproc) V=s || make -j1 V=s; then
+            if make -j1 V=s; then
               echo "status=success" >> $GITHUB_OUTPUT
               break
             elif [ $attempt -eq $RETRY_COUNT ]; then
@@ -448,6 +530,19 @@ jobs:
           grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
           [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+      - name: Clean Up Intermediate Files
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          find bin -type f -name "*.ipk" -delete
+          find bin -type f -name "*.deb" -delete
+          find bin -type f -name "*.tar.gz" -delete
+
+      - name: Space Information After Build
+        run: |
+          echo "After build:"
+          df -hT
+          free -h
 
       - name: Check Space Usage
         if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
