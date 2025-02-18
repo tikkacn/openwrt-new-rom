@@ -181,6 +181,9 @@ jobs:
             ${{ env.BUILD_ROOT }}/openwrt/build_dir
           key: openwrt-tools-${{ github.sha }}-${{ github.run_id }}
 
+# === 第一段结束 ===
+# === 第二段开始 ===
+
   build-packages:
     needs: build-tools
     runs-on: ubuntu-22.04
@@ -222,6 +225,8 @@ jobs:
       - name: Build Packages (Chunk ${{ matrix.chunk }})
         run: |
           cd ${{ env.BUILD_ROOT }}/openwrt
+          # 确保配置文件正确
+          make defconfig
           build_with_retry() {
             local package=$1
             for attempt in $(seq 1 $RETRY_COUNT); do
@@ -243,6 +248,9 @@ jobs:
               done
               ;;
             2)
+              # 确保依赖项都已安装
+              ./scripts/feeds update -a
+              ./scripts/feeds install -a
               build_with_retry "package/feeds/packages/libnghttp2/compile" || exit 1
               sleep $SLEEP_INTERVAL
               build_with_retry "package/feeds/packages/node/compile" || exit 1
@@ -250,6 +258,9 @@ jobs:
               build_with_retry "package/feeds/packages/npm/compile" || exit 1
               ;;
             3)
+              # 确保 Python 相关依赖正确安装
+              ./scripts/feeds update -a
+              ./scripts/feeds install -a
               build_with_retry "package/feeds/packages/python3/compile" || exit 1
               sleep $SLEEP_INTERVAL
               build_with_retry "package/feeds/packages/python3-pip/compile" || exit 1
@@ -350,16 +361,4 @@ jobs:
           name: |
             packages-chunk-*
           failOnError: false
-      - name: Delete Old Workflow Runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          retain_days: 1
-          keep_minimum_runs: 3
-      - name: Remove Old Releases
-        uses: dev-drprasad/delete-older-releases@v0.1.0
-        if: env.UPLOAD_RELEASE == 'true'
-        with:
-          keep_latest: 3
-          delete_tags: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Delete Ol
