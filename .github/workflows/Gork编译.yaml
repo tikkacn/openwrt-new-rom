@@ -259,6 +259,11 @@ jobs:
           echo "OpenWrt directory found and structure:"
           ls -la ${{ env.BUILD_ROOT }}/openwrt
 
+      - name: Ensure Configuration is Set
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          make defconfig
+
       - name: Build Packages (Chunk ${{ matrix.chunk }})
         run: |
           cd ${{ env.BUILD_ROOT }}/openwrt || exit 1
