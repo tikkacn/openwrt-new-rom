@@ -1,4 +1,4 @@
-name: Build X86_64 OpenWrt（Gork编译）
+name: Build X86_64 OpenWrt（GORK编译）
 
 on:
   repository_dispatch:
@@ -197,6 +197,14 @@ jobs:
           libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
           vim wget xmlto xxd zlib1g-dev python3-setuptools
 
+      - name: Check .config file permissions
+        run: |
+          ls -l $CONFIG_FILE
+
+      - name: Check .config file content
+        run: |
+          cat $CONFIG_FILE
+
       - name: Load custom configuration
         run: |
           sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
@@ -204,9 +212,15 @@ jobs:
             mv files openwrt/files
           fi
           if [ -e $CONFIG_FILE ]; then
+            echo "Found .config file in the root directory"
+            if [ ! -d openwrt ]; then
+              echo "Error: openwrt directory not found"
+              exit 1
+            fi
             mv $CONFIG_FILE openwrt/.config
+            echo "Moved .config to openwrt directory"
           else
-            echo "Error: $CONFIG_FILE not found"
+            echo "Error: $CONFIG_FILE not found in the root directory"
             exit 1
           fi
           if [ -e $DIY_P2_SH ]; then
@@ -337,30 +351,4 @@ jobs:
           echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
           touch release.txt
           [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-          [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
-          echo "status=success" >> $GITHUB_OUTPUT
-
-      - name: Upload firmware to release
-        uses: softprops/action-gh-release@v1
-        if: steps.tag.outputs.status == 'success'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.tag.outputs.release_tag }}
-          body_path: release.txt
-          files: ${{ env.FIRMWARE }}/*
-
-      - name: Delete workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          retain_days: 1
-          keep_minimum_runs: 3
-
-      - name: Remove old Releases
-        uses: dev-drprasad/delete-older-releases@v0.1.0
-        if: env.UPLOAD_RELEASE == 'true'
-        with:
-          keep_latest: 3
-          delete_tags: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wet<|eos|>
