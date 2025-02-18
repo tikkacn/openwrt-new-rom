@@ -1,4 +1,4 @@
-name: Build OpenWrt（Gork编译）
+name: Build X86_64 OpenWrt（Gork编译）
 
 on:
   repository_dispatch:
@@ -17,568 +17,341 @@ env:
   UPLOAD_WETRANSFER: false
   UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
-  BUILD_ROOT: /home/runner/work/openwrt-new-rom/openwrt-new-rom
-  RETRY_COUNT: 3
-  SLEEP_INTERVAL: 30
 
 jobs:
   prepare:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    outputs:
+      commit_sha: ${{ steps.set-output.outputs.commit_sha }}
     steps:
-      - name: Space Information Before
+      - name: Before freeing up disk space
         run: |
-          echo "Before setup:"
+          echo "Before freeing up disk space"
+          echo "=============================================================================="
           df -hT
-          free -h
+          echo "=============================================================================="
 
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
+      - name: "Optimize Disk Space"
+        uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
         with:
-          root-reserve-mb: 512
-          swap-size-mb: 4096
-          build-mount-path: ${{ env.BUILD_ROOT }}
+          operate_sudo: "True"
+          general_include: ".+"
+          general_exclude: |-
+            ^GCC$
+            ^G\+\+$
+            Clang
+            LLVM
+          docker_include: ".+"
+          docker_prune: "True"
+          docker_clean: "True"
+          apt_prune: "True"
+          apt_clean: "True"
+          homebrew_prune: "True"
+          homebrew_clean: "True"
+          npm_prune: "True"
+          npm_clean: "True"
+          os_swap: "True"
+
+      - name: Freeing up disk space
+        uses: easimon/maximize-build-space@master
+        with: 
+          root-reserve-mb: 2048
+          swap-size-mb: 1
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
-      - name: Space Information After
+      - name: Free up disk space complete
         run: |
-          echo "After setup:"
+          echo "Free up disk space complete"
+          echo "=============================================================================="
           df -hT
-          free -h
-
-      - name: Verify Build Directory
-        run: |
-          sudo mkdir -p ${{ env.BUILD_ROOT }}
-          sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          echo "Build directory structure:"
-          ls -la ${{ env.BUILD_ROOT }}
+          echo "=============================================================================="
 
       - name: Checkout
-        uses: actions/checkout@main
-        with:
-          path: source
+        uses: actions/checkout@v3
 
-      - name: Enhanced Environment Setup
+      - name: Initialization environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo -E apt-get -qq update
-          # 安装主要系统依赖
-          for pkg in \
-            "ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential" \
-            "bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext" \
-            "gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386" \
-            "libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev" \
-            "libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz" \
-            "mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7" \
-            "python3 python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools" \
-            "subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev" \
-            "python3-setuptools bc lm-sensors pciutils libpam0g-dev libaio-dev libtirpc-dev"
-          do
-            sudo -E apt-get -qq install $pkg
-            sleep 1
-          done
-          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+          vim wget xmlto xxd zlib1g-dev python3-setuptools
+          sudo -E apt-get -qq autoremove --purge -y
           sudo -E apt-get -qq clean
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
+          /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
           sudo timedatectl set-timezone "$TZ"
+          sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
 
-      - name: Check and Adjust Permissions
+      - name: Clone source code
+        working-directory: ./
         run: |
-          sudo chown -R $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          sudo chmod -R 755 ${{ env.BUILD_ROOT }}
-
-      - name: Clone Source Code
-        run: |
-          cd ${{ env.BUILD_ROOT }}
           git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-          echo "Source code cloned to $(pwd)/openwrt"
-          ls -la openwrt
 
-      - name: Load and Update Feeds
+      - name: Load custom feeds
         run: |
-          cd ${{ env.BUILD_ROOT }}
-          [ -e source/$FEEDS_CONF ] && cp source/$FEEDS_CONF openwrt/$FEEDS_CONF
-          chmod +x source/$DIY_P1_SH
+          if [ -e $FEEDS_CONF ]; then
+            mv $FEEDS_CONF openwrt/feeds.conf.default
+          else
+            echo "Error: $FEEDS_CONF not found"
+            exit 1
+          fi
+          if [ -e $DIY_P1_SH ]; then
+            chmod +x $DIY_P1_SH
+            cd openwrt
+            $GITHUB_WORKSPACE/$DIY_P1_SH
+          else
+            echo "Error: $DIY_P1_SH not found"
+            exit 1
+          fi
+
+      - name: Set output
+        id: set-output
+        run: echo "::set-output name=commit_sha::$(git rev-parse HEAD)"
+
+      - name: Upload source code
+        uses: actions/upload-artifact@v3
+        with:
+          name: source-code
+          path: ./
+
+  update-feeds:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Download source code
+        uses: actions/download-artifact@v3
+        with:
+          name: source-code
+          path: ./
+
+      - name: Check permissions and install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+          vim wget xmlto xxd zlib1g-dev python3-setuptools
+
+      - name: Update and install feeds
+        run: |
           cd openwrt
-          ${{ env.BUILD_ROOT }}/source/$DIY_P1_SH
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Load Configuration
-        run: |
-          cd ${{ env.BUILD_ROOT }}
-          [ -f "source/.config" ] && cp source/.config openwrt/.config
-          [ -d "source/files" ] && cp -r source/files openwrt/files
-          chmod +x source/$DIY_P2_SH
-          cd openwrt
-          ${{ env.BUILD_ROOT }}/source/$DIY_P2_SH
-          make defconfig
+      - name: Cache packages
+        uses: actions/cache@v3
+        with:
+          path: openwrt/dl
+          key: ${{ runner.os }}-openwrt-cache-${{ hashFiles('openwrt/.config') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-cache-
 
-      - name: Download Package
+      - name: Upload updated source code
+        uses: actions/upload-artifact@v3
+        with:
+          name: updated-source-code
+          path: ./
+
+  compile:
+    needs: update-feeds
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: Download updated source code
+        uses: actions/download-artifact@v3
+        with:
+          name: updated-source-code
+          path: ./
+
+      - name: Check permissions and install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
-          make download -j$(nproc)
+          sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+          vim wget xmlto xxd zlib1g-dev python3-setuptools
+
+      - name: Load custom configuration
+        run: |
+          if [ -e files ]; then
+            mv files openwrt/files
+          fi
+          if [ -e $CONFIG_FILE ]; then
+            mv $CONFIG_FILE openwrt/.config
+          else
+            echo "Error: $CONFIG_FILE not found"
+            exit 1
+          fi
+          if [ -e $DIY_P2_SH ]; then
+            chmod +x $DIY_P2_SH
+            cd openwrt
+            $GITHUB_WORKSPACE/$DIY_P2_SH
+          else
+            echo "Error: $DIY_P2_SH not found"
+            exit 1
+          fi
+
+      - name: Download package
+        id: package
+        run: |
+          cd openwrt
+          make defconfig
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
 
-      - name: Verify Source Directory
-        run: |
-          echo "Verifying source directory before caching:"
-          ls -la ${{ env.BUILD_ROOT }}/openwrt
-
-      - name: Cache Source and Downloads
-        continue-on-error: true
-        run: |
-          cd ${{ env.BUILD_ROOT }}
-          mkdir -p cache_backup
-          rsync -av openwrt/ cache_backup/
-          tar -czf cache_backup.tar.gz cache_backup
-          echo "Cache backup created: $(du -sh cache_backup.tar.gz)"
-
-      - name: Space Information After Prepare
-        run: |
-          echo "After prepare:"
-          df -hT
-          free -h
-
-  build-base:
-    needs: prepare
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Space Information Before
-        run: |
-          echo "Before setup:"
-          df -hT
-          free -h
-
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 512
-          swap-size-mb: 4096
-          build-mount-path: ${{ env.BUILD_ROOT }}
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-
-      - name: Space Information After
-        run: |
-          echo "After setup:"
-          df -hT
-          free -h
-
-      - name: Prepare Build Directory
-        run: |
-          sudo mkdir -p ${{ env.BUILD_ROOT }}
-          sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          echo "Directory prepared:"
-          ls -la ${{ env.BUILD_ROOT }}
-
-      - name: Restore Cache
-        id: cache-restore
-        run: |
-          cd ${{ env.BUILD_ROOT }}
-          if [ -f "cache_backup.tar.gz" ]; then
-            tar -xzf cache_backup.tar.gz
-            rsync -av cache_backup/ openwrt/
-            echo "Cache restored from backup"
-          else
-            echo "No cache backup found"
-          fi
-
-      - name: Clone Source Code If Cache Fails
-        if: steps.cache-restore.outcome != 'success'
-        run: |
-          cd ${{ env.BUILD_ROOT }}
-          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-          echo "Source code cloned to $(pwd)/openwrt"
-          ls -la openwrt
-
-      - name: Verify Build Environment
-        run: |
-          if [ ! -d "${{ env.BUILD_ROOT }}/openwrt" ]; then
-            echo "Error: OpenWrt directory not found"
-            exit 1
-          fi
-          echo "OpenWrt directory found and structure:"
-          ls -la ${{ env.BUILD_ROOT }}/openwrt
-
-      - name: Verify and Reconfigure
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
-          make oldconfig
-          cat .config
-
-      - name: Build Base System
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt || {
-            echo "Failed to change to OpenWrt directory"
-            exit 1
-          }
-          
-          make defconfig
-          
-          # 构建基础工具链和主要依赖
-          for target in tools/install toolchain/install; do
-            for attempt in $(seq 1 $RETRY_COUNT); do
-              echo "Building $target (attempt $attempt)"
-              if make -j1 V=s $target; then
-                break
-              elif [ $attempt -eq $RETRY_COUNT ]; then
-                echo "Failed to build $target after $RETRY_COUNT attempts"
-                exit 1
-              fi
-              echo "Retrying after $SLEEP_INTERVAL seconds..."
-              df -h
-              sleep $SLEEP_INTERVAL
-            done
-          done
-
-      - name: Clean Up Intermediate Files
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
-          find bin -type f -name "*.ipk" -delete
-          find bin -type f -name "*.deb" -delete
-          find bin -type f -name "*.tar.gz" -delete
-
-      - name: Space Information After Build
-        run: |
-          echo "After build:"
-          df -hT
-          free -h
-
-      - name: Cache Build Results
-        continue-on-error: true
-        run: |
-          cd ${{ env.BUILD_ROOT }}
-          mkdir -p cache_backup
-          rsync -av openwrt/ cache_backup/
-          tar -czf cache_backup.tar.gz cache_backup
-          echo "Cache backup created: $(du -sh cache_backup.tar.gz)"
-
-  build-packages:
-    needs: build-base
-    runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        chunk: [1, 2, 3]
-      fail-fast: false
-    steps:
-      - name: Space Information Before
-        run: |
-          echo "Before setup:"
-          df -hT
-          free -h
-
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 512
-          swap-size-mb: 4096
-          build-mount-path: ${{ env.BUILD_ROOT }}
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-
-      - name: Space Information After
-        run: |
-          echo "After setup:"
-          df -hT
-          free -h
-
-      - name: Prepare Build Directory
-        run: |
-          sudo mkdir -p ${{ env.BUILD_ROOT }}
-          sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          echo "Directory prepared:"
-          ls -la ${{ env.BUILD_ROOT }}
-
-      - name: Restore Cache
-        id: cache-restore
-        run: |
-          cd ${{ env.BUILD_ROOT }}
-          if [ -f "cache_backup.tar.gz" ]; then
-            tar -xzf cache_backup.tar.gz
-            rsync -av cache_backup/ openwrt/
-            echo "Cache restored from backup"
-          else
-            echo "No cache backup found"
-          fi
-
-      - name: Clone Source Code If Cache Fails
-        if: steps.cache-restore.outcome != 'success'
-        run: |
-          cd ${{ env.BUILD_ROOT }}
-          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-          echo "Source code cloned to $(pwd)/openwrt"
-          ls -la openwrt
-
-      - name: Verify Build Environment
-        run: |
-          if [ ! -d "${{ env.BUILD_ROOT }}/openwrt" ]; then
-            echo "Error: OpenWrt directory not found"
-            exit 1
-          fi
-          echo "OpenWrt directory found and structure:"
-          ls -la ${{ env.BUILD_ROOT }}/openwrt
-
-      - name: Ensure Configuration is Set
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
-          make defconfig
-
-      - name: Build Packages (Chunk ${{ matrix.chunk }})
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt || exit 1
-          
-          # 定义构建函数
-          build_with_retry() {
-            local target=$1
-            for attempt in $(seq 1 $RETRY_COUNT); do
-              echo "Building $target (attempt $attempt)"
-              if make -j1 V=s $target; then
-                return 0
-              elif [ $attempt -eq $RETRY_COUNT ]; then
-                echo "Failed to build $target after $RETRY_COUNT attempts"
-                return 1
-              fi
-              df -h
-              echo "Retrying after $SLEEP_INTERVAL seconds..."
-              sleep $SLEEP_INTERVAL
-            done
-          }
-          
-          # 根据分块构建不同的包
-          case ${{ matrix.chunk }} in
-            1)
-              # 核心库和基础包
-              for pkg in \
-                "package/libs/toolchain/compile" \
-                "package/libs/mbedtls/compile" \
-                "package/libs/openssl/compile" \
-                "package/libs/zlib/compile"
-              do
-                build_with_retry "$pkg" || exit 1
-              done
-              ;;
-            2)
-              # 网络相关包
-              ./scripts/feeds update -a
-              ./scripts/feeds install -a
-              for pkg in \
-                "package/network/config/firewall4/compile" \
-                "package/network/services/dnsmasq/compile" \
-                "package/network/services/dropbear/compile" \
-                "package/network/utils/iproute2/compile"
-              do
-                build_with_retry "$pkg" || exit 1
-                sleep 10
-              done
-              ;;
-            3)
-              # 其他包和依赖
-              for pkg in "package/utils" "package/system" "package/firmware"; do
-                build_with_retry "$pkg/compile" || echo "Some packages in $pkg failed but continuing..."
-                sleep 10
-              done
-              ;;
-          esac
-
-      - name: Clean Up Intermediate Files
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
-          find bin -type f -name "*.ipk" -delete
-          find bin -type f -name "*.deb" -delete
-          find bin -type f -name "*.tar.gz" -delete
-
-      - name: Space Information After Build
-        run: |
-          echo "After build:"
-          df -hT
-          free -h
-
-      - name: Verify Build Results
-        run: |
-          echo "Package build results:"
-          ls -la ${{ env.BUILD_ROOT }}/openwrt/bin || echo "No bin directory found"
-
-      - name: Upload Package Chunk
-        uses: actions/upload-artifact@v4
-        with:
-          name: packages-chunk-${{ matrix.chunk }}
-          path: ${{ env.BUILD_ROOT }}/openwrt/bin
-          retention-days: 1
-
-  build-firmware:
-    needs: build-packages
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Space Information Before
-        run: |
-          echo "Before setup:"
-          df -hT
-          free -h
-
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 512
-          swap-size-mb: 4096
-          build-mount-path: ${{ env.BUILD_ROOT }}
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-
-      - name: Space Information After
-        run: |
-          echo "After setup:"
-          df -hT
-          free -h
-
-      - name: Prepare Build Directory
-        run: |
-          sudo mkdir -p ${{ env.BUILD_ROOT }}
-          sudo chown $USER:$GROUPS ${{ env.BUILD_ROOT }}
-          echo "Directory prepared:"
-          ls -la ${{ env.BUILD_ROOT }}
-
-      - name: Restore Cache
-        id: cache-restore
-        run: |
-          cd ${{ env.BUILD_ROOT }}
-          if [ -f "cache_backup.tar.gz" ]; then
-            tar -xzf cache_backup.tar.gz
-            rsync -av cache_backup/ openwrt/
-            echo "Cache restored from backup"
-          else
-            echo "No cache backup found"
-          fi
-
-      - name: Clone Source Code If Cache Fails
-        if: steps.cache-restore.outcome != 'success'
-        run: |
-          cd ${{ env.BUILD_ROOT }}
-          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-          echo "Source code cloned to $(pwd)/openwrt"
-          ls -la openwrt
-
-      - name: Verify Build Environment
-        run: |
-          if [ ! -d "${{ env.BUILD_ROOT }}/openwrt" ]; then
-            echo "Error: OpenWrt directory not found"
-            exit 1
-          fi
-          echo "OpenWrt directory found and structure:"
-          ls -la ${{ env.BUILD_ROOT }}/openwrt
-
-      - name: Download Package Chunks
-        uses: actions/download-artifact@v4
-        with:
-          path: ${{ env.BUILD_ROOT }}/chunks
-          merge-multiple: true
-
-      - name: Verify and Merge Chunks
-        run: |
-          cd ${{ env.BUILD_ROOT }}
-          echo "Chunks directory structure:"
-          ls -la chunks || echo "No chunks directory found"
-          
-          if [ -d "openwrt/bin" ]; then
-            echo "OpenWrt bin directory exists, merging chunks..."
-            if [ -d "chunks" ]; then
-              cp -r chunks/packages-chunk-*/* openwrt/bin/ || echo "No chunks to copy"
-            fi
-          else
-            echo "Error: OpenWrt bin directory not found"
-            exit 1
-          fi
-          
-          echo "Final bin directory structure:"
-          ls -la openwrt/bin
-
-      - name: Build Firmware
+      - name: Compile the firmware
         id: compile
         run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt || exit 1
-          
-          make package/index V=s
-          
-          echo "Building firmware..."
-          for attempt in $(seq 1 $RETRY_COUNT); do
-            echo "Firmware build attempt $attempt"
-            df -h
-            if make -j1 V=s; then
-              echo "status=success" >> $GITHUB_OUTPUT
-              break
-            elif [ $attempt -eq $RETRY_COUNT ]; then
-              echo "Failed to build firmware after $RETRY_COUNT attempts"
-              exit 1
-            fi
-            echo "Retrying after $SLEEP_INTERVAL seconds..."
-            sleep $SLEEP_INTERVAL
-          done
-          
-          grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-          [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+          cd openwrt
+          echo -e "$(nproc) thread compile"
+          # 第一阶段：并行编译所有包
+          make -j$(nproc) -k > log.txt 2>&1 || true
+          # 第二阶段：编译失败的包
+          failed_packages=$(grep -oP '(?<=FAILED: ).*(?=\n)' log.txt | sort | uniq)
+          if [ -n "$failed_packages" ]; then
+            echo "Failed packages: $failed_packages"
+            for package in $failed_packages; do
+              echo "Retrying package: $package"
+              make package/$package/compile V=s
+            done
+          fi
+          # 检查所有包是否都已编译成功
+          if make -j1 V=s; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+            [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+            echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
 
-      - name: Clean Up Intermediate Files
-        run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt
-          find bin -type f -name "*.ipk" -delete
-          find bin -type f -name "*.deb" -delete
-          find bin -type f -name "*.tar.gz" -delete
+      - name: Check space usage
+        if: always()
+        run: df -hT
 
-      - name: Space Information After Build
-        run: |
-          echo "After build:"
-          df -hT
-          free -h
+      - name: Upload bin directory
+        uses: actions/upload-artifact@v3
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        with:
+          name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: openwrt/bin
 
-      - name: Check Space Usage
-        if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
+      - name: Organize files
+        id: organize
+        if: steps.compile.outputs.status == 'success'
         run: |
-          cd ${{ env.BUILD_ROOT }}/openwrt/bin/targets/*/*
+          cd openwrt/bin/targets/*/*
           rm -rf packages
           echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-          echo "Organized firmware directory structure:"
-          ls -la
+          echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: Upload Firmware
-        uses: actions/upload-artifact@v4
-        if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
+      - name: Upload firmware directory
+        uses: actions/upload-artifact@v3
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
         with:
           name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
           path: ${{ env.FIRMWARE }}
-          retention-days: 7
 
-  cleanup:
-    needs: build-firmware
+  upload-and-release:
+    needs: compile
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
-      - name: Delete Workflow Artifacts
-        uses: geekyeggo/delete-artifact@v2
+      - name: Download firmware directory
+        uses: actions/download-artifact@v3
         with:
-          name: |
-            packages-chunk-*
-          failOnError: false
+          name: OpenWrt_firmware${{ needs.compile.outputs.DEVICE_NAME }}${{ needs.compile.outputs.FILE_DATE }}
+          path: ./
 
-      - name: Delete Old Workflow Runs
+      - name: Check permissions and install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install -y curl
+
+      - name: Upload firmware to cowtransfer
+        id: cowtransfer
+        if: env.UPLOAD_COWTRANSFER == 'true'
+        run: |
+          curl -fsSL git.io/file-transfer | sh
+          ./transfer cow --block 2621440 -s -p 64 --no-progress ${{ env.FIRMWARE }} 2>&1 | tee cowtransfer.log
+          if [ $? -eq 0 ]; then
+            echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
+            echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+          else
+            echo "Cowtransfer upload failed"
+            exit 1
+          fi
+
+      - name: Upload firmware to WeTransfer
+        id: wetransfer
+        if: env.UPLOAD_WETRANSFER == 'true'
+        run: |
+          curl -fsSL git.io/file-transfer | sh
+          ./transfer wet -s -p 16 --no-progress ${{ env.FIRMWARE }} 2>&1 | tee wetransfer.log
+          if [ $? -eq 0 ]; then
+            echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
+            echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+          else
+            echo "WeTransfer upload failed"
+            exit 1
+          fi
+
+      - name: Generate release tag
+        id: tag
+        if: env.UPLOAD_RELEASE == 'true'
+        run: |
+          echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+          touch release.txt
+          [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
+          [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Upload firmware to release
+        uses: softprops/action-gh-release@v1
+        if: steps.tag.outputs.status == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          body_path: release.txt
+          files: ${{ env.FIRMWARE }}/*
+
+      - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v2
         with:
           retain_days: 1
           keep_minimum_runs: 3
 
-      - name: Remove Old Releases
+      - name: Remove old Releases
         uses: dev-drprasad/delete-older-releases@v0.1.0
         if: env.UPLOAD_RELEASE == 'true'
         with:
