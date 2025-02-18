@@ -154,10 +154,19 @@ jobs:
           ls -la ${{ env.BUILD_ROOT }}
 
       - name: Restore Cache
+        id: cache-restore
         uses: actions/cache/restore@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
           key: openwrt-source-${{ github.sha }}-${{ github.run_id }}
+
+      - name: Clone Source Code If Cache Fails
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        run: |
+          cd ${{ env.BUILD_ROOT }}
+          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+          echo "Source code cloned to $(pwd)/openwrt"
+          ls -la openwrt
 
       - name: Verify Build Environment
         run: |
@@ -227,10 +236,19 @@ jobs:
           ls -la ${{ env.BUILD_ROOT }}
 
       - name: Restore Cache
+        id: cache-restore
         uses: actions/cache/restore@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
           key: openwrt-base-${{ github.sha }}-${{ github.run_id }}
+
+      - name: Clone Source Code If Cache Fails
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        run: |
+          cd ${{ env.BUILD_ROOT }}
+          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+          echo "Source code cloned to $(pwd)/openwrt"
+          ls -la openwrt
 
       - name: Verify Build Environment
         run: |
@@ -334,10 +352,19 @@ jobs:
           ls -la ${{ env.BUILD_ROOT }}
 
       - name: Restore Cache
+        id: cache-restore
         uses: actions/cache/restore@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
           key: openwrt-base-${{ github.sha }}-${{ github.run_id }}
+
+      - name: Clone Source Code If Cache Fails
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        run: |
+          cd ${{ env.BUILD_ROOT }}
+          git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+          echo "Source code cloned to $(pwd)/openwrt"
+          ls -la openwrt
 
       - name: Verify Build Environment
         run: |
