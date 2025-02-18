@@ -1,0 +1,370 @@
+name: Build OpenWrt（Gork编译）
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: custom/feeds.conf.default
+  DIY_PART1_SH: custom/diy-part1.sh
+  DIY_PART2_SH: custom/diy-part2.sh
+  CONFIG_FILE: custom/.config
+  SSH_ACTIONS: false
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+  BUILD_ROOT: /home/runner/work/openwrt-new-rom/openwrt-new-rom
+  RETRY_COUNT: 3
+  SLEEP_INTERVAL: 30
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Space info before
+        run: |
+          df -h
+          free -h
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 1024
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+      - name: Verify build root
+        run: |
+          mkdir -p ${{ env.BUILD_ROOT }}
+          sudo chmod -R 777 ${{ env.BUILD_ROOT }}
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          path: source
+      - name: Enhanced Environment Setup
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo -E apt-get -qq update
+          # 分批安装依赖，减少内存压力
+          for pkg in \
+            "build-essential gcc-multilib g++-multilib" \
+            "git autoconf automake libtool" \
+            "bison flex gawk" \
+            "libncurses5-dev libncursesw5-dev" \
+            "libssl-dev zlib1g-dev" \
+            "python3 python3-setuptools"
+          do
+            sudo -E apt-get -qq install -y $pkg
+            sleep 1
+          done
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "$TZ"
+      - name: Clone Source Code
+        run: |
+          cd ${{ env.BUILD_ROOT }}
+          git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
+      - name: Load and Update Feeds
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          cp -f ${{ env.BUILD_ROOT }}/source/${{ env.FEEDS_CONF }} feeds.conf.default
+          chmod +x ${{ env.BUILD_ROOT }}/source/${{ env.DIY_PART1_SH }}
+          ${{ env.BUILD_ROOT }}/source/${{ env.DIY_PART1_SH }}
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+      - name: Load Configuration
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          cp -f ${{ env.BUILD_ROOT }}/source/${{ env.CONFIG_FILE }} .config
+          make defconfig
+          chmod +x ${{ env.BUILD_ROOT }}/source/${{ env.DIY_PART2_SH }}
+          ${{ env.BUILD_ROOT }}/source/${{ env.DIY_PART2_SH }}
+      - name: Download Package
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          if ! make download -j$(nproc); then
+            echo "Failed to download packages"
+            exit 1
+          fi
+          find dl -size -1024c -exec rm -f {} \;
+      - name: Verify Source Code Directory
+        run: |
+          if [ ! -d "${{ env.BUILD_ROOT }}/openwrt" ]; then
+            echo "OpenWrt source directory does not exist"
+            exit 1
+          fi
+      - name: Cache Source and Downloads
+        uses: actions/cache@v2
+        with:
+          path: |
+            ${{ env.BUILD_ROOT }}/openwrt
+          key: ${{ runner.os }}-openwrt-source-${{ hashFiles('**/feeds.conf.default') }}-${{ hashFiles('**/.config') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-source-
+
+  build-base:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 1024
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+      - name: Prepare build directory
+        run: |
+          mkdir -p ${{ env.BUILD_ROOT }}
+          sudo chmod -R 777 ${{ env.BUILD_ROOT }}
+      - name: Restore Cache
+        uses: actions/cache@v2
+        with:
+          path: |
+            ${{ env.BUILD_ROOT }}/openwrt
+          key: ${{ runner.os }}-openwrt-source-${{ hashFiles('**/feeds.conf.default') }}-${{ hashFiles('**/.config') }}
+      - name: Verify Build Environment
+        run: |
+          if [ ! -d "${{ env.BUILD_ROOT }}/openwrt" ]; then
+            echo "OpenWrt directory does not exist"
+            exit 1
+          fi
+      - name: Build Base System
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt || {
+            echo "Failed to change to OpenWrt directory"
+            exit 1
+          }
+          
+          make defconfig
+          
+          # 构建基础工具链和主要依赖
+          for target in tools/install toolchain/install; do
+            for attempt in $(seq 1 $RETRY_COUNT); do
+              echo "Building $target (attempt $attempt)"
+              start_time=$(date +%s)
+              if make -j$(nproc) $target; then
+                end_time=$(date +%s)
+                echo "Successfully built $target in $((end_time - start_time)) seconds"
+                break
+              elif [ $attempt -eq $RETRY_COUNT ]; then
+                end_time=$(date +%s)
+                echo "Failed to build $target after $RETRY_COUNT attempts, last attempt took $((end_time - start_time)) seconds"
+                exit 1
+              fi
+              echo "Retrying after $SLEEP_INTERVAL seconds..."
+              df -h
+              sleep $SLEEP_INTERVAL
+            done
+          done
+        shell: bash
+      - name: Cache Build Results
+        uses: actions/cache@v2
+        with:
+          path: |
+            ${{ env.BUILD_ROOT }}/openwrt/staging_dir
+            ${{ env.BUILD_ROOT }}/openwrt/build_dir
+          key: ${{ runner.os }}-openwrt-build-base-${{ hashFiles('**/feeds.conf.default') }}-${{ hashFiles('**/.config') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-build-base-
+
+  build-packages:
+    needs: build-base
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        chunk: [1, 2, 3]
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 1024
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+      - name: Prepare build directory
+        run: |
+          mkdir -p ${{ env.BUILD_ROOT }}
+          sudo chmod -R 777 ${{ env.BUILD_ROOT }}
+      - name: Restore Cache
+        uses: actions/cache@v2
+        with:
+          path: |
+            ${{ env.BUILD_ROOT }}/openwrt
+          key: ${{ runner.os }}-openwrt-source-${{ hashFiles('**/feeds.conf.default') }}-${{ hashFiles('**/.config') }}
+      - name: Verify Build Environment
+        run: |
+          if [ ! -d "${{ env.BUILD_ROOT }}/openwrt" ]; then
+            echo "OpenWrt directory does not exist"
+            exit 1
+          fi
+      - name: Build Packages
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt || {
+            echo "Failed to change to OpenWrt directory"
+            exit 1
+          }
+          
+          # 根据chunk号构建不同的包集
+          case ${{ matrix.chunk }} in
+            1)
+              packages=$(make list-targets | grep -v 'kernel' | grep -v 'firmware' | head -n 50)
+              ;;
+            2)
+              packages=$(make list-targets | grep -v 'kernel' | grep -v 'firmware' | tail -n +51 | head -n 50)
+              ;;
+            3)
+              packages=$(make list-targets | grep -v 'kernel' | grep -v 'firmware' | tail -n +101)
+              ;;
+          esac
+          
+          for package in $packages; do
+            for attempt in $(seq 1 $RETRY_COUNT); do
+              echo "Building $package (attempt $attempt)"
+              start_time=$(date +%s)
+              if make package/$package/compile -j$(nproc); then
+                end_time=$(date +%s)
+                echo "Successfully built $package in $((end_time - start_time)) seconds"
+                break
+              elif [ $attempt -eq $RETRY_COUNT ]; then
+                end_time=$(date +%s)
+                echo "Failed to build $package after $RETRY_COUNT attempts, last attempt took $((end_time - start_time)) seconds"
+                exit 1
+              fi
+              echo "Retrying after $SLEEP_INTERVAL seconds..."
+              df -h
+              sleep $SLEEP_INTERVAL
+            done
+          done
+        shell: bash
+      - name: Verify Build Results
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          ls -l bin/packages
+      - name: Upload Package Chunk
+        uses: actions/upload-artifact@v2
+        with:
+          name: package-chunk-${{ matrix.chunk }}
+          path: ${{ env.BUILD_ROOT }}/openwrt/bin/packages
+
+  build-firmware:
+    needs: build-packages
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 1024
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+      - name: Prepare build directory
+        run: |
+          mkdir -p ${{ env.BUILD_ROOT }}
+          sudo chmod -R 777 ${{ env.BUILD_ROOT }}
+      - name: Restore Cache
+        uses: actions/cache@v2
+        with:
+          path: |
+            ${{ env.BUILD_ROOT }}/openwrt
+          key: ${{ runner.os }}-openwrt-source-${{ hashFiles('**/feeds.conf.default') }}-${{ hashFiles('**/.config') }}
+      - name: Verify Build Environment
+        run: |
+          if [ ! -d "${{ env.BUILD_ROOT }}/openwrt" ]; then
+            echo "OpenWrt directory does not exist"
+            exit 1
+          fi
+      - name: Download Package Chunks
+        uses: actions/download-artifact@v2
+        with:
+          name: package-chunk-1
+          path: ${{ env.BUILD_ROOT }}/openwrt/bin/packages
+      - name: Download Package Chunks
+        uses: actions/download-artifact@v2
+        with:
+          name: package-chunk-2
+          path: ${{ env.BUILD_ROOT }}/openwrt/bin/packages
+      - name: Download Package Chunks
+        uses: actions/download-artifact@v2
+        with:
+          name: package-chunk-3
+          path: ${{ env.BUILD_ROOT }}/openwrt/bin/packages
+      - name: Verify and Merge Chunks
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          if [ ! -d "bin/packages" ]; then
+            echo "Package directory does not exist"
+            exit 1
+          fi
+      - name: Build Firmware
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt || {
+            echo "Failed to change to OpenWrt directory"
+            exit 1
+          }
+          
+          for attempt in $(seq 1 $RETRY_COUNT); do
+            echo "Building firmware (attempt $attempt)"
+            start_time=$(date +%s)
+            if make -j$(nproc); then
+              end_time=$(date +%s)
+              echo "Successfully built firmware in $((end_time - start_time)) seconds"
+              break
+            elif [ $attempt -eq $RETRY_COUNT ]; then
+              end_time=$(date +%s)
+              echo "Failed to build firmware after $RETRY_COUNT attempts, last attempt took $((end_time - start_time)) seconds"
+              exit 1
+            fi
+            echo "Retrying after $SLEEP_INTERVAL seconds..."
+            df -h
+            sleep $SLEEP_INTERVAL
+          done
+        shell: bash
+      - name: Check Space Usage
+        if: success() && env.UPLOAD_FIRMWARE == 'true'
+        run: |
+          echo "Preparing firmware directory..."
+          mkdir -p ${{ env.BUILD_ROOT }}/firmware
+          cp -r ${{ env.BUILD_ROOT }}/openwrt/bin/* ${{ env.BUILD_ROOT }}/firmware
+          du -sh ${{ env.BUILD_ROOT }}/firmware
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v2
+        if: env.UPLOAD_FIRMWARE == 'true'
+        with:
+          name: firmware
+          path: ${{ env.BUILD_ROOT }}/firmware
+
+  cleanup:
+    needs: build-firmware
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Delete Workflow Artifacts
+        uses: geekyeggo/delete-artifact@v1
+        with:
+          name: |
+            package-chunk-1
+            package-chunk-2
+            package-chunk-3
+      - name: Delete Old Workflow Runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 1
+          keep_minimum_runs: 3
+      - name: Remove Old Releases
+        uses: dev-drprasad/delete-older-releases@v0.2.0
+        if: env.UPLOAD_RELEASE == 'true'
+        with:
+          keep_latest: 3
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
