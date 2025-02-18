@@ -165,7 +165,7 @@ jobs:
             echo "Error: OpenWrt directory not found"
             exit 1
           fi
-          echo "OpenWrt directory structure:"
+          echo "OpenWrt directory found and structure:"
           ls -la ${{ env.BUILD_ROOT }}/openwrt
 
       - name: Build Base System
@@ -238,7 +238,7 @@ jobs:
             echo "Error: OpenWrt directory not found"
             exit 1
           fi
-          echo "OpenWrt directory structure:"
+          echo "OpenWrt directory found and structure:"
           ls -la ${{ env.BUILD_ROOT }}/openwrt
 
       - name: Build Packages (Chunk ${{ matrix.chunk }})
@@ -345,7 +345,7 @@ jobs:
             echo "Error: OpenWrt directory not found"
             exit 1
           fi
-          echo "OpenWrt directory structure:"
+          echo "OpenWrt directory found and structure:"
           ls -la ${{ env.BUILD_ROOT }}/openwrt
 
       - name: Download Package Chunks
@@ -360,10 +360,14 @@ jobs:
           echo "Chunks directory structure:"
           ls -la chunks || echo "No chunks directory found"
           
-          mkdir -p openwrt/bin
-          if [ -d "chunks" ]; then
-            echo "Merging chunks into bin directory..."
-            cp -r chunks/packages-chunk-*/* openwrt/bin/ || echo "No chunks to copy"
+          if [ -d "openwrt/bin" ]; then
+            echo "OpenWrt bin directory exists, merging chunks..."
+            if [ -d "chunks" ]; then
+              cp -r chunks/packages-chunk-*/* openwrt/bin/ || echo "No chunks to copy"
+            fi
+          else
+            echo "Error: OpenWrt bin directory not found"
+            exit 1
           fi
           
           echo "Final bin directory structure:"
