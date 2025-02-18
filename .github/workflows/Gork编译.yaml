@@ -177,6 +177,12 @@ jobs:
           echo "OpenWrt directory found and structure:"
           ls -la ${{ env.BUILD_ROOT }}/openwrt
 
+      - name: Verify and Reconfigure
+        run: |
+          cd ${{ env.BUILD_ROOT }}/openwrt
+          make oldconfig
+          cat .config
+
       - name: Build Base System
         run: |
           cd ${{ env.BUILD_ROOT }}/openwrt || {
@@ -190,7 +196,7 @@ jobs:
           for target in tools/install toolchain/install; do
             for attempt in $(seq 1 $RETRY_COUNT); do
               echo "Building $target (attempt $attempt)"
-              if make -j$(nproc) $target; then
+              if make -j$(nproc) V=s $target; then
                 break
               elif [ $attempt -eq $RETRY_COUNT ]; then
                 echo "Failed to build $target after $RETRY_COUNT attempts"
@@ -416,7 +422,7 @@ jobs:
           for attempt in $(seq 1 $RETRY_COUNT); do
             echo "Firmware build attempt $attempt"
             df -h
-            if make -j$(nproc) || make -j1 V=s; then
+            if make -j$(nproc) V=s || make -j1 V=s; then
               echo "status=success" >> $GITHUB_OUTPUT
               break
             elif [ $attempt -eq $RETRY_COUNT ]; then
