@@ -1,4 +1,4 @@
-name: Build X86_64 OpenWrt（Gork编译）
+name: Build X86_64 OpenWrt
 
 on:
   repository_dispatch:
@@ -100,6 +100,7 @@ jobs:
 
       - name: Load custom feeds
         run: |
+          sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
           if [ -e $FEEDS_CONF ]; then
             mv $FEEDS_CONF openwrt/feeds.conf.default
           else
@@ -150,9 +151,10 @@ jobs:
           libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
           vim wget xmlto xxd zlib1g-dev python3-setuptools
 
-      - name: Update and install feeds
+      - name: Set permissions and update and install feeds
         run: |
           cd openwrt
+          chmod +x ./scripts/feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -197,6 +199,7 @@ jobs:
 
       - name: Load custom configuration
         run: |
+          sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
           if [ -e files ]; then
             mv files openwrt/files
           fi
@@ -301,6 +304,7 @@ jobs:
         id: cowtransfer
         if: env.UPLOAD_COWTRANSFER == 'true'
         run: |
+          sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
           curl -fsSL git.io/file-transfer | sh
           ./transfer cow --block 2621440 -s -p 64 --no-progress ${{ env.FIRMWARE }} 2>&1 | tee cowtransfer.log
           if [ $? -eq 0 ]; then
@@ -315,6 +319,7 @@ jobs:
         id: wetransfer
         if: env.UPLOAD_WETRANSFER == 'true'
         run: |
+          sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
           curl -fsSL git.io/file-transfer | sh
           ./transfer wet -s -p 16 --no-progress ${{ env.FIRMWARE }} 2>&1 | tee wetransfer.log
           if [ $? -eq 0 ]; then
