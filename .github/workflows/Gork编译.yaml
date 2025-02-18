@@ -34,8 +34,8 @@ jobs:
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 2048
-          swap-size-mb: 1024
+          root-reserve-mb: 1024
+          swap-size-mb: 2048
           build-mount-path: ${{ env.BUILD_ROOT }}
           remove-dotnet: 'true'
           remove-android: 'true'
@@ -67,7 +67,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo -E apt-get -qq update
-          # 分批安装依赖，减少内存压力
+          # 安装主要系统依赖
           for pkg in \
             "ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential" \
             "bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext" \
@@ -77,7 +77,7 @@ jobs:
             "mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7" \
             "python3 python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools" \
             "subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev" \
-            "python3-setuptools"
+            "python3-setuptools bc lm-sensors pciutils libpam0g-dev libaio-dev libtirpc-dev"
           do
             sudo -E apt-get -qq install $pkg
             sleep 1
@@ -85,6 +85,11 @@ jobs:
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
           sudo timedatectl set-timezone "$TZ"
+
+      - name: Check and Adjust Permissions
+        run: |
+          sudo chown -R $USER:$GROUPS ${{ env.BUILD_ROOT }}
+          sudo chmod -R 755 ${{ env.BUILD_ROOT }}
 
       - name: Clone Source Code
         run: |
@@ -125,10 +130,17 @@ jobs:
           ls -la ${{ env.BUILD_ROOT }}/openwrt
 
       - name: Cache Source and Downloads
+        continue-on-error: true
         uses: actions/cache/save@v3
         with:
           path: ${{ env.BUILD_ROOT }}/openwrt
           key: openwrt-source-${{ github.sha }}-${{ github.run_id }}
+
+      - name: Space Information After Prepare
+        run: |
+          echo "After prepare:"
+          df -hT
+          free -h
 
   build-base:
     needs: prepare
