@@ -96,7 +96,7 @@ jobs:
       - name: Load and Update Feeds
         run: |
           cd ${{ env.BUILD_ROOT }}
-          [ -e source/$FEEDS_CONF ] && cp source/$FEEDS_CONF openwrt/feeds.conf.default
+          [ -e source/$FEEDS_CONF ] && cp source/$FEEDS_CONF openwrt/$FEEDS_CONF
           chmod +x source/$DIY_P1_SH
           cd openwrt
           ${{ env.BUILD_ROOT }}/source/$DIY_P1_SH
