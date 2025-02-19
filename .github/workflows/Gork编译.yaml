@@ -1,4 +1,4 @@
-name: Build X86_64 OpenWrt
+name: Build X86_64 OpenWrt（Gork编译）
 
 on:
   repository_dispatch:
