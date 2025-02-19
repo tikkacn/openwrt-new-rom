@@ -7,10 +7,10 @@ on:
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
-  FEEDS_CONF: ../../feeds.conf.default
-  CONFIG_FILE: ../../.config
-  DIY_P1_SH: ../../diy-part1.sh
-  DIY_P2_SH: ../../diy-part2.sh
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: ../.config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_COWTRANSFER: false
@@ -19,10 +19,9 @@ env:
   TZ: Asia/Shanghai
 
 jobs:
-  prepare:
+  build:
     runs-on: ubuntu-22.04
-    outputs:
-      commit_sha: ${{ steps.set-output.outputs.commit_sha }}
+
     steps:
     - name: Before freeing up disk space
       run: |
@@ -71,14 +70,14 @@ jobs:
         echo "=============================================================================="
 
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@main
 
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
         libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
@@ -90,53 +89,16 @@ jobs:
         sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
         /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
         sudo timedatectl set-timezone "$TZ"
-        sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
+        sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
     - name: Clone source code
       working-directory: ./
       run: |
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
 
-    - name: Check for required files
-      run: |
-        if [ ! -f $CONFIG_FILE ]; then
-          echo "Error: $CONFIG_FILE file not found"
-          exit 1
-        fi
-        if [ ! -f $FEEDS_CONF ]; then
-          echo "Error: $FEEDS_CONF file not found"
-          exit 1
-        fi
-
-    - name: Set output
-      id: set-output
-      run: echo "::set-output name=commit_sha::$(git rev-parse HEAD)"
-
-  setup-feeds:
-    needs: prepare
-    runs-on: ubuntu-22.04
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-
-    - name: Set environment variables
-      run: |
-        echo "REPO_URL=${{ env.REPO_URL }}" >> $GITHUB_ENV
-        echo "REPO_BRANCH=${{ env.REPO_BRANCH }}" >> $GITHUB_ENV
-        echo "FEEDS_CONF=${{ env.FEEDS_CONF }}" >> $GITHUB_ENV
-        echo "CONFIG_FILE=${{ env.CONFIG_FILE }}" >> $GITHUB_ENV
-        echo "DIY_P1_SH=${{ env.DIY_P1_SH }}" >> $GITHUB_ENV
-        echo "DIY_P2_SH=${{ env.DIY_P2_SH }}" >> $GITHUB_ENV
-        echo "UPLOAD_BIN_DIR=${{ env.UPLOAD_BIN_DIR }}" >> $GITHUB_ENV
-        echo "UPLOAD_FIRMWARE=${{ env.UPLOAD_FIRMWARE }}" >> $GITHUB_ENV
-        echo "UPLOAD_COWTRANSFER=${{ env.UPLOAD_COWTRANSFER }}" >> $GITHUB_ENV
-        echo "UPLOAD_WETRANSFER=${{ env.UPLOAD_WETRANSFER }}" >> $GITHUB_ENV
-        echo "UPLOAD_RELEASE=${{ env.UPLOAD_RELEASE }}" >> $GITHUB_ENV
-        echo "TZ=${{ env.TZ }}" >> $GITHUB_ENV
-
     - name: Load custom feeds
       run: |
-        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
@@ -147,54 +109,6 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
-    - name: Cache feeds
-      uses: actions/cache@v3
-      with:
-        path: openwrt/feeds
-        key: feeds-${{ runner.os }}-${{ needs.prepare.outputs.commit_sha }}
-        restore-keys: |
-          feeds-${{ runner.os }}-
-
-    - name: Upload feeds directory
-      uses: actions/upload-artifact@v4
-      with:
-        name: openwrt-feeds
-        path: openwrt/
-
-  configure:
-    needs: setup-feeds
-    runs-on: ubuntu-22.04
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-
-    - name: Set environment variables
-      run: |
-        echo "REPO_URL=${{ env.REPO_URL }}" >> $GITHUB_ENV
-        echo "REPO_BRANCH=${{ env.REPO_BRANCH }}" >> $GITHUB_ENV
-        echo "FEEDS_CONF=${{ env.FEEDS_CONF }}" >> $GITHUB_ENV
-        echo "CONFIG_FILE=${{ env.CONFIG_FILE }}" >> $GITHUB_ENV
-        echo "DIY_P1_SH=${{ env.DIY_P1_SH }}" >> $GITHUB_ENV
-        echo "DIY_P2_SH=${{ env.DIY_P2_SH }}" >> $GITHUB_ENV
-        echo "UPLOAD_BIN_DIR=${{ env.UPLOAD_BIN_DIR }}" >> $GITHUB_ENV
-        echo "UPLOAD_FIRMWARE=${{ env.UPLOAD_FIRMWARE }}" >> $GITHUB_ENV
-        echo "UPLOAD_COWTRANSFER=${{ env.UPLOAD_COWTRANSFER }}" >> $GITHUB_ENV
-        echo "UPLOAD_WETRANSFER=${{ env.UPLOAD_WETRANSFER }}" >> $GITHUB_ENV
-        echo "UPLOAD_RELEASE=${{ env.UPLOAD_RELEASE }}" >> $GITHUB_ENV
-        echo "TZ=${{ env.TZ }}" >> $GITHUB_ENV
-
-    - name: Download feeds directory
-      uses: actions/download-artifact@v3
-      with:
-        name: openwrt-feeds
-        path: openwrt/
-
-    - name: Restore feeds cache
-      uses: actions/cache@v3
-      with:
-        path: openwrt/feeds
-        key: feeds-${{ runner.os }}-${{ needs.prepare.outputs.commit_sha }}
-
     - name: Load custom configuration
       run: |
         [ -e files ] && cp -r files openwrt/files
@@ -204,60 +118,13 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
     - name: Download package
+      id: package
       run: |
         cd openwrt
         make defconfig
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
-
-    - name: Cache dl directory
-      uses: actions/cache@v3
-      with:
-        path: openwrt/dl
-        key: dl-${{ runner.os }}-${{ needs.prepare.outputs.commit_sha }}
-        restore-keys: |
-          dl-${{ runner.os }}-
-
-    - name: Upload configured directory
-      uses: actions/upload-artifact@v4
-      with:
-        name: openwrt-configured
-        path: openwrt/
-
-  compile:
-    needs: configure
-    runs-on: ubuntu-22.04
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-
-    - name: Set environment variables
-      run: |
-        echo "REPO_URL=${{ env.REPO_URL }}" >> $GITHUB_ENV
-        echo "REPO_BRANCH=${{ env.REPO_BRANCH }}" >> $GITHUB_ENV
-        echo "FEEDS_CONF=${{ env.FEEDS_CONF }}" >> $GITHUB_ENV
-        echo "CONFIG_FILE=${{ env.CONFIG_FILE }}" >> $GITHUB_ENV
-        echo "DIY_P1_SH=${{ env.DIY_P1_SH }}" >> $GITHUB_ENV
-        echo "DIY_P2_SH=${{ env.DIY_P2_SH }}" >> $GITHUB_ENV
-        echo "UPLOAD_BIN_DIR=${{ env.UPLOAD_BIN_DIR }}" >> $GITHUB_ENV
-        echo "UPLOAD_FIRMWARE=${{ env.UPLOAD_FIRMWARE }}" >> $GITHUB_ENV
-        echo "UPLOAD_COWTRANSFER=${{ env.UPLOAD_COWTRANSFER }}" >> $GITHUB_ENV
-        echo "UPLOAD_WETRANSFER=${{ env.UPLOAD_WETRANSFER }}" >> $GITHUB_ENV
-        echo "UPLOAD_RELEASE=${{ env.UPLOAD_RELEASE }}" >> $GITHUB_ENV
-        echo "TZ=${{ env.TZ }}" >> $GITHUB_ENV
-
-    - name: Download configured directory
-      uses: actions/download-artifact@v3
-      with:
-        name: openwrt-configured
-        path: openwrt/
-
-    - name: Restore dl cache
-      uses: actions/cache@v3
-      with:
-        path: openwrt/dl
-        key: dl-${{ runner.os }}-${{ needs.prepare.outputs.commit_sha }}
 
     - name: Compile the firmware
       id: compile
@@ -275,7 +142,7 @@ jobs:
       run: df -hT
 
     - name: Upload bin directory
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@main
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
@@ -291,56 +158,27 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
-  upload:
-    needs: compile
-    runs-on: ubuntu-22.04
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-
-    - name: Set environment variables
-      run: |
-        echo "REPO_URL=${{ env.REPO_URL }}" >> $GITHUB_ENV
-        echo "REPO_BRANCH=${{ env.REPO_BRANCH }}" >> $GITHUB_ENV
-        echo "FEEDS_CONF=${{ env.FEEDS_CONF }}" >> $GITHUB_ENV
-        echo "CONFIG_FILE=${{ env.CONFIG_FILE }}" >> $GITHUB_ENV
-        echo "DIY_P1_SH=${{ env.DIY_P1_SH }}" >> $GITHUB_ENV
-        echo "DIY_P2_SH=${{ env.DIY_P2_SH }}" >> $GITHUB_ENV
-        echo "UPLOAD_BIN_DIR=${{ env.UPLOAD_BIN_DIR }}" >> $GITHUB_ENV
-        echo "UPLOAD_FIRMWARE=${{ env.UPLOAD_FIRMWARE }}" >> $GITHUB_ENV
-        echo "UPLOAD_COWTRANSFER=${{ env.UPLOAD_COWTRANSFER }}" >> $GITHUB_ENV
-        echo "UPLOAD_WETRANSFER=${{ env.UPLOAD_WETRANSFER }}" >> $GITHUB_ENV
-        echo "UPLOAD_RELEASE=${{ env.UPLOAD_RELEASE }}" >> $GITHUB_ENV
-        echo "TZ=${{ env.TZ }}" >> $GITHUB_ENV
-
-    - name: Download firmware directory
-      uses: actions/download-artifact@v3
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: firmware/
-
     - name: Upload firmware to cowtransfer
       id: cowtransfer
-      if: env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
       run: |
         curl -fsSL git.io/file-transfer | sh
-        ./transfer cow --block 2621440 -s -p 64 --no-progress firmware 2>&1 | tee cowtransfer.log
+        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
         echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
         echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to WeTransfer
       id: wetransfer
-      if: env.UPLOAD_WETRANSFER == 'true' && !cancelled()
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
       run: |
         curl -fsSL git.io/file-transfer | sh
-        ./transfer wet -s -p 16 --no-progress firmware 2>&1 | tee wetransfer.log
+        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
         echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
         echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
 
@@ -362,12 +200,8 @@ jobs:
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
-        files: firmware/*
+        files: ${{ env.FIRMWARE }}/*
 
-  cleanup:
-    needs: upload
-    runs-on: ubuntu-22.04
-    steps:
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@v2
       with:
@@ -375,7 +209,7 @@ jobs:
         keep_minimum_runs: 3
 
     - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@v0.3.0
+      uses: dev-drprasad/delete-older-releases@v0.1.0
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
         keep_latest: 3
