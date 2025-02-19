@@ -1,4 +1,4 @@
-name: Build X86_64 OpenWrt（Gork编译）
+name: Build X86_64 OpenWrt
 
 on:
   repository_dispatch:
@@ -156,7 +156,7 @@ jobs:
           feeds-${{ runner.os }}-
 
     - name: Upload feeds directory
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: openwrt-feeds
         path: openwrt/
@@ -220,7 +220,7 @@ jobs:
           dl-${{ runner.os }}-
 
     - name: Upload configured directory
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: openwrt-configured
         path: openwrt/
@@ -275,7 +275,7 @@ jobs:
       run: df -hT
 
     - name: Upload bin directory
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
@@ -291,7 +291,7 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
