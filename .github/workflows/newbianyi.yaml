@@ -1,6 +1,8 @@
 name: Build X86_64 OpenWrt(每日编译)
 
 on:
+  schedule:
+    - cron: '0 16 * * *'
   repository_dispatch:
   workflow_dispatch:
 
