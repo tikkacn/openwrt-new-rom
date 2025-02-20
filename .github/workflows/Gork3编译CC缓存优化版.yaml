@@ -10,7 +10,7 @@ env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: 缓存优化.config  # 修改为缓存优化.config
+  CONFIG_FILE: 缓存优化.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
@@ -19,7 +19,7 @@ env:
   UPLOAD_WETRANSFER: false
   UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
-  CCACHE_DIR: /github/workspace/ccache  # 定义全局 ccache 缓存目录
+  CCACHE_DIR: $GITHUB_WORKSPACE/ccache  # 修改为相对路径，避免权限问题
 
 jobs:
   build:
@@ -162,7 +162,7 @@ jobs:
 
     - name: Save ccache
       uses: actions/cache@v3
-      if: always()  # 即使编译失败也保存缓存
+      if: always()
       with:
         path: ${{ env.CCACHE_DIR }}
         key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
