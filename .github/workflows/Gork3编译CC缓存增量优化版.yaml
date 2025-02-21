@@ -228,23 +228,25 @@ jobs:
           done
         fi
 
-        # 清理已删除的包
+        # 清理已删除的包（仅增量编译时执行）
         if [ -s ../removed_packages.txt ]; then
           echo "Cleaning removed packages..."
           while read -r pkg; do
             pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
             echo "Cleaning package: $pkg_name"
-            make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
+            make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name, proceeding..."
           done < ../removed_packages.txt
         fi
 
-        # 编译新增或更新的包
+        # 编译新增或更新的包（首次运行时跳过 clean）
         if [ -s ../compile_list.txt ]; then
           echo "Compiling added or updated packages..."
           while read -r pkg; do
             pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
             echo "Compiling package: $pkg_name"
-            make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
+            if [ -f ../previous_packages.txt ]; then
+              make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name, proceeding..."
+            fi
             make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
             make -j8 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
             make -j4 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
@@ -254,10 +256,10 @@ jobs:
           echo "No new or updated packages to compile."
         fi
 
-        # 检查源码或 feeds 更新，必要时重新编译内核
+        # 检查源码或 feeds 更新，必要时重新编译内核（非首次运行）
         git fetch origin $REPO_BRANCH
-        if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
-           [ ! -f "../feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ../feeds_hash)" ]; then
+        if [ -f ../previous_packages.txt ] && { [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
+           [ ! -f "../feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ../feeds_hash)" ]; }; then
           echo "Source or feeds updated, rebuilding kernel..."
           make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
           make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
