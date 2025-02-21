@@ -94,13 +94,34 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
+    - name: Restore tools/toolchain cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          openwrt/staging_dir/toolchain-*
+          openwrt/build_dir/toolchain-*
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
+        restore-keys: |
+          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    - name: Restore package cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          openwrt/build_dir/target-*/root-*
+          openwrt/bin/packages
+          package_hashes
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-${{ github.sha }}
+        restore-keys: |
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-
+
     - name: Restore ccache
       uses: actions/cache@v3
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-${{ github.sha }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
         restore-keys: |
-          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
     - name: Clone source code
       working-directory: ./
@@ -144,15 +165,7 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: Cache previous package list
-      uses: actions/cache@v3
-      with:
-        path: previous_packages.txt
-        key: package-list-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.run_id }}
-        restore-keys: |
-          package-list-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
-
-    - name: Detect changed packages
+    - name: Detect config changes
       run: |
         cd openwrt
         grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
@@ -162,47 +175,90 @@ jobs:
           comm -12 ../previous_packages.txt current_packages.txt > unchanged_packages.txt
         else
           cp current_packages.txt added_packages.txt
-          touch unchanged_packages.txt
+          touch unchanged_packages.txt removed_packages.txt
         fi
         mv current_packages.txt ../previous_packages.txt
+
+    - name: Detect package source changes
+      run: |
+        cd openwrt
+        mkdir -p ../package_hashes
+        for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+          pkg_dir="package/$pkg"
+          if [ -d "$pkg_dir" ]; then
+            find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "../package_hashes/$pkg.current"
+          fi
+        done
+        touch ../updated_packages.txt
+        for pkg in $(cat ../unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+          if [ -f "../package_hashes/$pkg.current" ] && [ -f "../package_hashes/$pkg.previous" ]; then
+            if ! cmp -s "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"; then
+              echo "CONFIG_PACKAGE_$pkg=y" >> ../updated_packages.txt
+            fi
+          elif [ -f "../package_hashes/$pkg.current" ]; then
+            echo "CONFIG_PACKAGE_$pkg=y" >> ../updated_packages.txt
+          fi
+          [ -f "../package_hashes/$pkg.current" ] && mv "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"
+        done
+        echo "Packages with updated source: $(cat ../updated_packages.txt)"
 
     - name: Compile the firmware
       id: compile
       run: |
         cd openwrt
         ccache -M 5G
-        echo -e "$(nproc) thread compile with ccache"
-        mkdir -p ${{ env.CCACHE_DIR }}
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
-        # 编译基础固件
-        make defconfig
-        make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }}
-        # 编译变更的插件
-        if [ -s ../added_packages.txt ]; then
-          echo "Compiling changed or added packages..."
+        echo "Starting compilation with $(nproc) threads and ccache"
+        if [ ! -d "staging_dir/toolchain-*" ]; then
+          echo "Toolchain not found in cache, compiling..."
+          make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || make -j1 V=s tools/install toolchain/install
+        else
+          echo "Toolchain restored from cache, skipping compilation."
+        fi
+        touch ../compile_list.txt
+        cat ../added_packages.txt ../updated_packages.txt | sort -u > ../compile_list.txt
+        if [ -s ../compile_list.txt ]; then
+          echo "Compiling added or updated packages..."
           while read -r pkg; do
             pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-            make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
-          done < ../added_packages.txt
+            echo "Compiling package: $pkg_name"
+            make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
+            make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || make package/$pkg_name/compile -j1 V=s
+          done < ../compile_list.txt
         else
-          echo "No packages changed or added."
+          echo "No new or updated packages to compile."
         fi
-        # 打包固件
-        make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }}
+        make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || make -j1 V=s target/install
         echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "固件大小：$(du -sh bin/targets/*/*)"
+
+    - name: Save tools/toolchain cache
+      uses: actions/cache@v3
+      if: always()
+      with:
+        path: |
+          openwrt/staging_dir/toolchain-*
+          openwrt/build_dir/toolchain-*
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
+
+    - name: Save package cache
+      uses: actions/cache@v3
+      if: always()
+      with:
+        path: |
+          openwrt/build_dir/target-*/root-*
+          openwrt/bin/packages
+          package_hashes
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-${{ github.sha }}
 
     - name: Save ccache
       uses: actions/cache@v3
       if: always()
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-${{ github.sha }}
-        restore-keys: |
-          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
 
     - name: Check space usage
       if: (!cancelled())
