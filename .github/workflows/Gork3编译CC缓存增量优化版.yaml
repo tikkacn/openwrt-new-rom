@@ -217,6 +217,14 @@ jobs:
         fi
         touch ../compile_list.txt
         cat ../added_packages.txt ../updated_packages.txt | sort -u > ../compile_list.txt
+        if [ -s ../removed_packages.txt ]; then
+          echo "Cleaning removed packages..."
+          while read -r pkg; do
+            pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+            echo "Cleaning package: $pkg_name"
+            make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
+          done < ../removed_packages.txt
+        fi
         if [ -s ../compile_list.txt ]; then
           echo "Compiling added or updated packages..."
           while read -r pkg; do
@@ -228,6 +236,7 @@ jobs:
         else
           echo "No new or updated packages to compile."
         fi
+        rm -rf build_dir/target-*/root-*
         make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || make -j1 V=s target/install
         echo "status=success" >> $GITHUB_OUTPUT
         echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
