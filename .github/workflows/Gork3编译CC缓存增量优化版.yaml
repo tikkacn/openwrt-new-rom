@@ -111,7 +111,7 @@ jobs:
           openwrt/build_dir/target-*/root-*
           openwrt/bin/packages
           package_hashes
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-${{ github.sha }}
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
         restore-keys: |
           packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-
 
@@ -119,7 +119,7 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
         restore-keys: |
           ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
@@ -151,7 +151,11 @@ jobs:
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        if [ ! -e "$CONFIG_FILE" ]; then
+          echo "Error: $CONFIG_FILE not found!" >&2
+          exit 1
+        fi
+        mv $CONFIG_FILE openwrt/.config
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
@@ -260,14 +264,14 @@ jobs:
           openwrt/build_dir/target-*/root-*
           openwrt/bin/packages
           package_hashes
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-${{ github.sha }}
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
 
     - name: Save ccache
       uses: actions/cache@v3
       if: always()
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
 
     - name: Check space usage
       if: (!cancelled())
