@@ -189,92 +189,96 @@ jobs:
         grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
         if [ ! -f ../previous_packages.txt ]; then
           echo "First run detected, compiling all packages..."
-          cp current_packages.txt ../compile_list.txt
-          touch ../previous_packages.txt
-          # 首次运行时强制编译内核
-          echo "Compiling kernel for first run..."
-          make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
-          make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j4 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j1 V=s target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
+          make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+          cp current_packages.txt ../previous_packages.txt
         else
           echo "Incremental build detected..."
           comm -13 ../previous_packages.txt current_packages.txt > ../added_packages.txt
           comm -23 ../previous_packages.txt current_packages.txt > ../removed_packages.txt
           comm -12 ../previous_packages.txt current_packages.txt > ../unchanged_packages.txt || touch ../unchanged_packages.txt
           cat ../added_packages.txt > ../compile_list.txt
-        fi
-        mv current_packages.txt ../previous_packages.txt
 
-        # 检测包源码变化
-        mkdir -p ../package_hashes
-        for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
-          pkg_dir="package/$pkg"
-          if [ -d "$pkg_dir" ]; then
-            find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "../package_hashes/$pkg.current"
-          fi
-        done
-        if [ -s ../unchanged_packages.txt ]; then
-          for pkg in $(cat ../unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
-            if [ -f "../package_hashes/$pkg.current" ] && [ -f "../package_hashes/$pkg.previous" ]; then
-              if ! cmp -s "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"; then
+          # 检测包源码变化
+          mkdir -p ../package_hashes
+          for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+            pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
+            if [ -n "$pkg_dir" ]; then
+              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "../package_hashes/$pkg.current"
+            fi
+          done
+          if [ -s ../unchanged_packages.txt ]; then
+            for pkg in $(cat ../unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+              if [ -f "../package_hashes/$pkg.current" ] && [ -f "../package_hashes/$pkg.previous" ]; then
+                if ! cmp -s "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"; then
+                  echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
+                fi
+              elif [ -f "../package_hashes/$pkg.current" ]; then
                 echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
               fi
-            elif [ -f "../package_hashes/$pkg.current" ]; then
-              echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
-            fi
-            [ -f "../package_hashes/$pkg.current" ] && mv "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"
-          done
-        fi
+              [ -f "../package_hashes/$pkg.current" ] && mv "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"
+            done
+          fi
 
-        # 清理已删除的包（仅增量编译时执行）
-        if [ -s ../removed_packages.txt ]; then
-          echo "Cleaning removed packages..."
-          while read -r pkg; do
-            pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-            echo "Cleaning package: $pkg_name"
-            make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name, proceeding..."
-          done < ../removed_packages.txt
-        fi
+          # 清理已删除的包
+          if [ -s ../removed_packages.txt ]; then
+            echo "Cleaning removed packages..."
+            while read -r pkg; do
+              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              pkg_dir=$(find package feeds -type d -name "$pkg_name" | head -n 1)
+              if [ -n "$pkg_dir" ]; then
+                echo "Cleaning package: $pkg_name"
+                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name, proceeding..."
+              else
+                echo "Skipping cleanup of $pkg_name: package not found"
+              fi
+            done < ../removed_packages.txt
+          fi
 
-        # 编译新增或更新的包（首次运行时跳过 clean）
-        if [ -s ../compile_list.txt ]; then
-          echo "Compiling added or updated packages..."
-          while read -r pkg; do
-            pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-            echo "Compiling package: $pkg_name"
-            if [ -f ../previous_packages.txt ]; then
-              make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name, proceeding..."
-            fi
-            make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make -j8 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make -j4 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make -j1 V=s package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
-          done < ../compile_list.txt
-        else
-          echo "No new or updated packages to compile."
-        fi
+          # 编译新增或更新的包
+          if [ -s ../compile_list.txt ]; then
+            echo "Compiling added or updated packages..."
+            while read -r pkg; do
+              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              pkg_dir=$(find package feeds -type d -name "$pkg_name" | head -n 1)
+              if [ -n "$pkg_dir" ]; then
+                echo "Compiling package: $pkg_name"
+                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name, proceeding..."
+                make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+                make -j8 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+                make -j4 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+                make -j1 V=s package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
+              else
+                echo "Skipping $pkg_name: package not found"
+              fi
+            done < ../compile_list.txt
+          else
+            echo "No new or updated packages to compile."
+          fi
 
-        # 检查源码或 feeds 更新，必要时重新编译内核（非首次运行）
-        git fetch origin $REPO_BRANCH
-        if [ -f ../previous_packages.txt ] && { [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
-           [ ! -f "../feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ../feeds_hash)" ]; }; then
-          echo "Source or feeds updated, rebuilding kernel..."
-          make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
-          make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j4 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j1 V=s target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
-          sha256sum feeds.conf.default | awk '{print $1}' > ../feeds_hash
-        fi
+          # 检查源码或 feeds 更新，必要时重新编译内核
+          git fetch origin $REPO_BRANCH
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
+             [ ! -f "../feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ../feeds_hash)" ]; then
+            echo "Source or feeds updated, rebuilding kernel..."
+            make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
+            make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make -j4 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make -j1 V=s target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
+            sha256sum feeds.conf.default | awk '{print $1}' > ../feeds_hash
+          fi
 
-        # 生成目标文件系统
-        echo "Building target filesystem..."
-        make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-        make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-        make -j4 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-        make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }}
+          # 生成目标文件系统
+          echo "Building target filesystem..."
+          make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j4 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }}
+          mv current_packages.txt ../previous_packages.txt
+        fi
 
         echo "status=success" >> $GITHUB_OUTPUT
         echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
