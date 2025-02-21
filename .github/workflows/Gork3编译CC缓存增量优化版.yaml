@@ -162,12 +162,6 @@ jobs:
         cd openwrt
         make defconfig
         make oldconfig <<< "y"
-        # 确保 .config 复制到内核目录
-        KERNEL_DIR="build_dir/target-x86_64_musl/linux-x86_64"
-        if [ -f ".config" ] && [ ! -f "$KERNEL_DIR/linux-*/.config" ]; then
-          mkdir -p "$KERNEL_DIR"
-          cp .config "$KERNEL_DIR/linux-*/.config" || echo "Warning: Kernel dir not ready yet, will copy later."
-        fi
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
@@ -191,16 +185,24 @@ jobs:
           echo "Toolchain restored from cache, skipping compilation."
         fi
 
-        # 检测 .config 变化
+        # 检测 .config 变化或首次运行
         grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
         if [ ! -f ../previous_packages.txt ]; then
           echo "First run detected, compiling all packages..."
           cp current_packages.txt ../compile_list.txt
           touch ../previous_packages.txt
+          # 首次运行时强制编译内核
+          echo "Compiling kernel for first run..."
+          make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
+          make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j4 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j1 V=s target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
         else
+          echo "Incremental build detected..."
           comm -13 ../previous_packages.txt current_packages.txt > ../added_packages.txt
           comm -23 ../previous_packages.txt current_packages.txt > ../removed_packages.txt
-          comm -12 ../previous_packages.txt current_packages.txt > ../unchanged_packages.txt
+          comm -12 ../previous_packages.txt current_packages.txt > ../unchanged_packages.txt || touch ../unchanged_packages.txt
           cat ../added_packages.txt > ../compile_list.txt
         fi
         mv current_packages.txt ../previous_packages.txt
@@ -213,16 +215,18 @@ jobs:
             find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "../package_hashes/$pkg.current"
           fi
         done
-        for pkg in $(cat ../unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
-          if [ -f "../package_hashes/$pkg.current" ] && [ -f "../package_hashes/$pkg.previous" ]; then
-            if ! cmp -s "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"; then
+        if [ -s ../unchanged_packages.txt ]; then
+          for pkg in $(cat ../unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+            if [ -f "../package_hashes/$pkg.current" ] && [ -f "../package_hashes/$pkg.previous" ]; then
+              if ! cmp -s "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"; then
+                echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
+              fi
+            elif [ -f "../package_hashes/$pkg.current" ]; then
               echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
             fi
-          elif [ -f "../package_hashes/$pkg.current" ]; then
-            echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
-          fi
-          [ -f "../package_hashes/$pkg.current" ] && mv "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"
-        done
+            [ -f "../package_hashes/$pkg.current" ] && mv "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"
+          done
+        fi
 
         # 清理已删除的包
         if [ -s ../removed_packages.txt ]; then
@@ -242,9 +246,9 @@ jobs:
             echo "Compiling package: $pkg_name"
             make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
             make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make package/$pkg_name/compile -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make package/$pkg_name/compile -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+            make -j8 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make -j4 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make -j1 V=s package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
           done < ../compile_list.txt
         else
           echo "No new or updated packages to compile."
@@ -254,7 +258,7 @@ jobs:
         git fetch origin $REPO_BRANCH
         if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
            [ ! -f "../feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ../feeds_hash)" ]; then
-          echo "Source or feeds updated, rebuilding kernel and packages..."
+          echo "Source or feeds updated, rebuilding kernel..."
           make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
           make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
           make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
