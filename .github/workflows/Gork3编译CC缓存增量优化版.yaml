@@ -33,16 +33,12 @@ jobs:
         df -hT
         echo "=============================================================================="
 
-    - name: "Optimize Disk Space"
-      uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
+    - name: Optimize Disk Space
+      uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
       with:
         operate_sudo: "True"
         general_include: ".+"
-        general_exclude: |-
-          ^GCC$
-          ^G\+\+$
-          Clang
-          LLVM
+        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
         docker_include: ".+"
         docker_prune: "True"
         docker_clean: "True"
@@ -56,7 +52,7 @@ jobs:
 
     - name: Freeing up disk space
       uses: easimon/maximize-build-space@master
-      with: 
+      with:
         root-reserve-mb: 2048
         swap-size-mb: 1
         remove-dotnet: 'true'
@@ -100,7 +96,7 @@ jobs:
         path: |
           openwrt/staging_dir/toolchain-*
           openwrt/build_dir/toolchain-*
-        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
         restore-keys: |
           toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
@@ -111,15 +107,15 @@ jobs:
           openwrt/build_dir/target-*/root-*
           openwrt/bin/packages
           package_hashes
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
         restore-keys: |
-          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}-
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
     - name: Restore ccache
       uses: actions/cache@v3
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
         restore-keys: |
           ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
@@ -165,29 +161,51 @@ jobs:
       run: |
         cd openwrt
         make defconfig
-        echo "Checking and resolving dependencies..."
         make oldconfig <<< "y"
+        # 确保 .config 复制到内核目录
+        KERNEL_DIR="build_dir/target-x86_64_musl/linux-x86_64"
+        if [ -f ".config" ] && [ ! -f "$KERNEL_DIR/linux-*/.config" ]; then
+          mkdir -p "$KERNEL_DIR"
+          cp .config "$KERNEL_DIR/linux-*/.config" || echo "Warning: Kernel dir not ready yet, will copy later."
+        fi
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: Detect config changes
+    - name: Detect changes and compile
+      id: compile
       run: |
         cd openwrt
-        grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
-        if [ -f ../previous_packages.txt ]; then
-          comm -13 ../previous_packages.txt current_packages.txt > added_packages.txt
-          comm -23 ../previous_packages.txt current_packages.txt > removed_packages.txt
-          comm -12 ../previous_packages.txt current_packages.txt > unchanged_packages.txt
+        ccache -M 5G
+        export CCACHE_DIR=${{ env.CCACHE_DIR }}
+        echo "Starting compilation with ccache"
+
+        # 检查工具链缓存
+        if [ ! -d "staging_dir/toolchain-*" ]; then
+          echo "Toolchain not found in cache, compiling..."
+          make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j8 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j4 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j1 V=s tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }}
         else
-          cp current_packages.txt added_packages.txt
-          touch unchanged_packages.txt removed_packages.txt
+          echo "Toolchain restored from cache, skipping compilation."
+        fi
+
+        # 检测 .config 变化
+        grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
+        if [ ! -f ../previous_packages.txt ]; then
+          echo "First run detected, compiling all packages..."
+          cp current_packages.txt ../compile_list.txt
+          touch ../previous_packages.txt
+        else
+          comm -13 ../previous_packages.txt current_packages.txt > ../added_packages.txt
+          comm -23 ../previous_packages.txt current_packages.txt > ../removed_packages.txt
+          comm -12 ../previous_packages.txt current_packages.txt > ../unchanged_packages.txt
+          cat ../added_packages.txt > ../compile_list.txt
         fi
         mv current_packages.txt ../previous_packages.txt
 
-    - name: Detect package source changes
-      run: |
-        cd openwrt
+        # 检测包源码变化
         mkdir -p ../package_hashes
         for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
           pkg_dir="package/$pkg"
@@ -195,41 +213,18 @@ jobs:
             find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "../package_hashes/$pkg.current"
           fi
         done
-        touch ../updated_packages.txt
         for pkg in $(cat ../unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
           if [ -f "../package_hashes/$pkg.current" ] && [ -f "../package_hashes/$pkg.previous" ]; then
             if ! cmp -s "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"; then
-              echo "CONFIG_PACKAGE_$pkg=y" >> ../updated_packages.txt
+              echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
             fi
           elif [ -f "../package_hashes/$pkg.current" ]; then
-            echo "CONFIG_PACKAGE_$pkg=y" >> ../updated_packages.txt
+            echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
           fi
           [ -f "../package_hashes/$pkg.current" ] && mv "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"
         done
-        echo "Packages with updated source: $(cat ../updated_packages.txt)"
 
-    - name: Compile the firmware
-      id: compile
-      run: |
-        cd openwrt
-        ccache -M 5G
-        export CCACHE_DIR=${{ env.CCACHE_DIR }}
-        echo "Starting compilation with $(nproc) threads and ccache"
-        if [ ! -d "staging_dir/toolchain-*" ]; then
-          echo "Toolchain not found in cache, compiling..."
-          make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || make -j1 V=s tools/install toolchain/install
-        else
-          echo "Toolchain restored from cache, skipping compilation."
-        fi
-        touch ../compile_list.txt
-        # 修复首次编译：如果没有 added_packages.txt，则编译所有包
-        if [ ! -f ../previous_packages.txt ] || [ ! -f ../added_packages.txt ] || [ ! -s ../added_packages.txt ]; then
-          echo "First run detected, compiling all packages..."
-          grep "^CONFIG_PACKAGE" .config | sort -u > ../compile_list.txt
-        else
-          echo "Incremental build detected, compiling added or updated packages..."
-          cat ../added_packages.txt ../updated_packages.txt | sort -u > ../compile_list.txt
-        fi
+        # 清理已删除的包
         if [ -s ../removed_packages.txt ]; then
           echo "Cleaning removed packages..."
           while read -r pkg; do
@@ -238,23 +233,43 @@ jobs:
             make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
           done < ../removed_packages.txt
         fi
+
+        # 编译新增或更新的包
         if [ -s ../compile_list.txt ]; then
           echo "Compiling added or updated packages..."
           while read -r pkg; do
             pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
             echo "Compiling package: $pkg_name"
             make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
-            make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || {
-              echo "Retrying with verbose output due to potential dependency issues..."
-              make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
-            }
+            make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make package/$pkg_name/compile -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make package/$pkg_name/compile -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
           done < ../compile_list.txt
         else
           echo "No new or updated packages to compile."
         fi
-        # 移除清理 root-* 的操作，并在首次运行时强制生成根文件系统
+
+        # 检查源码或 feeds 更新，必要时重新编译内核
+        git fetch origin $REPO_BRANCH
+        if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
+           [ ! -f "../feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ../feeds_hash)" ]; then
+          echo "Source or feeds updated, rebuilding kernel and packages..."
+          make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
+          make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j4 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j1 V=s target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
+          sha256sum feeds.conf.default | awk '{print $1}' > ../feeds_hash
+        fi
+
+        # 生成目标文件系统
         echo "Building target filesystem..."
-        make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || make -j1 V=s target/install
+        make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+        make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+        make -j4 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+        make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }}
+
         echo "status=success" >> $GITHUB_OUTPUT
         echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
@@ -267,7 +282,7 @@ jobs:
         path: |
           openwrt/staging_dir/toolchain-*
           openwrt/build_dir/toolchain-*
-        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
 
     - name: Save package cache
       uses: actions/cache@v3
@@ -277,14 +292,14 @@ jobs:
           openwrt/build_dir/target-*/root-*
           openwrt/bin/packages
           package_hashes
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
 
     - name: Save ccache
       uses: actions/cache@v3
       if: always()
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('增量缓存优化.config') }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
 
     - name: Check space usage
       if: (!cancelled())
