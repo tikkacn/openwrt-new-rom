@@ -160,11 +160,13 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
-    - name: Download package
+    - name: Download package and resolve dependencies
       id: package
       run: |
         cd openwrt
         make defconfig
+        echo "Checking and resolving dependencies..."
+        make oldconfig <<< "y"
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
@@ -235,7 +237,10 @@ jobs:
             pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
             echo "Compiling package: $pkg_name"
             make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
-            make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || make package/$pkg_name/compile -j1 V=s
+            make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || {
+              echo "Retrying with verbose output due to potential dependency issues..."
+              make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+            }
           done < ../compile_list.txt
         else
           echo "No new or updated packages to compile."
