@@ -115,6 +115,7 @@ jobs:
         path: |
           openwrt/build_dir/target-*/root-*
           openwrt/bin/packages
+          ../previous_packages.txt  # 添加此路径
           package_hashes
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
         restore-keys: |
@@ -163,7 +164,6 @@ jobs:
         cd openwrt
         make defconfig
         make oldconfig <<< "y"
-        # 添加超时和详细日志
         timeout 30m make download -j2 V=s || echo "Warning: Download timed out or failed, proceeding..."
         find dl -size -1024c -exec ls -l {} \; || echo "Warning: Failed to list small files, proceeding..."
         find dl -size -1024c -exec rm -f {} \; || echo "Warning: Failed to remove small files, proceeding..."
@@ -176,7 +176,6 @@ jobs:
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
         echo "Starting compilation with ccache"
 
-        # 检查工具链缓存
         if [ ! -d "staging_dir/toolchain-*" ]; then
           echo "Toolchain not found in cache, compiling..."
           make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
@@ -187,7 +186,6 @@ jobs:
           echo "Toolchain restored from cache, skipping compilation."
         fi
 
-        # 检测 .config 变化或首次运行
         grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
         if [ ! -f ../previous_packages.txt ]; then
           echo "First run detected, compiling all packages..."
@@ -203,7 +201,6 @@ jobs:
           comm -12 ../previous_packages.txt current_packages.txt > ../unchanged_packages.txt || touch ../unchanged_packages.txt
           cat ../added_packages.txt > ../compile_list.txt
 
-          # 检测包源码变化
           mkdir -p ../package_hashes
           for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
             pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
@@ -224,7 +221,6 @@ jobs:
             done
           fi
 
-          # 清理已删除的包
           if [ -s ../removed_packages.txt ]; then
             echo "Cleaning removed packages..."
             while read -r pkg; do
@@ -239,7 +235,6 @@ jobs:
             done < ../removed_packages.txt
           fi
 
-          # 编译新增或更新的包
           if [ -s ../compile_list.txt ]; then
             echo "Compiling added or updated packages..."
             while read -r pkg; do
@@ -260,7 +255,6 @@ jobs:
             echo "No new or updated packages to compile."
           fi
 
-          # 检查源码或 feeds 更新，必要时重新编译内核
           git fetch origin $REPO_BRANCH
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
              [ ! -f "../feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ../feeds_hash)" ]; then
@@ -273,7 +267,6 @@ jobs:
             sha256sum feeds.conf.default | awk '{print $1}' > ../feeds_hash
           fi
 
-          # 生成目标文件系统
           echo "Building target filesystem..."
           make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
           make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
@@ -303,6 +296,7 @@ jobs:
         path: |
           openwrt/build_dir/target-*/root-*
           openwrt/bin/packages
+          ../previous_packages.txt  # 添加此路径
           package_hashes
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
 
