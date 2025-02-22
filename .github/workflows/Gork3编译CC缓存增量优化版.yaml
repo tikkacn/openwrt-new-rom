@@ -309,7 +309,7 @@ jobs:
       if: always()
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}-${{ env.FILE_DATE }}
 
     - name: Check space usage
       if: (!cancelled())
