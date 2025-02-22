@@ -105,7 +105,7 @@ jobs:
         path: |
           openwrt/staging_dir/toolchain-*
           openwrt/build_dir/toolchain-*
-        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
         restore-keys: |
           toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
@@ -117,15 +117,15 @@ jobs:
           openwrt/bin/packages
           ../previous_packages.txt
           package_hashes
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
         restore-keys: |
-          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-  # 优化回退键，确保命中上次缓存
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
     - name: Restore ccache
       uses: actions/cache@v3
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
         restore-keys: |
           ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
@@ -290,7 +290,7 @@ jobs:
         path: |
           openwrt/staging_dir/toolchain-*
           openwrt/build_dir/toolchain-*
-        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
     - name: Save package cache
       uses: actions/cache@v3
@@ -301,14 +301,14 @@ jobs:
           openwrt/bin/packages
           ../previous_packages.txt
           package_hashes
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
     - name: Save ccache
       uses: actions/cache@v3
       if: always()
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
     - name: Check space usage
       if: (!cancelled())
