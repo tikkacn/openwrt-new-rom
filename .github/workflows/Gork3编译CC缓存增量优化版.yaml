@@ -163,9 +163,10 @@ jobs:
         cd openwrt
         make defconfig
         make oldconfig <<< "y"
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+        # 添加超时和详细日志
+        timeout 30m make download -j2 V=s || echo "Warning: Download timed out or failed, proceeding..."
+        find dl -size -1024c -exec ls -l {} \; || echo "Warning: Failed to list small files, proceeding..."
+        find dl -size -1024c -exec rm -f {} \; || echo "Warning: Failed to remove small files, proceeding..."
 
     - name: Detect changes and compile
       id: compile
