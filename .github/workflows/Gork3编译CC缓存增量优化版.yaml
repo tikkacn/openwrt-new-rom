@@ -115,11 +115,11 @@ jobs:
         path: |
           openwrt/build_dir/target-*/root-*
           openwrt/bin/packages
-          ../previous_packages.txt  # 添加此路径
+          ../previous_packages.txt
           package_hashes
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
         restore-keys: |
-          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-  # 优化回退键，确保命中上次缓存
 
     - name: Restore ccache
       uses: actions/cache@v3
@@ -186,7 +186,10 @@ jobs:
           echo "Toolchain restored from cache, skipping compilation."
         fi
 
+        echo "Current SHA: ${{ github.sha }}"
         grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
+        echo "Checking previous_packages.txt..."
+        ls -l ../previous_packages.txt || echo "previous_packages.txt not found"
         if [ ! -f ../previous_packages.txt ]; then
           echo "First run detected, compiling all packages..."
           make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
@@ -296,7 +299,7 @@ jobs:
         path: |
           openwrt/build_dir/target-*/root-*
           openwrt/bin/packages
-          ../previous_packages.txt  # 添加此路径
+          ../previous_packages.txt
           package_hashes
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
 
