@@ -1,8 +1,8 @@
 name: Build X86_64 OpenWrt（Gork3编译CC增量缓存优化版）
 
 on:
-  schedule:
-    - cron: '0 16 * * *'
+  # schedule:
+  #   - cron: '0 16 * * *'  # 注释掉，避免自动运行
   repository_dispatch:
   workflow_dispatch:
 
