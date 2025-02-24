@@ -20,12 +20,13 @@ env:
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
   CCACHE_DIR: $GITHUB_WORKSPACE/ccache
+  WORKSPACE: $GITHUB_WORKSPACE  # 定义工作目录根路径
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     permissions:
-      actions: write  # 添加权限以允许删除缓存
+      actions: write  # 允许删除缓存
 
     steps:
     - name: Before freeing up disk space
@@ -105,8 +106,8 @@ jobs:
       uses: actions/cache@v3
       with:
         path: |
-          openwrt/staging_dir/toolchain-*
-          openwrt/build_dir/toolchain-*
+          ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
         key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
         restore-keys: |
           toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
@@ -116,10 +117,10 @@ jobs:
       uses: actions/cache@v3
       with:
         path: |
-          openwrt/build_dir/target-*/root-*
-          openwrt/bin/packages
-          ../previous_packages.txt
-          package_hashes
+          ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-*
+          ${{ env.WORKSPACE }}/openwrt/bin/packages
+          ${{ env.WORKSPACE }}/previous_packages.txt
+          ${{ env.WORKSPACE }}/package_hashes
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
         restore-keys: |
           packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
@@ -183,104 +184,104 @@ jobs:
 
         if [ ! -d "staging_dir/toolchain-*" ]; then
           echo "Toolchain not found in cache, compiling..."
-          make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j8 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j4 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j1 V=s tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }}
+          make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j8 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j4 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j1 V=s tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
         else
           echo "Toolchain restored from cache, skipping compilation."
         fi
 
         echo "Current SHA: ${{ github.sha }}"
-        grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
+        grep "^CONFIG_PACKAGE" .config | sort > ${{ env.WORKSPACE }}/current_packages.txt
         echo "Checking previous_packages.txt..."
-        ls -l ../previous_packages.txt || echo "previous_packages.txt not found"
-        if [ ! -f ../previous_packages.txt ]; then
+        ls -l ${{ env.WORKSPACE }}/previous_packages.txt || echo "previous_packages.txt not found"
+        if [ ! -f "${{ env.WORKSPACE }}/previous_packages.txt" ]; then
           echo "First run detected, compiling all packages..."
-          make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
-          cp current_packages.txt ../previous_packages.txt
+          make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
+          cp ${{ env.WORKSPACE }}/current_packages.txt ${{ env.WORKSPACE }}/previous_packages.txt
         else
           echo "Incremental build detected..."
-          comm -13 ../previous_packages.txt current_packages.txt > ../added_packages.txt
-          comm -23 ../previous_packages.txt current_packages.txt > ../removed_packages.txt
-          comm -12 ../previous_packages.txt current_packages.txt > ../unchanged_packages.txt || touch ../unchanged_packages.txt
-          cat ../added_packages.txt > ../compile_list.txt
+          comm -13 ${{ env.WORKSPACE }}/previous_packages.txt ${{ env.WORKSPACE }}/current_packages.txt > ${{ env.WORKSPACE }}/added_packages.txt
+          comm -23 ${{ env.WORKSPACE }}/previous_packages.txt ${{ env.WORKSPACE }}/current_packages.txt > ${{ env.WORKSPACE }}/removed_packages.txt
+          comm -12 ${{ env.WORKSPACE }}/previous_packages.txt ${{ env.WORKSPACE }}/current_packages.txt > ${{ env.WORKSPACE }}/unchanged_packages.txt || touch ${{ env.WORKSPACE }}/unchanged_packages.txt
+          cat ${{ env.WORKSPACE }}/added_packages.txt > ${{ env.WORKSPACE }}/compile_list.txt
 
-          mkdir -p ../package_hashes
+          mkdir -p ${{ env.WORKSPACE }}/package_hashes
           for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
             pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
             if [ -n "$pkg_dir" ]; then
-              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "../package_hashes/$pkg.current"
+              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "${{ env.WORKSPACE }}/package_hashes/$pkg.current"
             fi
           done
-          if [ -s ../unchanged_packages.txt ]; then
-            for pkg in $(cat ../unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
-              if [ -f "../package_hashes/$pkg.current" ] && [ -f "../package_hashes/$pkg.previous" ]; then
-                if ! cmp -s "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"; then
-                  echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
+          if [ -s ${{ env.WORKSPACE }}/unchanged_packages.txt ]; then
+            for pkg in $(cat ${{ env.WORKSPACE }}/unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+              if [ -f "${{ env.WORKSPACE }}/package_hashes/$pkg.current" ] && [ -f "${{ env.WORKSPACE }}/package_hashes/$pkg.previous" ]; then
+                if ! cmp -s "${{ env.WORKSPACE }}/package_hashes/$pkg.current" "${{ env.WORKSPACE }}/package_hashes/$pkg.previous"; then
+                  echo "CONFIG_PACKAGE_$pkg=y" >> ${{ env.WORKSPACE }}/compile_list.txt
                 fi
-              elif [ -f "../package_hashes/$pkg.current" ]; then
-                echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
+              elif [ -f "${{ env.WORKSPACE }}/package_hashes/$pkg.current" ]; then
+                echo "CONFIG_PACKAGE_$pkg=y" >> ${{ env.WORKSPACE }}/compile_list.txt
               fi
-              [ -f "../package_hashes/$pkg.current" ] && mv "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"
+              [ -f "${{ env.WORKSPACE }}/package_hashes/$pkg.current" ] && mv "${{ env.WORKSPACE }}/package_hashes/$pkg.current" "${{ env.WORKSPACE }}/package_hashes/$pkg.previous"
             done
           fi
 
-          if [ -s ../removed_packages.txt ]; then
+          if [ -s ${{ env.WORKSPACE }}/removed_packages.txt ]; then
             echo "Cleaning removed packages..."
             while read -r pkg; do
               pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
               pkg_dir=$(find package feeds -type d -name "$pkg_name" | head -n 1)
               if [ -n "$pkg_dir" ]; then
                 echo "Cleaning package: $pkg_name"
-                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name, proceeding..."
+                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || echo "Warning: Failed to clean $pkg_name, proceeding..."
               else
                 echo "Skipping cleanup of $pkg_name: package not found"
               fi
-            done < ../removed_packages.txt
+            done < ${{ env.WORKSPACE }}/removed_packages.txt
           fi
 
-          if [ -s ../compile_list.txt ]; then
+          if [ -s ${{ env.WORKSPACE }}/compile_list.txt ]; then
             echo "Compiling added or updated packages..."
             while read -r pkg; do
               pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
               pkg_dir=$(find package feeds -type d -name "$pkg_name" | head -n 1)
               if [ -n "$pkg_dir" ]; then
                 echo "Compiling package: $pkg_name"
-                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name, proceeding..."
-                make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-                make -j8 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-                make -j4 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-                make -j1 V=s package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
+                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || echo "Warning: Failed to clean $pkg_name, proceeding..."
+                make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+                make -j8 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+                make -j4 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+                make -j1 V=s package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
               else
                 echo "Skipping $pkg_name: package not found"
               fi
-            done < ../compile_list.txt
+            done < ${{ env.WORKSPACE }}/compile_list.txt
           else
             echo "No new or updated packages to compile."
           fi
 
           git fetch origin $REPO_BRANCH
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
-             [ ! -f "../feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ../feeds_hash)" ]; then
+             [ ! -f "${{ env.WORKSPACE }}/feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ${{ env.WORKSPACE }}/feeds_hash)" ]; then
             echo "Source or feeds updated, rebuilding kernel..."
-            make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
-            make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make -j4 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make -j1 V=s target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
-            sha256sum feeds.conf.default | awk '{print $1}' > ../feeds_hash
+            make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
+            make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+            make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+            make -j4 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+            make -j1 V=s target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
+            sha256sum feeds.conf.default | awk '{print $1}' > ${{ env.WORKSPACE }}/feeds_hash
           fi
 
           echo "Building target filesystem..."
-          make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j4 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }}
-          mv current_packages.txt ../previous_packages.txt
+          make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j4 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
+          mv ${{ env.WORKSPACE }}/current_packages.txt ${{ env.WORKSPACE }}/previous_packages.txt
         fi
 
         echo "status=success" >> $GITHUB_OUTPUT
@@ -288,13 +289,38 @@ jobs:
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
         echo "固件大小：$(du -sh bin/targets/*/*)"
 
+    - name: Clean up old caches
+      run: |
+        echo "Listing all caches:"
+        gh api -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${{ github.repository }}/actions/caches" | jq -r '.actions_caches[] | .key'
+        echo "Cleaning up old package caches..."
+        gh api -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${{ github.repository }}/actions/caches" \
+          -q '.actions_caches[] | select(.key | startswith("packages-https://github.com/coolsnowwolf/lede-master-latest-")) | .id' | \
+        xargs -I {} gh api -X DELETE -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${{ github.repository }}/actions/caches/{}" || echo "No old package caches found"
+        echo "Cleaning up old ccache caches..."
+        gh api -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${{ github.repository }}/actions/caches" \
+          -q '.actions_caches[] | select(.key | startswith("ccache-https://github.com/coolsnowwolf/lede-master-latest-")) | .id' | \
+        xargs -I {} gh api -X DELETE -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${{ github.repository }}/actions/caches/{}" || echo "No old ccache caches found"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Save tools/toolchain cache
       uses: actions/cache@v3
       if: always()
       with:
         path: |
-          openwrt/staging_dir/toolchain-*
-          openwrt/build_dir/toolchain-*
+          ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
         key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
 
     - name: Save package cache
@@ -303,17 +329,17 @@ jobs:
       if: always()
       with:
         path: |
-          openwrt/build_dir/target-*/root-*
-          openwrt/bin/packages
-          ../previous_packages.txt
-          package_hashes
+          ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-*
+          ${{ env.WORKSPACE }}/openwrt/bin/packages
+          ${{ env.WORKSPACE }}/previous_packages.txt
+          ${{ env.WORKSPACE }}/package_hashes
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
 
     - name: Verify package cache save
       if: always()
       run: |
         echo "Package cache save result: Success"
-        ls -l ../previous_packages.txt || echo "Failed to save previous_packages.txt"
+        ls -l ${{ env.WORKSPACE }}/previous_packages.txt || echo "Failed to save previous_packages.txt"
 
     - name: Save ccache
       id: save-ccache
@@ -328,34 +354,6 @@ jobs:
       run: |
         echo "ccache save result: Success"
         ls -l ${{ env.CCACHE_DIR }} || echo "Failed to save ccache"
-
-    - name: Delete old package caches after successful save
-      if: steps.save-package-cache.outputs.cache-hit != 'true'  # 仅在成功保存新缓存后执行
-      run: |
-        echo "Deleting old package caches..."
-        gh api -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${{ github.repository }}/actions/caches" \
-          -q '.actions_caches[] | select(.key | startswith("packages-https://github.com/coolsnowwolf/lede-master-latest-") and .key != "packages-https://github.com/coolsnowwolf/lede-master-latest-${{ github.run_id }}") | .id' | \
-        xargs -I {} gh api -X DELETE -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${{ github.repository }}/actions/caches/{}"
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Delete old ccache caches after successful save
-      if: steps.save-ccache.outputs.cache-hit != 'true'  # 仅在成功保存新缓存后执行
-      run: |
-        echo "Deleting old ccache caches..."
-        gh api -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${{ github.repository }}/actions/caches" \
-          -q '.actions_caches[] | select(.key | startswith("ccache-https://github.com/coolsnowwolf/lede-master-latest-") and .key != "ccache-https://github.com/coolsnowwolf/lede-master-latest-${{ github.run_id }}") | .id' | \
-        xargs -I {} gh api -X DELETE -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${{ github.repository }}/actions/caches/{}"
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Check space usage
       if: (!cancelled())
