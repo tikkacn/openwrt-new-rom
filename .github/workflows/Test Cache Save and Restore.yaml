@@ -46,6 +46,19 @@ jobs:
         ls -l openwrt/bin/packages/test-package.txt || echo "Failed to save package content"
         ls -l package_hashes/test-hash.current || echo "Failed to save package hashes"
 
+    - name: Clean up old ccache caches
+      run: |
+        echo "Cleaning up old ccache caches before save..."
+        gh api -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${{ github.repository }}/actions/caches" \
+          -q '.actions_caches[] | select(.key | startswith("ccache-https://github.com/coolsnowwolf/lede-master-latest-")) | .id' | \
+        xargs -I {} gh api -X DELETE -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${{ github.repository }}/actions/caches/{}" || echo "No old ccache caches found"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Save ccache
       id: save-ccache
       uses: actions/cache@v3
