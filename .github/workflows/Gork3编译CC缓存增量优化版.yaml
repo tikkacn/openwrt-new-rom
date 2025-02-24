@@ -308,6 +308,9 @@ jobs:
           ../previous_packages.txt
           package_hashes
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+
+    - name: Verify package cache save
+      if: always()
       run: |
         echo "Package cache save result: Success"
         ls -l ../previous_packages.txt || echo "Failed to save previous_packages.txt"
@@ -319,6 +322,9 @@ jobs:
       with:
         path: ${{ env.CCACHE_DIR }}
         key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+
+    - name: Verify ccache save
+      if: always()
       run: |
         echo "ccache save result: Success"
         ls -l ${{ env.CCACHE_DIR }} || echo "Failed to save ccache"
