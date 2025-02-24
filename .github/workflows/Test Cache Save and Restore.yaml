@@ -99,4 +99,50 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Delete old ccache caches
-      i
+      if: steps.save-ccache.outputs.cache-hit != 'true'
+      run: |
+        echo "Deleting old ccache caches..."
+        gh api -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${{ github.repository }}/actions/caches" \
+          -q '.actions_caches[] | select(.key | startswith("ccache-https://github.com/coolsnowwolf/lede-master-latest-") and .key != "ccache-https://github.com/coolsnowwolf/lede-master-latest-${{ github.run_id }}") | .id' | \
+        xargs -I {} gh api -X DELETE -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${{ github.repository }}/actions/caches/{}" || echo "No old ccache caches to delete"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Restore package cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          openwrt/bin/packages
+          previous_packages.txt
+          package_hashes
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+        restore-keys: |
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
+
+    - name: Verify package cache restore
+      if: always()
+      run: |
+        echo "Checking restored package cache:"
+        ls -l previous_packages.txt || echo "Failed to restore previous_packages.txt"
+        ls -l openwrt/bin/packages/test-package.txt || echo "Failed to restore package content"
+        ls -l package_hashes/test-hash.current || echo "Failed to restore package hashes"
+        cat previous_packages.txt || echo "previous_packages.txt is empty or missing"
+
+    - name: Restore ccache
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+        restore-keys: |
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
+
+    - name: Verify ccache restore
+      if: always()
+      run: |
+        echo "Checking restored ccache:"
+        ls -l ${{ env.CCACHE_DIR }}/test-ccache.txt || echo "Failed to restore ccache content"
+        cat ${{ env.CCACHE_DIR }}/test-ccache.txt || echo "ccache content is empty or missing"
