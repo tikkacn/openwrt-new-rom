@@ -106,8 +106,8 @@ jobs:
       uses: actions/cache@v3
       with:
         path: |
-          ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
-          ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
+          ${{ env.WORKSPACE }}/openwrt/staging_dir/*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/*-toolchain*
         key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
         restore-keys: |
           toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
@@ -117,7 +117,7 @@ jobs:
       uses: actions/cache@v3
       with:
         path: |
-          ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/*
           ${{ env.WORKSPACE }}/openwrt/bin/packages
           ${{ env.WORKSPACE }}/previous_packages.txt
           ${{ env.WORKSPACE }}/package_hashes
@@ -180,6 +180,7 @@ jobs:
         cd openwrt
         ccache -M 5G
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
+        ccache -z  # 重置 ccache 统计
         echo "Checking gcc version:"
         gcc --version
         echo "Testing gcc functionality:"
@@ -289,10 +290,23 @@ jobs:
           mv ${{ env.WORKSPACE }}/current_packages.txt ${{ env.WORKSPACE }}/previous_packages.txt
         fi
 
+        ccache -s  # 显示 ccache 统计
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-        echo "固件大小：$(du -sh bin/targets/*/*)"
+
+    - name: Verify caches before save
+      if: always()
+      run: |
+        echo "Toolchain cache contents:"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/staging_dir/* || echo "No toolchain files"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/*-toolchain* || echo "No build toolchain files"
+        echo "Package cache contents:"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/* || echo "No build files"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/bin/packages || echo "No package files"
+        ls -l ${{ env.WORKSPACE }}/previous_packages.txt || echo "No previous_packages.txt"
+        ls -lR ${{ env.WORKSPACE }}/package_hashes || echo "No package hashes"
+        echo "ccache contents:"
+        ls -lR ${{ env.CCACHE_DIR }} || echo "No ccache files"
+        ccache -s || echo "ccache stats not available"
 
     - name: Clean up old caches
       run: |
@@ -324,8 +338,8 @@ jobs:
       if: always()
       with:
         path: |
-          ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
-          ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
+          ${{ env.WORKSPACE }}/openwrt/staging_dir/*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/*-toolchain*
         key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
 
     - name: Save package cache
@@ -334,7 +348,7 @@ jobs:
       if: always()
       with:
         path: |
-          ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/*
           ${{ env.WORKSPACE }}/openwrt/bin/packages
           ${{ env.WORKSPACE }}/previous_packages.txt
           ${{ env.WORKSPACE }}/package_hashes
