@@ -8,9 +8,9 @@ env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: 增量缓存优化.config  # Keep original Chinese filename
-  DIY_P1_SH: diy-part1.sh             # Optional, skipped if not found
-  DIY_P2_SH: diy-part2.sh             # Optional, skipped if not found
+  CONFIG_FILE: 增量缓存优化.config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_COWTRANSFER: false
@@ -101,22 +101,14 @@ jobs:
       run: |
         cd openwrt
         [ -e "${{ env.WORKSPACE }}/$FEEDS_CONF" ] && mv "${{ env.WORKSPACE }}/$FEEDS_CONF" feeds.conf.default
-        ./scripts/feeds update -a || {
-          echo "Error: Failed to update feeds."
-          exit 1
-        }
-        ./scripts/feeds install -a || {
-          echo "Error: Failed to install feeds."
-          exit 1
-        }
+        ./scripts/feeds update -a || { echo "Error: Failed to update feeds."; exit 1; }
+        ./scripts/feeds install -a || { echo "Error: Failed to install feeds."; exit 1; }
 
     - name: Load custom configuration
       run: |
         echo "Listing files in root directory ($GITHUB_WORKSPACE):"
         ls -l $GITHUB_WORKSPACE
-        mv "$GITHUB_WORKSPACE/$CONFIG_FILE" openwrt/.config || {
-          echo "Warning: Failed to move $CONFIG_FILE. Continuing with default config if possible."
-        }
+        mv "$GITHUB_WORKSPACE/$CONFIG_FILE" openwrt/.config || { echo "Error: Failed to move $CONFIG_FILE."; exit 1; }
         cd openwrt
         if [ -e "${{ env.WORKSPACE }}/$DIY_P1_SH" ]; then
           chmod +x "${{ env.WORKSPACE }}/$DIY_P1_SH"
@@ -132,25 +124,19 @@ jobs:
         else
           echo "Warning: $DIY_P2_SH not found, skipping."
         fi
-        echo "Running make defconfig..."
-        make defconfig || {
-          echo "Error: make defconfig failed."
-          cat .config || echo "No .config file found."
-          exit 1
-        }
-        echo "Running make oldconfig..."
-        echo "y" | make oldconfig || {
-          echo "Error: make oldconfig failed."
-          cat .config
-          exit 1
-        }
+        echo "Initial .config before processing:"
+        cat .config
+        echo "Running make oldconfig to preserve user config..."
+        echo "y" | make oldconfig || { echo "Error: make oldconfig failed."; cat .config; exit 1; }
+        echo "Running make defconfig to fill defaults..."
+        make defconfig || { echo "Error: make defconfig failed."; cat .config; exit 1; }
         echo "Validating .config..."
         if ! grep -q "CONFIG_TARGET_.*=y" .config; then
           echo "Error: .config does not specify a valid target (e.g., CONFIG_TARGET_x86_64)."
           cat .config
           exit 1
         fi
-        echo "Final .config:"
+        echo "Final .config after processing:"
         cat .config
 
     - name: Get source and package version hashes
@@ -304,6 +290,8 @@ jobs:
           ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
           ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
         key: toolchain-${{ env.SOURCE_SHA }}
+        restore-keys: |
+          toolchain-
 
     - name: Prepare and save package caches
       run: |
@@ -324,6 +312,8 @@ jobs:
       with:
         path: ${{ env.WORKSPACE }}/package_cache/packages.tar.gz
         key: packages-${{ env.PACKAGE_VERSIONS_HASH }}
+        restore-keys: |
+          packages-
 
     - name: Save ccache
       id: save-ccache
@@ -332,6 +322,8 @@ jobs:
       with:
         path: ${{ env.CCACHE_DIR }}
         key: ccache-${{ env.SOURCE_SHA }}
+        restore-keys: |
+          ccache-
 
     - name: Verify caches
       if: always()
@@ -343,6 +335,10 @@ jobs:
         echo "ccache contents:"
         ls -lR ${{ env.CCACHE_DIR }} || echo "No ccache files saved"
         ccache -s || echo "ccache stats not available"
+        echo "Cache save status:"
+        echo "Toolchain cache-hit: ${{ steps.save-toolchain-cache.outputs.cache-hit }}"
+        echo "Packages cache-hit: ${{ steps.save-package-cache.outputs.cache-hit }}"
+        echo "ccache cache-hit: ${{ steps.save-ccache.outputs.cache-hit }}"
 
     - name: Organize files
       id: organize
