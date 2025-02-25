@@ -93,7 +93,10 @@ jobs:
       working-directory: ./
       run: |
         rm -rf openwrt
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+        git clone --depth=1 https://${{ secrets.GITHUB_TOKEN }}@github.com/coolsnowwolf/lede -b master openwrt || {
+          echo "Error: Failed to clone repository. Check if the repository is accessible or if GITHUB_TOKEN is set correctly."
+          exit 1
+        }
         cd openwrt
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
