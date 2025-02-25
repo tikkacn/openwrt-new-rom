@@ -5,7 +5,8 @@ on:
   workflow_dispatch:
 
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_URL: git@github.com:coolsnowwolf/lede.git  # Use SSH URL as primary
+  REPO_HTTP_URL: https://github.com/coolsnowwolf/lede  # Fallback HTTP URL
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: 增量缓存优化.config  # Must exist in repository root directory
@@ -88,19 +89,24 @@ jobs:
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
-        # Configure Git to allow anonymous HTTPS cloning
-        git config --global credential.helper 'cache --timeout=300'
+        # Disable Git credential helper to ensure anonymous HTTPS works if needed
+        git config --global --unset credential.helper || true
 
     - name: Clone source code
       working-directory: ./
       run: |
         rm -rf openwrt
+        echo "Attempting SSH clone..."
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || {
-          echo "Error: Failed to clone repository."
-          echo "Repository URL: $REPO_URL"
-          echo "Branch: $REPO_BRANCH"
-          echo "Check if the repository exists and is accessible."
-          exit 1
+          echo "SSH clone failed, attempting anonymous HTTPS clone..."
+          git clone --depth=1 $REPO_HTTP_URL -b $REPO_BRANCH openwrt || {
+            echo "Error: Failed to clone repository with both SSH and HTTPS methods."
+            echo "SSH URL: $REPO_URL"
+            echo "HTTPS URL: $REPO_HTTP_URL"
+            echo "Branch: $REPO_BRANCH"
+            echo "Check if the repository exists and is accessible."
+            exit 1
+          }
         }
         cd openwrt
         sudo chown -R $USER:$GROUPS .
@@ -132,7 +138,7 @@ jobs:
     - name: Get source and package version hashes
       id: hashes
       run: |
-        SOURCE_SHA=$(git ls-remote ${{ env.REPO_URL }} ${{ env.REPO_BRANCH }} | awk '{print $1}')
+        SOURCE_SHA=$(git ls-remote ${{ env.REPO_HTTP_URL }} ${{ env.REPO_BRANCH }} | awk '{print $1}')
         echo "SOURCE_SHA=$SOURCE_SHA" >> $GITHUB_ENV
         cd openwrt
         touch ../package_versions.txt
