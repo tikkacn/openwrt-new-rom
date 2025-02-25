@@ -1,6 +1,8 @@
-name: Build X86_64 OpenWrt（Gork3编译CC增量缓存优化版）
+name: Build X86_64 OpenWrt（Gork3编译CC缓存优化版）
 
 on:
+  schedule:
+    - cron: '0 16 * * *'
   repository_dispatch:
   workflow_dispatch:
 
@@ -8,28 +10,22 @@ env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: 增量缓存优化.config  # Must exist in repository root directory
-  DIY_P1_SH: diy-part1.sh             # Optional, skipped if not found
-  DIY_P2_SH: diy-part2.sh             # Optional, skipped if not found
+  CONFIG_FILE: 缓存优化.config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_COWTRANSFER: false
   UPLOAD_WETRANSFER: false
-  UPLOAD_RELEASE: true
+  UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
-  CCACHE_DIR: $GITHUB_WORKSPACE/ccache
-  WORKSPACE: $GITHUB_WORKSPACE
+  CCACHE_DIR: $GITHUB_WORKSPACE/ccache  # 修改为相对路径，避免权限问题
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    permissions:
-      actions: write
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@main
-
     - name: Before freeing up disk space
       run: |
         echo "Before freeing up disk space"
@@ -37,12 +33,16 @@ jobs:
         df -hT
         echo "=============================================================================="
 
-    - name: Optimize Disk Space
-      uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
+    - name: "Optimize Disk Space"
+      uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
       with:
         operate_sudo: "True"
         general_include: ".+"
-        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
+        general_exclude: |-
+          ^GCC$
+          ^G\+\+$
+          Clang
+          LLVM
         docker_include: ".+"
         docker_prune: "True"
         docker_clean: "True"
@@ -56,7 +56,7 @@ jobs:
 
     - name: Freeing up disk space
       uses: easimon/maximize-build-space@master
-      with:
+      with: 
         root-reserve-mb: 2048
         swap-size-mb: 1
         remove-dotnet: 'true'
@@ -72,6 +72,9 @@ jobs:
         df -hT
         echo "=============================================================================="
 
+    - name: Checkout
+      uses: actions/checkout@main
+
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -83,11 +86,21 @@ jobs:
         libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
         mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
         libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-        vim wget xmlto xxd zlib1g-dev python3-setuptools libexpat1-dev libz-dev liblzma-dev
+        vim wget xmlto xxd zlib1g-dev python3-setuptools
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
+        /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
+
+    - name: Restore ccache
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        restore-keys: |
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
     - name: Clone source code
       working-directory: ./
@@ -97,249 +110,73 @@ jobs:
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
 
-    - name: Load custom configuration
+    - name: Load custom feeds
       run: |
-        if [ ! -e "${{ env.WORKSPACE }}/$CONFIG_FILE" ]; then
-          echo "Error: $CONFIG_FILE not found in ${{ env.WORKSPACE }}! Please ensure it exists in the repository root."
-          exit 1
-        fi
-        mv "${{ env.WORKSPACE }}/$CONFIG_FILE" openwrt/.config
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
         cd openwrt
-        if [ -e "${{ env.WORKSPACE }}/$DIY_P1_SH" ]; then
-          chmod +x "${{ env.WORKSPACE }}/$DIY_P1_SH"
-          echo "Running $DIY_P1_SH..."
-          ${{ env.WORKSPACE }}/$DIY_P1_SH
-        else
-          echo "Warning: $DIY_P1_SH not found, skipping."
-        fi
-        if [ -e "${{ env.WORKSPACE }}/$DIY_P2_SH" ]; then
-          chmod +x "${{ env.WORKSPACE }}/$DIY_P2_SH"
-          echo "Running $DIY_P2_SH..."
-          ${{ env.WORKSPACE }}/$DIY_P2_SH
-        else
-          echo "Warning: $DIY_P2_SH not found, skipping."
-        fi
+        $GITHUB_WORKSPACE/$DIY_P1_SH
 
-    - name: Get source and package version hashes
-      id: hashes
-      run: |
-        SOURCE_SHA=$(git ls-remote ${{ env.REPO_URL }} ${{ env.REPO_BRANCH }} | awk '{print $1}')
-        echo "SOURCE_SHA=$SOURCE_SHA" >> $GITHUB_ENV
-        cd openwrt
-        touch ../package_versions.txt
-        for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
-          pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
-          if [ -n "$pkg_dir" ]; then
-            pkg_version=$(grep "PKG_VERSION:=" "$pkg_dir/Makefile" | cut -d'=' -f2 || echo "unknown")
-            echo "$pkg:$pkg_version" >> ../package_versions.txt
-          fi
-        done
-        cd ..
-        PACKAGE_VERSIONS_HASH=$(sha256sum package_versions.txt | awk '{print $1}')
-        echo "PACKAGE_VERSIONS_HASH=$PACKAGE_VERSIONS_HASH" >> $GITHUB_ENV
-
-    - name: Restore tools/toolchain cache
-      uses: actions/cache@v3
-      with:
-        path: |
-          ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
-          ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
-        key: toolchain-${{ env.SOURCE_SHA }}
-        restore-keys: |
-          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
-
-    - name: Restore package cache file
-      uses: actions/cache@v3
-      with:
-        path: ${{ env.WORKSPACE }}/package_cache/packages.tar.gz
-        key: packages-${{ env.PACKAGE_VERSIONS_HASH }}
-        restore-keys: |
-          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
-
-    - name: Extract package caches
+    - name: Update feeds
       run: |
         cd openwrt
-        mkdir -p build_dir/target-*
-        if [ -f "${{ env.WORKSPACE }}/package_cache/packages.tar.gz" ]; then
-          echo "Restoring package caches..."
-          tar -xzf ${{ env.WORKSPACE }}/package_cache/packages.tar.gz -C build_dir/target-* || echo "Failed to extract package caches"
-        else
-          echo "No package caches found to restore."
-        fi
-
-    - name: Restore ccache
-      uses: actions/cache@v3
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.SOURCE_SHA }}
-        restore-keys: |
-          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
-
-    - name: Update and install feeds
-      run: |
-        cd openwrt
-        [ -e "${{ env.WORKSPACE }}/$FEEDS_CONF" ] && mv "${{ env.WORKSPACE }}/$FEEDS_CONF" feeds.conf.default
         ./scripts/feeds update -a
+
+    - name: Install feeds
+      run: |
+        cd openwrt
         ./scripts/feeds install -a
 
-    - name: Download package and resolve dependencies
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Download package
       id: package
       run: |
         cd openwrt
         make defconfig
-        make oldconfig <<< "y"
-        timeout 30m make download -j$(nproc) V=s || echo "Warning: Download timed out or failed, proceeding..."
-        find dl -size -1024c -exec ls -l {} \; || echo "No small files to list"
-        find dl -size -1024c -exec rm -f {} \; || echo "No small files to remove"
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
 
-    - name: Detect changes and compile
+    - name: Compile the firmware
       id: compile
       run: |
         cd openwrt
-        ccache -M 5G || { echo "Failed to set ccache max size"; exit 1; }
+        echo -e "$(nproc) thread compile with ccache"
+        mkdir -p ${{ env.CCACHE_DIR }}
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
-        ccache -z
-        echo "Starting compilation with ccache"
-
-        if [ ! -d "staging_dir/toolchain-*" ]; then
-          echo "Toolchain not found in cache, compiling..."
-          make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j8 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j4 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j1 V=s tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
-        else
-          echo "Toolchain restored from cache, skipping compilation."
-        fi
-
-        grep "^CONFIG_PACKAGE" .config | sort > ${{ env.WORKSPACE }}/current_packages.txt
-        if [ ! -f "${{ env.WORKSPACE }}/previous_packages.txt" ]; then
-          echo "First run detected, compiling all packages..."
-          make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
-          cp ${{ env.WORKSPACE }}/current_packages.txt ${{ env.WORKSPACE }}/previous_packages.txt
-        else
-          echo "Incremental build detected..."
-          comm -13 ${{ env.WORKSPACE }}/previous_packages.txt ${{ env.WORKSPACE }}/current_packages.txt > ${{ env.WORKSPACE }}/added_packages.txt
-          comm -23 ${{ env.WORKSPACE }}/previous_packages.txt ${{ env.WORKSPACE }}/current_packages.txt > ${{ env.WORKSPACE }}/removed_packages.txt
-          comm -12 ${{ env.WORKSPACE }}/previous_packages.txt ${{ env.WORKSPACE }}/current_packages.txt > ${{ env.WORKSPACE }}/unchanged_packages.txt || touch ${{ env.WORKSPACE }}/unchanged_packages.txt
-          cat ${{ env.WORKSPACE }}/added_packages.txt > ${{ env.WORKSPACE }}/compile_list.txt
-
-          mkdir -p ${{ env.WORKSPACE }}/package_hashes
-          for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
-            pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
-            if [ -n "$pkg_dir" ]; then
-              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "${{ env.WORKSPACE }}/package_hashes/$pkg.current"
-            fi
-          done
-          if [ -s ${{ env.WORKSPACE }}/unchanged_packages.txt ]; then
-            for pkg in $(cat ${{ env.WORKSPACE }}/unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
-              if [ -f "${{ env.WORKSPACE }}/package_hashes/$pkg.current" ] && [ -f "${{ env.WORKSPACE }}/package_hashes/$pkg.previous" ]; then
-                if ! cmp -s "${{ env.WORKSPACE }}/package_hashes/$pkg.current" "${{ env.WORKSPACE }}/package_hashes/$pkg.previous"; then
-                  echo "CONFIG_PACKAGE_$pkg=y" >> ${{ env.WORKSPACE }}/compile_list.txt
-                fi
-              elif [ -f "${{ env.WORKSPACE }}/package_hashes/$pkg.current" ]; then
-                echo "CONFIG_PACKAGE_$pkg=y" >> ${{ env.WORKSPACE }}/compile_list.txt
-              fi
-              [ -f "${{ env.WORKSPACE }}/package_hashes/$pkg.current" ] && mv "${{ env.WORKSPACE }}/package_hashes/$pkg.current" "${{ env.WORKSPACE }}/package_hashes/$pkg.previous"
-            done
-          fi
-
-          if [ -s ${{ env.WORKSPACE }}/removed_packages.txt ]; then
-            echo "Cleaning removed packages..."
-            while read -r pkg; do
-              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-              pkg_dir=$(find package feeds -type d -name "$pkg_name" | head -n 1)
-              if [ -n "$pkg_dir" ]; then
-                echo "Cleaning package: $pkg_name"
-                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || echo "Warning: Failed to clean $pkg_name"
-              fi
-            done < ${{ env.WORKSPACE }}/removed_packages.txt
-          fi
-
-          if [ -s ${{ env.WORKSPACE }}/compile_list.txt ]; then
-            echo "Compiling added or updated packages..."
-            while read -r pkg; do
-              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-              pkg_dir=$(find package feeds -type d -name "$pkg_name" | head -n 1)
-              if [ -n "$pkg_dir" ]; then
-                echo "Compiling package: $pkg_name"
-                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || echo "Warning: Failed to clean $pkg_name"
-                make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-                make -j8 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-                make -j4 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-                make -j1 V=s package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
-                if [ ! -d "build_dir/target-*/$pkg_name-*" ]; then
-                  echo "Warning: Compilation of $pkg_name failed, no output found."
-                fi
-              fi
-            done < ${{ env.WORKSPACE }}/compile_list.txt
-          else
-            echo "No new or updated packages to compile."
-          fi
-
-          echo "Building target filesystem..."
-          make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j4 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
-          mv ${{ env.WORKSPACE }}/current_packages.txt ${{ env.WORKSPACE }}/previous_packages.txt
-        fi
-
-        ccache -s
+        make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+        make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+        make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+        make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: Save tools/toolchain cache
-      id: save-toolchain-cache
-      uses: actions/cache@v3
-      if: always()
-      with:
-        path: |
-          ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
-          ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
-        key: toolchain-${{ env.SOURCE_SHA }}
-
-    - name: Prepare and save package caches
-      run: |
-        cd openwrt
-        mkdir -p ${{ env.WORKSPACE }}/package_cache
-        echo "Saving all package caches..."
-        if [ -d "build_dir/target-*" ] && [ "$(ls -A build_dir/target-*)" ]; then
-          tar -czf ${{ env.WORKSPACE }}/package_cache/packages.tar.gz -C build_dir/target-* .
-          echo "Packages cached to ${{ env.WORKSPACE }}/package_cache/packages.tar.gz"
-        else
-          echo "No package build directories found to cache or directory is empty."
-        fi
-
-    - name: Save package caches
-      id: save-package-cache
-      uses: actions/cache@v3
-      if: always()
-      with:
-        path: ${{ env.WORKSPACE }}/package_cache/packages.tar.gz
-        key: packages-${{ env.PACKAGE_VERSIONS_HASH }}
-
     - name: Save ccache
-      id: save-ccache
       uses: actions/cache@v3
       if: always()
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.SOURCE_SHA }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.sha }}
 
-    - name: Verify caches
-      if: always()
-      run: |
-        echo "Toolchain cache contents:"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-* || echo "No toolchain files saved"
-        echo "Package cache contents:"
-        ls -l ${{ env.WORKSPACE }}/package_cache/packages.tar.gz || echo "No package caches saved"
-        echo "ccache contents:"
-        ls -lR ${{ env.CCACHE_DIR }} || echo "No ccache files saved"
-        ccache -s || echo "ccache stats not available"
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin
 
     - name: Organize files
       id: organize
@@ -357,12 +194,32 @@ jobs:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
+    - name: Upload firmware to cowtransfer
+      id: cowtransfer
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
+      run: |
+        curl -fsSL git.io/file-transfer | sh
+        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
+        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
+        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to WeTransfer
+      id: wetransfer
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
+      run: |
+        curl -fsSL git.io/file-transfer | sh
+        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
+        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
+        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
+        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
+        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -371,6 +228,21 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
+        tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
+
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@v0.1.0
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
