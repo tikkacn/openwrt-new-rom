@@ -88,21 +88,19 @@ jobs:
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
+        # Configure Git to allow anonymous HTTPS cloning
+        git config --global credential.helper 'cache --timeout=300'
 
     - name: Clone source code
       working-directory: ./
       run: |
         rm -rf openwrt
-        echo "Attempting anonymous clone..."
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || {
-          echo "Anonymous clone failed, attempting with GITHUB_TOKEN..."
-          git clone --depth=1 https://${{ secrets.GITHUB_TOKEN }}@github.com/coolsnowwolf/lede -b $REPO_BRANCH openwrt || {
-            echo "Error: Failed to clone repository with both anonymous and authenticated methods."
-            echo "Repository URL: $REPO_URL"
-            echo "Branch: $REPO_BRANCH"
-            echo "Check if the repository exists, is accessible, or if GITHUB_TOKEN is correctly set."
-            exit 1
-          }
+          echo "Error: Failed to clone repository."
+          echo "Repository URL: $REPO_URL"
+          echo "Branch: $REPO_BRANCH"
+          echo "Check if the repository exists and is accessible."
+          exit 1
         }
         cd openwrt
         sudo chown -R $USER:$GROUPS .
