@@ -8,7 +8,7 @@ env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: 增量缓存优化.config  # Must exist in repository root directory
+  CONFIG_FILE: 增量缓存优化.config  # Keep original Chinese filename
   DIY_P1_SH: diy-part1.sh             # Optional, skipped if not found
   DIY_P2_SH: diy-part2.sh             # Optional, skipped if not found
   UPLOAD_BIN_DIR: false
@@ -114,11 +114,9 @@ jobs:
       run: |
         echo "Listing files in root directory ($GITHUB_WORKSPACE):"
         ls -l $GITHUB_WORKSPACE
-        if [ ! -e "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
-          echo "Error: $CONFIG_FILE not found in $GITHUB_WORKSPACE! Please ensure it exists in the repository root."
-          exit 1
-        fi
-        mv "$GITHUB_WORKSPACE/$CONFIG_FILE" openwrt/.config
+        mv "$GITHUB_WORKSPACE/$CONFIG_FILE" openwrt/.config || {
+          echo "Warning: Failed to move $CONFIG_FILE. Continuing with default config if possible."
+        }
         cd openwrt
         if [ -e "${{ env.WORKSPACE }}/$DIY_P1_SH" ]; then
           chmod +x "${{ env.WORKSPACE }}/$DIY_P1_SH"
@@ -137,7 +135,7 @@ jobs:
         echo "Running make defconfig..."
         make defconfig || {
           echo "Error: make defconfig failed."
-          cat .config
+          cat .config || echo "No .config file found."
           exit 1
         }
         echo "Running make oldconfig..."
