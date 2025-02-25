@@ -8,7 +8,7 @@ env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: 增量缓存优化.config
+  CONFIG_FILE: 增量缓存优化.config  # Must exist in repository root directory
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
@@ -30,6 +30,48 @@ jobs:
     - name: Checkout
       uses: actions/checkout@main
 
+    - name: Before freeing up disk space
+      run: |
+        echo "Before freeing up disk space"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
+
+    - name: Optimize Disk Space
+      uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
+      with:
+        operate_sudo: "True"
+        general_include: ".+"
+        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
+        docker_include: ".+"
+        docker_prune: "True"
+        docker_clean: "True"
+        apt_prune: "True"
+        apt_clean: "True"
+        homebrew_prune: "True"
+        homebrew_clean: "True"
+        npm_prune: "True"
+        npm_clean: "True"
+        os_swap: "True"
+
+    - name: Freeing up disk space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 2048
+        swap-size-mb: 1
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+
+    - name: Free up disk space complete
+      run: |
+        echo "Free up disk space complete"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
+
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -47,7 +89,7 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
-    - name: Clone source code and prepare config
+    - name: Clone source code
       working-directory: ./
       run: |
         rm -rf openwrt
@@ -55,11 +97,18 @@ jobs:
         cd openwrt
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
-        if [ ! -e "${{ env.WORKSPACE }}/${{ env.CONFIG_FILE }}" ]; then
-          echo "Error: CONFIG_FILE (${{ env.CONFIG_FILE }}) not found in ${{ env.WORKSPACE }}!"
+
+    - name: Load custom configuration
+      run: |
+        if [ ! -e "${{ env.WORKSPACE }}/$CONFIG_FILE" ]; then
+          echo "Error: $CONFIG_FILE not found in ${{ env.WORKSPACE }}! Please ensure it exists in the repository root."
           exit 1
         fi
-        cp "${{ env.WORKSPACE }}/${{ env.CONFIG_FILE }}" .config
+        mv "${{ env.WORKSPACE }}/$CONFIG_FILE" openwrt/.config
+        chmod +x $DIY_P1_SH $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+        $GITHUB_WORKSPACE/$DIY_P2_SH
 
     - name: Get source and package version hashes
       id: hashes
@@ -86,12 +135,16 @@ jobs:
           ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
           ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
         key: toolchain-${{ env.SOURCE_SHA }}
+        restore-keys: |
+          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
     - name: Restore package cache file
       uses: actions/cache@v3
       with:
         path: ${{ env.WORKSPACE }}/package_cache/packages.tar.gz
         key: packages-${{ env.PACKAGE_VERSIONS_HASH }}
+        restore-keys: |
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
     - name: Extract package caches
       run: |
@@ -109,29 +162,15 @@ jobs:
       with:
         path: ${{ env.CCACHE_DIR }}
         key: ccache-${{ env.SOURCE_SHA }}
+        restore-keys: |
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
-
-    - name: Update feeds
+    - name: Update and install feeds
       run: |
         cd openwrt
+        [ -e "${{ env.WORKSPACE }}/$FEEDS_CONF" ] && mv "${{ env.WORKSPACE }}/$FEEDS_CONF" feeds.conf.default
         ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: |
-        cd openwrt
         ./scripts/feeds install -a
-
-    - name: Load custom configuration
-      run: |
-        cd openwrt
-        chmod +x $DIY_P2_SH
-        $GITHUB_WORKSPACE/$DIY_P2_SH
 
     - name: Download package and resolve dependencies
       id: package
@@ -139,7 +178,9 @@ jobs:
         cd openwrt
         make defconfig
         make oldconfig <<< "y"
-        timeout 30m make download -j2 V=s || echo "Warning: Download timed out or failed, proceeding..."
+        timeout 30m make download -j$(nproc) V=s || echo "Warning: Download timed out or failed, proceeding..."
+        find dl -size -1024c -exec ls -l {} \; || echo "No small files to list"
+        find dl -size -1024c -exec rm -f {} \; || echo "No small files to remove"
 
     - name: Detect changes and compile
       id: compile
@@ -161,8 +202,6 @@ jobs:
         fi
 
         grep "^CONFIG_PACKAGE" .config | sort > ${{ env.WORKSPACE }}/current_packages.txt
-        echo "Checking previous_packages.txt..."
-        ls -l ${{ env.WORKSPACE }}/previous_packages.txt || echo "previous_packages.txt not found"
         if [ ! -f "${{ env.WORKSPACE }}/previous_packages.txt" ]; then
           echo "First run detected, compiling all packages..."
           make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
@@ -240,6 +279,8 @@ jobs:
 
         ccache -s
         echo "status=success" >> $GITHUB_OUTPUT
+        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
     - name: Save tools/toolchain cache
       id: save-toolchain-cache
@@ -264,6 +305,7 @@ jobs:
         fi
 
     - name: Save package caches
+      id: save-package-cache
       uses: actions/cache@v3
       if: always()
       with:
@@ -302,7 +344,7 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware_${{ github.run_id }}
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
     - name: Generate release tag
