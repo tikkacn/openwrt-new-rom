@@ -112,12 +112,14 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        cd openwrt
-        if [ ! -e "${{ env.WORKSPACE }}/$CONFIG_FILE" ]; then
-          echo "Error: $CONFIG_FILE not found in ${{ env.WORKSPACE }}! Please ensure it exists in the repository root."
+        echo "Listing files in root directory ($GITHUB_WORKSPACE):"
+        ls -l $GITHUB_WORKSPACE
+        if [ ! -e "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+          echo "Error: $CONFIG_FILE not found in $GITHUB_WORKSPACE! Please ensure it exists in the repository root."
           exit 1
         fi
-        mv "${{ env.WORKSPACE }}/$CONFIG_FILE" .config
+        mv "$GITHUB_WORKSPACE/$CONFIG_FILE" openwrt/.config
+        cd openwrt
         if [ -e "${{ env.WORKSPACE }}/$DIY_P1_SH" ]; then
           chmod +x "${{ env.WORKSPACE }}/$DIY_P1_SH"
           echo "Running $DIY_P1_SH..."
@@ -254,7 +256,7 @@ jobs:
                 echo "Cleaning package: $pkg_name"
                 make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || echo "Warning: Failed to clean $pkg_name"
               fi
-            done < ${{ env.WORKSPACE }}/removed_packages.txt
+            done < "${{ env.WORKSPACE }}/removed_packages.txt"
           fi
 
           if [ -s "${{ env.WORKSPACE }}/compile_list.txt" ]; then
