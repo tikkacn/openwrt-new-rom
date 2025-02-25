@@ -27,48 +27,6 @@ jobs:
       actions: write
 
     steps:
-    - name: Before freeing up disk space
-      run: |
-        echo "Before freeing up disk space"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
-
-    - name: Optimize Disk Space
-      uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
-      with:
-        operate_sudo: "True"
-        general_include: ".+"
-        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
-        docker_include: ".+"
-        docker_prune: "True"
-        docker_clean: "True"
-        apt_prune: "True"
-        apt_clean: "True"
-        homebrew_prune: "True"
-        homebrew_clean: "True"
-        npm_prune: "True"
-        npm_clean: "True"
-        os_swap: "True"
-
-    - name: Freeing up disk space
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 2048
-        swap-size-mb: 1
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
-
-    - name: Free up disk space complete
-      run: |
-        echo "Free up disk space complete"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
-
     - name: Checkout
       uses: actions/checkout@main
 
@@ -86,10 +44,32 @@ jobs:
         vim wget xmlto xxd zlib1g-dev python3-setuptools libexpat1-dev libz-dev liblzma-dev
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
-        /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
+
+    - name: Get source and package version hashes
+      id: hashes
+      run: |
+        SOURCE_SHA=$(git ls-remote ${{ env.REPO_URL }} ${{ env.REPO_BRANCH }} | awk '{print $1}')
+        echo "SOURCE_SHA=$SOURCE_SHA" >> $GITHUB_ENV
+        echo "CONFIG_FILE=${{ env.CONFIG_FILE }}" >> $GITHUB_ENV
+        if [ ! -e ${{ env.CONFIG_FILE }} ]; then
+          echo "Error: CONFIG_FILE (${{ env.CONFIG_FILE }}) not found!"
+          exit 1
+        fi
+        cp ${{ env.CONFIG_FILE }} openwrt/.config
+        cd openwrt
+        touch ../package_versions.txt
+        for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+          pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
+          if [ -n "$pkg_dir" ]; then
+            pkg_version=$(grep "PKG_VERSION:=" "$pkg_dir/Makefile" | cut -d'=' -f2 || echo "unknown")
+            echo "$pkg:$pkg_version" >> ../package_versions.txt
+          fi
+        done
+        cd ..
+        PACKAGE_VERSIONS_HASH=$(sha256sum package_versions.txt | awk '{print $1}')
+        echo "PACKAGE_VERSIONS_HASH=$PACKAGE_VERSIONS_HASH" >> $GITHUB_ENV
 
     - name: Clone source code
       working-directory: ./
@@ -106,32 +86,30 @@ jobs:
         path: |
           ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
           ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
-        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
-        restore-keys: |
-          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
-          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+        key: toolchain-${{ env.SOURCE_SHA }}
 
-    - name: Restore package cache
+    - name: Restore package caches
       uses: actions/cache@v3
       with:
-        path: |
-          ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-*
-          ${{ env.WORKSPACE }}/openwrt/bin/packages
-          ${{ env.WORKSPACE }}/previous_packages.txt
-          ${{ env.WORKSPACE }}/package_hashes
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
-        restore-keys: |
-          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
-          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+        path: ${{ env.WORKSPACE }}/package_cache/packages.tar.gz
+        key: packages-${{ env.PACKAGE_VERSIONS_HASH }}
+      continue-on-error: true
+      run: |
+        cd openwrt
+        mkdir -p build_dir/target-*
+        mkdir -p ${{ env.WORKSPACE }}/package_cache
+        if [ -f "${{ env.WORKSPACE }}/package_cache/packages.tar.gz" ]; then
+          echo "Restoring package caches..."
+          tar -xzf ${{ env.WORKSPACE }}/package_cache/packages.tar.gz -C build_dir/target-* || echo "Failed to extract package caches"
+        else
+          echo "No package caches found to restore."
+        fi
 
     - name: Restore ccache
       uses: actions/cache@v3
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
-        restore-keys: |
-          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
-          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+        key: ccache-${{ env.SOURCE_SHA }}
 
     - name: Load custom feeds
       run: |
@@ -152,14 +130,8 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        [ -e files ] && mv files openwrt/files
-        if [ ! -e "$CONFIG_FILE" ]; then
-          echo "Error: $CONFIG_FILE not found!" >&2
-          exit 1
-        fi
-        mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
         cd openwrt
+        chmod +x $DIY_P2_SH
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
     - name: Download package and resolve dependencies
@@ -169,21 +141,14 @@ jobs:
         make defconfig
         make oldconfig <<< "y"
         timeout 30m make download -j2 V=s || echo "Warning: Download timed out or failed, proceeding..."
-        find dl -size -1024c -exec ls -l {} \; || echo "Warning: Failed to list small files, proceeding..."
-        find dl -size -1024c -exec rm -f {} \; || echo "Warning: Failed to remove small files, proceeding..."
 
     - name: Detect changes and compile
       id: compile
       run: |
         cd openwrt
-        ccache -M 5G
+        ccache -M 5G || { echo "Failed to set ccache max size"; exit 1; }
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
         ccache -z
-        echo "Checking gcc version:"
-        gcc --version
-        echo "Testing gcc functionality:"
-        echo 'int main() { return 0; }' > test.c && gcc -o test test.c && ./test && echo "GCC works" || echo "GCC failed"
-        rm -f test.c test
         echo "Starting compilation with ccache"
 
         if [ ! -d "staging_dir/toolchain-*" ]; then
@@ -196,7 +161,6 @@ jobs:
           echo "Toolchain restored from cache, skipping compilation."
         fi
 
-        echo "Current SHA: ${{ github.sha }}"
         grep "^CONFIG_PACKAGE" .config | sort > ${{ env.WORKSPACE }}/current_packages.txt
         echo "Checking previous_packages.txt..."
         ls -l ${{ env.WORKSPACE }}/previous_packages.txt || echo "previous_packages.txt not found"
@@ -241,9 +205,7 @@ jobs:
               pkg_dir=$(find package feeds -type d -name "$pkg_name" | head -n 1)
               if [ -n "$pkg_dir" ]; then
                 echo "Cleaning package: $pkg_name"
-                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || echo "Warning: Failed to clean $pkg_name, proceeding..."
-              else
-                echo "Skipping cleanup of $pkg_name: package not found"
+                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || echo "Warning: Failed to clean $pkg_name"
               fi
             done < ${{ env.WORKSPACE }}/removed_packages.txt
           fi
@@ -255,29 +217,18 @@ jobs:
               pkg_dir=$(find package feeds -type d -name "$pkg_name" | head -n 1)
               if [ -n "$pkg_dir" ]; then
                 echo "Compiling package: $pkg_name"
-                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || echo "Warning: Failed to clean $pkg_name, proceeding..."
+                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || echo "Warning: Failed to clean $pkg_name"
                 make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
                 make -j8 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
                 make -j4 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
                 make -j1 V=s package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
-              else
-                echo "Skipping $pkg_name: package not found"
+                if [ ! -d "build_dir/target-*/$pkg_name-*" ]; then
+                  echo "Warning: Compilation of $pkg_name failed, no output found."
+                fi
               fi
             done < ${{ env.WORKSPACE }}/compile_list.txt
           else
             echo "No new or updated packages to compile."
-          fi
-
-          git fetch origin $REPO_BRANCH
-          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
-             [ ! -f "${{ env.WORKSPACE }}/feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ${{ env.WORKSPACE }}/feeds_hash)" ]; then
-            echo "Source or feeds updated, rebuilding kernel..."
-            make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
-            make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-            make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-            make -j4 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-            make -j1 V=s target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
-            sha256sum feeds.conf.default | awk '{print $1}' > ${{ env.WORKSPACE }}/feeds_hash
           fi
 
           echo "Building target filesystem..."
@@ -291,46 +242,6 @@ jobs:
         ccache -s
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Verify caches before save
-      if: always()
-      run: |
-        echo "Toolchain cache contents before save:"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-* || echo "No toolchain files"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-* || echo "No build toolchain files"
-        echo "Package cache contents before save:"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-* || echo "No root files"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/bin/packages || echo "No package files"
-        ls -l ${{ env.WORKSPACE }}/previous_packages.txt || echo "No previous_packages.txt"
-        ls -lR ${{ env.WORKSPACE }}/package_hashes || echo "No package hashes"
-        echo "ccache contents before save:"
-        ls -lR ${{ env.CCACHE_DIR }} || echo "No ccache files"
-        ccache -s || echo "ccache stats not available"
-
-    - name: Clean up old caches
-      run: |
-        echo "Listing all caches:"
-        gh api -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${{ github.repository }}/actions/caches" | jq -r '.actions_caches[] | .key'
-        echo "Cleaning up old package caches..."
-        gh api -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${{ github.repository }}/actions/caches" \
-          -q '.actions_caches[] | select(.key | startswith("packages-https://github.com/coolsnowwolf/lede-master-latest-")) | .id' | \
-        xargs -I {} gh api -X DELETE -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${{ github.repository }}/actions/caches/{}" || echo "No old package caches found"
-        echo "Cleaning up old ccache caches..."
-        gh api -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${{ github.repository }}/actions/caches" \
-          -q '.actions_caches[] | select(.key | startswith("ccache-https://github.com/coolsnowwolf/lede-master-latest-")) | .id' | \
-        xargs -I {} gh api -X DELETE -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${{ github.repository }}/actions/caches/{}" || echo "No old ccache caches found"
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
     - name: Save tools/toolchain cache
       id: save-toolchain-cache
       uses: actions/cache@v3
@@ -339,58 +250,24 @@ jobs:
         path: |
           ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
           ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
-        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+        key: toolchain-${{ env.SOURCE_SHA }}
 
-    - name: Verify toolchain cache save
+    - name: Save package caches
+      uses: actions/cache@v3
       if: always()
+      with:
+        path: ${{ env.WORKSPACE }}/package_cache/packages.tar.gz
+        key: packages-${{ env.PACKAGE_VERSIONS_HASH }}
       run: |
-        echo "Toolchain cache saved contents:"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-* || echo "No toolchain files saved"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-* || echo "No build toolchain files saved"
-
-    - name: Test toolchain cache restoration
-      uses: actions/cache@v3
-      if: always()
-      with:
-        path: |
-          ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
-          ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
-        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
-        lookup-only: true
-
-    - name: Save package cache
-      id: save-package-cache
-      uses: actions/cache@v3
-      if: always()
-      with:
-        path: |
-          ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-*
-          ${{ env.WORKSPACE }}/openwrt/bin/packages
-          ${{ env.WORKSPACE }}/previous_packages.txt
-          ${{ env.WORKSPACE }}/package_hashes
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
-
-    - name: Verify package cache save
-      if: always()
-      run: |
-        echo "Package cache save result: Success"
-        ls -l ${{ env.WORKSPACE }}/previous_packages.txt || echo "Failed to save previous_packages.txt"
-        echo "Package cache saved contents:"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-* || echo "No root files saved"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/bin/packages || echo "No package files saved"
-        ls -lR ${{ env.WORKSPACE }}/package_hashes || echo "No package hashes saved"
-
-    - name: Test package cache restoration
-      uses: actions/cache@v3
-      if: always()
-      with:
-        path: |
-          ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-*
-          ${{ env.WORKSPACE }}/openwrt/bin/packages
-          ${{ env.WORKSPACE }}/previous_packages.txt
-          ${{ env.WORKSPACE }}/package_hashes
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
-        lookup-only: true
+        cd openwrt
+        mkdir -p ${{ env.WORKSPACE }}/package_cache
+        echo "Saving all package caches..."
+        if [ -d "build_dir/target-*" ] && [ "$(ls -A build_dir/target-*)" ]; then
+          tar -czf ${{ env.WORKSPACE }}/package_cache/packages.tar.gz -C build_dir/target-* .
+          echo "Packages cached to ${{ env.WORKSPACE }}/package_cache/packages.tar.gz"
+        else
+          echo "No package build directories found to cache or directory is empty."
+        fi
 
     - name: Save ccache
       id: save-ccache
@@ -398,33 +275,18 @@ jobs:
       if: always()
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+        key: ccache-${{ env.SOURCE_SHA }}
 
-    - name: Verify ccache save
+    - name: Verify caches
       if: always()
       run: |
-        echo "ccache save result: Success"
-        ls -lR ${{ env.CCACHE_DIR }} || echo "Failed to save ccache"
+        echo "Toolchain cache contents:"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-* || echo "No toolchain files saved"
+        echo "Package cache contents:"
+        ls -l ${{ env.WORKSPACE }}/package_cache/packages.tar.gz || echo "No package caches saved"
+        echo "ccache contents:"
+        ls -lR ${{ env.CCACHE_DIR }} || echo "No ccache files saved"
         ccache -s || echo "ccache stats not available"
-
-    - name: Test ccache restoration
-      uses: actions/cache@v3
-      if: always()
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
-        lookup-only: true
-
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
 
     - name: Organize files
       id: organize
@@ -439,26 +301,8 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: OpenWrt_firmware_${{ github.run_id }}
         path: ${{ env.FIRMWARE }}
-
-    - name: Upload firmware to cowtransfer
-      id: cowtransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
-        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
-        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to WeTransfer
-      id: wetransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
-        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
-        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
 
     - name: Generate release tag
       id: tag
@@ -466,8 +310,6 @@ jobs:
       run: |
         echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -479,18 +321,3 @@ jobs:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
-
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 1
-        keep_minimum_runs: 3
-
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
