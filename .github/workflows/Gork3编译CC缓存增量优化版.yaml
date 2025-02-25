@@ -97,14 +97,27 @@ jobs:
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
 
+    - name: Update and install feeds
+      run: |
+        cd openwrt
+        [ -e "${{ env.WORKSPACE }}/$FEEDS_CONF" ] && mv "${{ env.WORKSPACE }}/$FEEDS_CONF" feeds.conf.default
+        ./scripts/feeds update -a || {
+          echo "Error: Failed to update feeds."
+          exit 1
+        }
+        ./scripts/feeds install -a || {
+          echo "Error: Failed to install feeds."
+          exit 1
+        }
+
     - name: Load custom configuration
       run: |
+        cd openwrt
         if [ ! -e "${{ env.WORKSPACE }}/$CONFIG_FILE" ]; then
           echo "Error: $CONFIG_FILE not found in ${{ env.WORKSPACE }}! Please ensure it exists in the repository root."
           exit 1
         fi
-        mv "${{ env.WORKSPACE }}/$CONFIG_FILE" openwrt/.config
-        cd openwrt
+        mv "${{ env.WORKSPACE }}/$CONFIG_FILE" .config
         if [ -e "${{ env.WORKSPACE }}/$DIY_P1_SH" ]; then
           chmod +x "${{ env.WORKSPACE }}/$DIY_P1_SH"
           echo "Running $DIY_P1_SH..."
@@ -119,26 +132,15 @@ jobs:
         else
           echo "Warning: $DIY_P2_SH not found, skipping."
         fi
-
-    - name: Update and install feeds
-      run: |
-        cd openwrt
-        [ -e "${{ env.WORKSPACE }}/$FEEDS_CONF" ] && mv "${{ env.WORKSPACE }}/$FEEDS_CONF" feeds.conf.default
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-
-    - name: Configure build environment
-      run: |
-        cd openwrt
         echo "Running make defconfig..."
         make defconfig || {
-          echo "Error: make defconfig failed. Check if .config contains valid target settings (e.g., CONFIG_TARGET_x86_64)."
+          echo "Error: make defconfig failed."
           cat .config
           exit 1
         }
         echo "Running make oldconfig..."
         echo "y" | make oldconfig || {
-          echo "Error: make oldconfig failed. Ensure .config is compatible with the OpenWrt source."
+          echo "Error: make oldconfig failed."
           cat .config
           exit 1
         }
@@ -148,6 +150,8 @@ jobs:
           cat .config
           exit 1
         fi
+        echo "Final .config:"
+        cat .config
 
     - name: Get source and package version hashes
       id: hashes
@@ -200,7 +204,10 @@ jobs:
           make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
           make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
           make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
+          make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || {
+            echo "Error: Failed to compile packages."
+            exit 1
+          }
           echo "Building target filesystem..."
           make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
           make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
@@ -225,7 +232,7 @@ jobs:
               find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "${{ env.WORKSPACE }}/package_hashes/$pkg.current"
             fi
           done
-          if [ -s ${{ env.WORKSPACE }}/unchanged_packages.txt ]; then
+          if [ -s "${{ env.WORKSPACE }}/unchanged_packages.txt" ]; then
             for pkg in $(cat ${{ env.WORKSPACE }}/unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
               if [ -f "${{ env.WORKSPACE }}/package_hashes/$pkg.current" ] && [ -f "${{ env.WORKSPACE }}/package_hashes/$pkg.previous" ]; then
                 if ! cmp -s "${{ env.WORKSPACE }}/package_hashes/$pkg.current" "${{ env.WORKSPACE }}/package_hashes/$pkg.previous"; then
@@ -238,7 +245,7 @@ jobs:
             done
           fi
 
-          if [ -s ${{ env.WORKSPACE }}/removed_packages.txt ]; then
+          if [ -s "${{ env.WORKSPACE }}/removed_packages.txt" ]; then
             echo "Cleaning removed packages..."
             while read -r pkg; do
               pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
@@ -250,7 +257,7 @@ jobs:
             done < ${{ env.WORKSPACE }}/removed_packages.txt
           fi
 
-          if [ -s ${{ env.WORKSPACE }}/compile_list.txt ]; then
+          if [ -s "${{ env.WORKSPACE }}/compile_list.txt" ]; then
             echo "Compiling added or updated packages..."
             while read -r pkg; do
               pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
@@ -266,7 +273,7 @@ jobs:
                   echo "Warning: Compilation of $pkg_name failed, no output found."
                 fi
               fi
-            done < ${{ env.WORKSPACE }}/compile_list.txt
+            done < "${{ env.WORKSPACE }}/compile_list.txt"
           else
             echo "No new or updated packages to compile."
           fi
@@ -280,7 +287,7 @@ jobs:
             ls -l bin/targets/ || echo "No target files generated."
             exit 1
           }
-          mv ${{ env.WORKSPACE }}/current_packages.txt ${{ env.WORKSPACE }}/previous_packages.txt
+          mv "${{ env.WORKSPACE }}/current_packages.txt" "${{ env.WORKSPACE }}/previous_packages.txt"
         fi
 
         ccache -s
@@ -301,10 +308,10 @@ jobs:
     - name: Prepare and save package caches
       run: |
         cd openwrt
-        mkdir -p ${{ env.WORKSPACE }}/package_cache
+        mkdir -p "${{ env.WORKSPACE }}/package_cache"
         echo "Saving all package caches..."
         if [ -d "build_dir/target-*" ] && [ "$(ls -A build_dir/target-*)" ]; then
-          tar -czf ${{ env.WORKSPACE }}/package_cache/packages.tar.gz -C build_dir/target-* .
+          tar -czf "${{ env.WORKSPACE }}/package_cache/packages.tar.gz" -C build_dir/target-* .
           echo "Packages cached to ${{ env.WORKSPACE }}/package_cache/packages.tar.gz"
         else
           echo "No package build directories found to cache or directory is empty."
