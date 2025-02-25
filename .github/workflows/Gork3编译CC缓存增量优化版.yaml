@@ -47,18 +47,25 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
+    - name: Clone source code and prepare config
+      working-directory: ./
+      run: |
+        rm -rf openwrt
+        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+        cd openwrt
+        sudo chown -R $USER:$GROUPS .
+        find . -type f -name "*.sh" -exec chmod +x {} \;
+        if [ ! -e "${{ env.WORKSPACE }}/${{ env.CONFIG_FILE }}" ]; then
+          echo "Error: CONFIG_FILE (${{ env.CONFIG_FILE }}) not found in ${{ env.WORKSPACE }}!"
+          exit 1
+        fi
+        cp "${{ env.WORKSPACE }}/${{ env.CONFIG_FILE }}" .config
+
     - name: Get source and package version hashes
       id: hashes
       run: |
         SOURCE_SHA=$(git ls-remote ${{ env.REPO_URL }} ${{ env.REPO_BRANCH }} | awk '{print $1}')
         echo "SOURCE_SHA=$SOURCE_SHA" >> $GITHUB_ENV
-        echo "CONFIG_FILE=${{ env.CONFIG_FILE }}" >> $GITHUB_ENV
-        if [ ! -e "${{ env.CONFIG_FILE }}" ]; then
-          echo "Error: CONFIG_FILE (${{ env.CONFIG_FILE }}) not found!"
-          exit 1
-        fi
-        mkdir -p openwrt
-        cp ${{ env.CONFIG_FILE }} openwrt/.config
         cd openwrt
         touch ../package_versions.txt
         for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
@@ -71,15 +78,6 @@ jobs:
         cd ..
         PACKAGE_VERSIONS_HASH=$(sha256sum package_versions.txt | awk '{print $1}')
         echo "PACKAGE_VERSIONS_HASH=$PACKAGE_VERSIONS_HASH" >> $GITHUB_ENV
-
-    - name: Clone source code
-      working-directory: ./
-      run: |
-        rm -rf openwrt
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-        cd openwrt
-        sudo chown -R $USER:$GROUPS .
-        find . -type f -name "*.sh" -exec chmod +x {} \;
 
     - name: Restore tools/toolchain cache
       uses: actions/cache@v3
@@ -316,8 +314,10 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
-      uses: actions/upload-artifact@main
+      uses: softprops/action-gh-release@v1
       if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
