@@ -53,10 +53,11 @@ jobs:
         SOURCE_SHA=$(git ls-remote ${{ env.REPO_URL }} ${{ env.REPO_BRANCH }} | awk '{print $1}')
         echo "SOURCE_SHA=$SOURCE_SHA" >> $GITHUB_ENV
         echo "CONFIG_FILE=${{ env.CONFIG_FILE }}" >> $GITHUB_ENV
-        if [ ! -e ${{ env.CONFIG_FILE }} ]; then
+        if [ ! -e "${{ env.CONFIG_FILE }}" ]; then
           echo "Error: CONFIG_FILE (${{ env.CONFIG_FILE }}) not found!"
           exit 1
         fi
+        mkdir -p openwrt
         cp ${{ env.CONFIG_FILE }} openwrt/.config
         cd openwrt
         touch ../package_versions.txt
@@ -88,16 +89,16 @@ jobs:
           ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
         key: toolchain-${{ env.SOURCE_SHA }}
 
-    - name: Restore package caches
+    - name: Restore package cache file
       uses: actions/cache@v3
       with:
         path: ${{ env.WORKSPACE }}/package_cache/packages.tar.gz
         key: packages-${{ env.PACKAGE_VERSIONS_HASH }}
-      continue-on-error: true
+
+    - name: Extract package caches
       run: |
         cd openwrt
         mkdir -p build_dir/target-*
-        mkdir -p ${{ env.WORKSPACE }}/package_cache
         if [ -f "${{ env.WORKSPACE }}/package_cache/packages.tar.gz" ]; then
           echo "Restoring package caches..."
           tar -xzf ${{ env.WORKSPACE }}/package_cache/packages.tar.gz -C build_dir/target-* || echo "Failed to extract package caches"
@@ -252,12 +253,7 @@ jobs:
           ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
         key: toolchain-${{ env.SOURCE_SHA }}
 
-    - name: Save package caches
-      uses: actions/cache@v3
-      if: always()
-      with:
-        path: ${{ env.WORKSPACE }}/package_cache/packages.tar.gz
-        key: packages-${{ env.PACKAGE_VERSIONS_HASH }}
+    - name: Prepare and save package caches
       run: |
         cd openwrt
         mkdir -p ${{ env.WORKSPACE }}/package_cache
@@ -268,6 +264,13 @@ jobs:
         else
           echo "No package build directories found to cache or directory is empty."
         fi
+
+    - name: Save package caches
+      uses: actions/cache@v3
+      if: always()
+      with:
+        path: ${{ env.WORKSPACE }}/package_cache/packages.tar.gz
+        key: packages-${{ env.PACKAGE_VERSIONS_HASH }}
 
     - name: Save ccache
       id: save-ccache
@@ -313,10 +316,8 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
-      uses: softprops/action-gh-release@v1
+      uses: actions/upload-artifact@main
       if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
