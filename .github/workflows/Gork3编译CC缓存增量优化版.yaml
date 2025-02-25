@@ -142,6 +142,12 @@ jobs:
           cat .config
           exit 1
         }
+        echo "Validating .config..."
+        if ! grep -q "CONFIG_TARGET_.*=y" .config; then
+          echo "Error: .config does not specify a valid target (e.g., CONFIG_TARGET_x86_64)."
+          cat .config
+          exit 1
+        fi
 
     - name: Get source and package version hashes
       id: hashes
@@ -195,6 +201,15 @@ jobs:
           make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
           make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
           make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
+          echo "Building target filesystem..."
+          make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j4 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
+          make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || {
+            echo "Error: Failed to build target filesystem."
+            ls -l bin/targets/ || echo "No target files generated."
+            exit 1
+          }
           cp ${{ env.WORKSPACE }}/current_packages.txt ${{ env.WORKSPACE }}/previous_packages.txt
         else
           echo "Incremental build detected..."
@@ -260,7 +275,11 @@ jobs:
           make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
           make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
           make -j4 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || \
-          make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache
+          make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }} CCACHE=ccache || {
+            echo "Error: Failed to build target filesystem."
+            ls -l bin/targets/ || echo "No target files generated."
+            exit 1
+          }
           mv ${{ env.WORKSPACE }}/current_packages.txt ${{ env.WORKSPACE }}/previous_packages.txt
         fi
 
@@ -322,7 +341,13 @@ jobs:
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        cd openwrt/bin/targets/*/*
+        cd openwrt
+        if [ ! -d "bin/targets" ]; then
+          echo "Error: No target files found in bin/targets/. Compilation may have failed to generate firmware."
+          ls -l bin/ || echo "bin/ directory is empty."
+          exit 1
+        fi
+        cd bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
