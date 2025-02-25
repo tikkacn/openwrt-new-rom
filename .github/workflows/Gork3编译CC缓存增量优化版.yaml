@@ -9,8 +9,8 @@ env:
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: 增量缓存优化.config  # Must exist in repository root directory
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
+  DIY_P1_SH: diy-part1.sh             # Optional, skipped if not found
+  DIY_P2_SH: diy-part2.sh             # Optional, skipped if not found
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_COWTRANSFER: false
@@ -105,10 +105,21 @@ jobs:
           exit 1
         fi
         mv "${{ env.WORKSPACE }}/$CONFIG_FILE" openwrt/.config
-        chmod +x $DIY_P1_SH $DIY_P2_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        if [ -e "${{ env.WORKSPACE }}/$DIY_P1_SH" ]; then
+          chmod +x "${{ env.WORKSPACE }}/$DIY_P1_SH"
+          echo "Running $DIY_P1_SH..."
+          ${{ env.WORKSPACE }}/$DIY_P1_SH
+        else
+          echo "Warning: $DIY_P1_SH not found, skipping."
+        fi
+        if [ -e "${{ env.WORKSPACE }}/$DIY_P2_SH" ]; then
+          chmod +x "${{ env.WORKSPACE }}/$DIY_P2_SH"
+          echo "Running $DIY_P2_SH..."
+          ${{ env.WORKSPACE }}/$DIY_P2_SH
+        else
+          echo "Warning: $DIY_P2_SH not found, skipping."
+        fi
 
     - name: Get source and package version hashes
       id: hashes
