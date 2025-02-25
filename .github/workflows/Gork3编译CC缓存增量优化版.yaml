@@ -1,8 +1,6 @@
 name: Build X86_64 OpenWrt（Gork3编译CC增量缓存优化版）
 
 on:
-  # schedule:
-  #   - cron: '0 16 * * *'  # 注释掉，避免并行运行
   repository_dispatch:
   workflow_dispatch:
 
@@ -20,13 +18,13 @@ env:
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
   CCACHE_DIR: $GITHUB_WORKSPACE/ccache
-  WORKSPACE: $GITHUB_WORKSPACE  # 定义工作目录根路径
+  WORKSPACE: $GITHUB_WORKSPACE
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     permissions:
-      actions: write  # 允许删除缓存
+      actions: write
 
     steps:
     - name: Before freeing up disk space
@@ -96,7 +94,7 @@ jobs:
     - name: Clone source code
       working-directory: ./
       run: |
-        rm -rf openwrt  # 清理旧目录
+        rm -rf openwrt
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
         cd openwrt
         sudo chown -R $USER:$GROUPS .
@@ -106,8 +104,8 @@ jobs:
       uses: actions/cache@v3
       with:
         path: |
-          ${{ env.WORKSPACE }}/openwrt/staging_dir/*
-          ${{ env.WORKSPACE }}/openwrt/build_dir/*-toolchain*
+          ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
         key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
         restore-keys: |
           toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
@@ -117,7 +115,7 @@ jobs:
       uses: actions/cache@v3
       with:
         path: |
-          ${{ env.WORKSPACE }}/openwrt/build_dir/*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-*
           ${{ env.WORKSPACE }}/openwrt/bin/packages
           ${{ env.WORKSPACE }}/previous_packages.txt
           ${{ env.WORKSPACE }}/package_hashes
@@ -180,7 +178,7 @@ jobs:
         cd openwrt
         ccache -M 5G
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
-        ccache -z  # 重置 ccache 统计
+        ccache -z
         echo "Checking gcc version:"
         gcc --version
         echo "Testing gcc functionality:"
@@ -290,21 +288,21 @@ jobs:
           mv ${{ env.WORKSPACE }}/current_packages.txt ${{ env.WORKSPACE }}/previous_packages.txt
         fi
 
-        ccache -s  # 显示 ccache 统计
+        ccache -s
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Verify caches before save
       if: always()
       run: |
-        echo "Toolchain cache contents:"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/staging_dir/* || echo "No toolchain files"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/*-toolchain* || echo "No build toolchain files"
-        echo "Package cache contents:"
-        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/* || echo "No build files"
+        echo "Toolchain cache contents before save:"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-* || echo "No toolchain files"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-* || echo "No build toolchain files"
+        echo "Package cache contents before save:"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-* || echo "No root files"
         ls -lR ${{ env.WORKSPACE }}/openwrt/bin/packages || echo "No package files"
         ls -l ${{ env.WORKSPACE }}/previous_packages.txt || echo "No previous_packages.txt"
         ls -lR ${{ env.WORKSPACE }}/package_hashes || echo "No package hashes"
-        echo "ccache contents:"
+        echo "ccache contents before save:"
         ls -lR ${{ env.CCACHE_DIR }} || echo "No ccache files"
         ccache -s || echo "ccache stats not available"
 
@@ -334,13 +332,31 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Save tools/toolchain cache
+      id: save-toolchain-cache
       uses: actions/cache@v3
       if: always()
       with:
         path: |
-          ${{ env.WORKSPACE }}/openwrt/staging_dir/*
-          ${{ env.WORKSPACE }}/openwrt/build_dir/*-toolchain*
+          ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
         key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+
+    - name: Verify toolchain cache save
+      if: always()
+      run: |
+        echo "Toolchain cache saved contents:"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-* || echo "No toolchain files saved"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-* || echo "No build toolchain files saved"
+
+    - name: Test toolchain cache restoration
+      uses: actions/cache@v3
+      if: always()
+      with:
+        path: |
+          ${{ env.WORKSPACE }}/openwrt/staging_dir/toolchain-*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/toolchain-*
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+        lookup-only: true
 
     - name: Save package cache
       id: save-package-cache
@@ -348,7 +364,7 @@ jobs:
       if: always()
       with:
         path: |
-          ${{ env.WORKSPACE }}/openwrt/build_dir/*
+          ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-*
           ${{ env.WORKSPACE }}/openwrt/bin/packages
           ${{ env.WORKSPACE }}/previous_packages.txt
           ${{ env.WORKSPACE }}/package_hashes
@@ -359,6 +375,22 @@ jobs:
       run: |
         echo "Package cache save result: Success"
         ls -l ${{ env.WORKSPACE }}/previous_packages.txt || echo "Failed to save previous_packages.txt"
+        echo "Package cache saved contents:"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-* || echo "No root files saved"
+        ls -lR ${{ env.WORKSPACE }}/openwrt/bin/packages || echo "No package files saved"
+        ls -lR ${{ env.WORKSPACE }}/package_hashes || echo "No package hashes saved"
+
+    - name: Test package cache restoration
+      uses: actions/cache@v3
+      if: always()
+      with:
+        path: |
+          ${{ env.WORKSPACE }}/openwrt/build_dir/target-*/root-*
+          ${{ env.WORKSPACE }}/openwrt/bin/packages
+          ${{ env.WORKSPACE }}/previous_packages.txt
+          ${{ env.WORKSPACE }}/package_hashes
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+        lookup-only: true
 
     - name: Save ccache
       id: save-ccache
@@ -372,7 +404,16 @@ jobs:
       if: always()
       run: |
         echo "ccache save result: Success"
-        ls -l ${{ env.CCACHE_DIR }} || echo "Failed to save ccache"
+        ls -lR ${{ env.CCACHE_DIR }} || echo "Failed to save ccache"
+        ccache -s || echo "ccache stats not available"
+
+    - name: Test ccache restoration
+      uses: actions/cache@v3
+      if: always()
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+        lookup-only: true
 
     - name: Check space usage
       if: (!cancelled())
@@ -423,7 +464,7 @@ jobs:
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
         [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
         [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
@@ -435,7 +476,7 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
+        tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
