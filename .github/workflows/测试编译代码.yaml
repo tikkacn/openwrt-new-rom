@@ -1,4 +1,4 @@
-name: 构建 OpenWRT 固件
+name: 测试编译代码
 
 on:
   repository_dispatch:
