@@ -1,4 +1,4 @@
-name: Build X86_64 OpenWrt（Gork3编译CC增量缓存优化版）
+name: 测试编译代码
 
 on:
   repository_dispatch:
