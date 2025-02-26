@@ -1,0 +1,106 @@
+name: Gork3编译增量优化版
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  CONFIG_FILE: Gork3.config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_RELEASE: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 检出代码
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # 缓存工具链
+      - name: Cache Toolchain
+        id: cache-toolchain
+        uses: actions/cache@v3
+        with:
+          path: /usr/lib/ccache
+          key: ${{ runner.os }}-toolchain-${{ hashFiles('Gork3.config') }}
+          restore-keys: ${{ runner.os }}-toolchain-
+
+      # 安装依赖（仅在工具链缓存未命中时）
+      - name: Install Dependencies
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          sudo -E apt-get update
+          sudo -E apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext git gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch patchelf pkgconf python2.7 python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip vim wget xmlto xxd zlib1g-dev
+
+      # 克隆源码（浅克隆）
+      - name: Clone Source Code
+        run: git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+
+      # 缓存 ccache
+      - name: Cache ccache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.ccache
+            openwrt/.ccache
+          key: ${{ runner.os }}-ccache-${{ hashFiles('Gork3.config') }}
+
+      # 缓存耗时 package 和固件（只存一份）
+      - name: Cache Compiled Artifacts
+        id: cache-artifacts
+        uses: actions/cache@v3
+        with:
+          path: |
+            openwrt/bin/targets           # 核心固件
+            openwrt/bin/packages/*/packages  # 非核心、非关键 package
+          key: ${{ runner.os }}-artifacts-${{ hashFiles('Gork3.config', 'openwrt/.git/FETCH_HEAD') }}
+
+      # 增量编译
+      - name: Incremental Build
+        run: |
+          cd openwrt
+          cp -f $GITHUB_WORKSPACE/$CONFIG_FILE .config
+          # diy-part1.sh 和 diy-part2.sh 都是注释，仅占位执行
+          [ -e $GITHUB_WORKSPACE/$DIY_P1_SH ] && bash $GITHUB_WORKSPACE/$DIY_P1_SH
+          make defconfig
+          [ -e $GITHUB_WORKSPACE/$DIY_P2_SH ] && bash $GITHUB_WORKSPACE/$DIY_P2_SH
+          export PATH="/usr/lib/ccache:$PATH"
+          ccache -M 3G  # 限制 ccache 为 3GB
+          if [ "${{ steps.cache-artifacts.outputs.cache-hit }}" == "true" ]; then
+            echo "Cache hit, performing incremental build..."
+            make -j$(nproc) oldconfig        # 更新配置，处理删除项
+            make -j$(nproc) package/index    # 更新 package 索引
+            make -j$(nproc) package/compile  # 只编译变化的 package
+            make -j$(nproc) target/install   # 更新最终固件
+          else
+            echo "Cache miss, performing full build..."
+            make -j$(nproc)
+          fi
+          ccache -s >> $GITHUB_STEP_SUMMARY  # 输出缓存统计
+
+      # 上传固件
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v3
+        with:
+          name: OpenWrt_firmware
+          path: openwrt/bin/targets/*/*/*.bin
+
+      # 清理旧运行
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          retain_days: 1
+          keep_minimum_runs: 3
+
+      # 上传到 Release
+      - name: Upload to Release
+        if: env.UPLOAD_RELEASE == 'true' && github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: openwrt/bin/targets/*/*/*.bin
+          tag_name: OpenWrt_${{ github.run_id }}
