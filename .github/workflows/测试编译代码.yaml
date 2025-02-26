@@ -1,4 +1,4 @@
-name: 构建 OpenWRT 固件 (增量缓存优化版)
+name: 测试编译代码
 
 on:
   repository_dispatch:
