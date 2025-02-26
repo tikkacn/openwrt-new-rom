@@ -1,4 +1,4 @@
-name: 测试编译代码
+name: 构建 OpenWRT 固件
 
 on:
   repository_dispatch:
@@ -15,14 +15,12 @@ on:
     branches:
       - main
     paths:
-      - '增量缓存优化.config'
-      - '.github/workflows/openwrt-incremental-build.yaml'
+      - '.config'
+      - '.github/workflows/Gork3编译CC缓存增量优化版.yaml'
 
 env:
-  REPO_URL: https://github.com/garypang13/Actions-OpenWrt
-  REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: 增量缓存优化.config
+  CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
@@ -45,14 +43,23 @@ jobs:
         with:
           ref: main
 
+      # 添加缓存键计算
       - name: 检查缓存密钥
         id: check-cache-key
         run: |
-          echo "config_hash=$(md5sum 增量缓存优化.config | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "config_hash=$(md5sum .config | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "date=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
-          
+
       - name: Optimize Disk Space
-        uses: AdminCI/action-cleanup-space@master
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
         
       - name: 安装编译环境
         env:
@@ -74,7 +81,7 @@ jobs:
         working-directory: /workdir
         run: |
           df -hT $PWD
-          git clone $REPO_URL -b $REPO_BRANCH openwrt
+          git clone https://github.com/coolsnowwolf/lede openwrt
           ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
           cd openwrt
           useVersionInfo=$(git show -s --date=short --format="Author: %an<br/>date: %cd<br/>commit: %s<br/>commit hash: %H")
@@ -82,7 +89,7 @@ jobs:
           echo "DATE=$(date "+%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
           echo "DATE1=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
       
-      # 恢复DL目录缓存 - 这个变化较少，独立缓存
+      # 恢复DL目录缓存
       - name: 恢复下载缓存
         uses: actions/cache@v3
         with:
@@ -91,7 +98,18 @@ jobs:
           restore-keys: |
             dl-cache-
             
-      # 恢复编译目录和ccache缓存
+      # 重要优化点：IPK包优先缓存
+      - name: 恢复IPK包缓存
+        uses: actions/cache@v3
+        if: github.event.inputs.clean_cache != 'yes'
+        with:
+          path: /workdir/openwrt/bin/packages
+          key: ipk-cache-${{ steps.check-cache-key.outputs.config_hash }}-${{ github.run_id }}
+          restore-keys: |
+            ipk-cache-${{ steps.check-cache-key.outputs.config_hash }}-
+            ipk-cache-
+            
+      # 其他构建缓存
       - name: 恢复编译缓存
         uses: actions/cache@v3
         if: github.event.inputs.clean_cache != 'yes'
@@ -158,6 +176,12 @@ jobs:
           # 设置环境变量启用ccache
           export CCACHE_DIR=~/.ccache
           export PATH=/usr/lib/ccache:$PATH
+          
+          # 如果存在已缓存的IPK包，显示信息
+          if [ -d bin/packages ]; then
+            echo "发现已缓存的IPK包，将优先使用"
+            ls -la bin/packages 2>/dev/null || echo "但目录为空"
+          fi
           
           make -j$(nproc) || make -j1 V=s
           
