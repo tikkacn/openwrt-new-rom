@@ -1,111 +1,231 @@
-name: 测试编译代码
+name: 构建 OpenWRT 固件 (增量缓存优化版)
+
 on:
+  repository_dispatch:
+    types: [Source_Code_Update_Push, Gork_Source_Code_Update_Push]
+  workflow_dispatch:
+    inputs:
+      clean_cache:
+        description: '是否清除缓存（输入yes清除）'
+        required: false
+        default: 'no'
+  schedule:
+    - cron: 0 18 * * *
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches:
+      - main
+    paths:
+      - '增量缓存优化.config'
+      - '.github/workflows/openwrt-incremental-build.yaml'
 
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_URL: https://github.com/garypang13/Actions-OpenWrt
   REPO_BRANCH: master
-  CONFIG_FILE: Gork3.config
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: 增量缓存优化.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_RELEASE: true
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_COWTRANSFER: false
+  UPLOAD_WETRANSFER: true
+  UPLOAD_RELEASE: false
+  TZ: Asia/Shanghai
+  FILE_NAME: Gork
+  PRODUCT_NAME: Gork
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    steps:
-      # 检出代码
-      - name: Checkout
-        uses: actions/checkout@v3
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id || ! github.event.sender.id
 
-      # 初始化环境
-      - name: Initialization environment
+    steps:
+      - name: 检查项目分支
+        uses: actions/checkout@main
+        with:
+          ref: main
+
+      - name: 检查缓存密钥
+        id: check-cache-key
         run: |
-          sudo timedatectl set-timezone "Asia/Shanghai"
+          echo "config_hash=$(md5sum 增量缓存优化.config | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "date=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+          
+      - name: Optimize Disk Space
+        uses: AdminCI/action-cleanup-space@master
+        
+      - name: 安装编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          docker rmi $(docker images -q)
+          sudo -E rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android
+          sudo -E apt-get update
+          sudo -E apt-get -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell openjdk* adoptopenjdk* mysql* php* mongodb* dotnet* moby* snapd* || true
+          sudo -E apt-get -y install $(curl -fsSL https://raw.githubusercontent.com/garypang13/OpenWrt_x86_64/main/diy/depends)
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          sudo timedatectl set-timezone "$TZ"
           sudo mkdir -p /workdir
           sudo chown $USER:$GROUPS /workdir
+          df -hT
 
-      # 更新和安装依赖
-      - name: Update and Install packages
+      - name: 克隆源代码
+        working-directory: /workdir
         run: |
-          sudo -E apt-get update
-          sudo -E apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext git gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch patchelf pkgconf python2.7 python3 python3-pip python3- ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip vim wget xmlto xxd zlib1g-dev
-
-      # 获取源码
-      - name: Clone source code
-        run: |
+          df -hT $PWD
           git clone $REPO_URL -b $REPO_BRANCH openwrt
-
-      # 加载 ccache 缓存
-      - name: Load Cache
+          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+          cd openwrt
+          useVersionInfo=$(git show -s --date=short --format="Author: %an<br/>date: %cd<br/>commit: %s<br/>commit hash: %H")
+          echo "useVersionInfo=$useVersionInfo" >> $GITHUB_ENV
+          echo "DATE=$(date "+%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
+          echo "DATE1=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
+      
+      # 恢复DL目录缓存 - 这个变化较少，独立缓存
+      - name: 恢复下载缓存
         uses: actions/cache@v3
         with:
-          path: |
-            ~/.ccache
-            openwrt/.ccache
-          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          path: /workdir/openwrt/dl
+          key: dl-cache-${{ steps.check-cache-key.outputs.config_hash }}
           restore-keys: |
-            ${{ runner.os }}-ccache-
-
-      # 缓存耗时 package 和固件
-      - name: Cache Compiled Artifacts
-        id: cache-artifacts
+            dl-cache-
+            
+      # 恢复编译目录和ccache缓存
+      - name: 恢复编译缓存
         uses: actions/cache@v3
+        if: github.event.inputs.clean_cache != 'yes'
         with:
           path: |
-            openwrt/bin/targets           # 核心固件
-            openwrt/bin/packages/*/packages  # 非核心、非关键 package
-          key: ${{ runner.os }}-artifacts-${{ hashFiles('Gork3.config', 'openwrt/.git/FETCH_HEAD') }}
+            /workdir/openwrt/build_dir
+            /workdir/openwrt/staging_dir
+            ~/.ccache
+          key: build-cache-${{ steps.check-cache-key.outputs.config_hash }}-${{ github.run_id }}
+          restore-keys: |
+            build-cache-${{ steps.check-cache-key.outputs.config_hash }}-
+            build-cache-
 
-      # 编译固件（包含原始清理方法）
-      - name: Compile the firmware
+      - name: 加载自定义 feeds 配置
+        run: |
+          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+          chmod +x $DIY_P1_SH
+          cd openwrt
+          $GITHUB_WORKSPACE/$DIY_P1_SH
+
+      - name: 更新 feeds
+        run: cd openwrt && ./scripts/feeds update -a
+
+      - name: 安装 feeds
+        run: cd openwrt && ./scripts/feeds install -a
+
+      - name: 加载自定义配置
+        run: |
+          [ -e files ] && mv files openwrt/files
+          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+          chmod +x $DIY_P2_SH
+          cd openwrt
+          $GITHUB_WORKSPACE/$DIY_P2_SH
+          
+      - name: 配置 ccache
         run: |
           cd openwrt
-          cp -f $GITHUB_WORKSPACE/$CONFIG_FILE .config
-          [ -e $GITHUB_WORKSPACE/$DIY_P1_SH ] && bash $GITHUB_WORKSPACE/$DIY_P1_SH
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc  # 原始清理方法
-          make defconfig
-          [ -e $GITHUB_WORKSPACE/$DIY_P2_SH ] && bash $GITHUB_WORKSPACE/$DIY_P2_SH
-          export PATH="/usr/lib/ccache:$PATH"
-          if [ "${{ steps.cache-artifacts.outputs.cache-hit }}" == "true" ]; then
-            echo "Cache hit, performing incremental build..."
-            make -j$(nproc) oldconfig        # 更新配置，处理删除项
-            make -j$(nproc) package/index    # 更新 package 索引
-            make -j$(nproc) package/compile  # 只编译变化的 package
-            make -j$(nproc) target/install   # 更新最终固件
-          else
-            echo "Cache miss, performing full build..."
-            make -j$(nproc) V=s
-          fi
-          ccache -s >> $GITHUB_STEP_SUMMARY
+          mkdir -p ~/.ccache
+          echo "max_size = 10G" > ~/.ccache/ccache.conf
+          echo "compression = true" >> ~/.ccache/ccache.conf
 
-      # 上传固件（升级到 v4）
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenWrt_firmware
-          path: openwrt/bin/targets/*/*/*
-
-      # 删除旧运行
-      - name: Delete workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          retain_days: 1
-          keep_minimum_runs: 3
-
-      # 准备发布
-      - name: Prepare Release
+      - name: 下载软件包
+        id: package
         run: |
-          mkdir Firmware_Release
-          cp -r openwrt/bin/targets/*/*/* Firmware_Release/
+          cd openwrt
+          make defconfig
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
 
-      # 上传到 Release
-      - name: Upload to Release
-        if: env.UPLOAD_RELEASE == 'true' && github.event_name != 'pull_request'
-        uses: softprops/action-gh-release@v1
+      - name: Freeing up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+      - name: 编译固件
+        id: compile
+        run: |
+          cd openwrt
+          echo -e "$(nproc) thread compile"
+          
+          # 设置环境变量启用ccache
+          export CCACHE_DIR=~/.ccache
+          export PATH=/usr/lib/ccache:$PATH
+          
+          make -j$(nproc) || make -j1 V=s
+          
+          echo "status=success" >> $GITHUB_OUTPUT
+          grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+          [ -s DEVICE_NAME ] && echo "DEVICE_NAME=$(cat DEVICE_NAME)" >> $GITHUB_ENV
+          echo "FILE_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+          
+          # 输出ccache统计信息
+          ccache -s
+
+      - name: Free up disk space complete
+        if: (!cancelled())
+        run: |
+          df -hT
+          
+      - name: 检查空间使用情况
+        if: (!cancelled())
+        run: df -hT
+
+      - name: 整理文件
+        id: organize
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        run: |
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 上传固件目录
+        uses: actions/upload-artifact@main
+        if: steps.organize.outputs.status == 'success' && !cancelled()
         with:
-          files: Firmware_Release/*
-          tag_name: OpenWrt_${{ github.run_id }}
+          name: ${{ env.FILE_NAME }}_${{ env.DATE1 }}
+          path: ${{ env.FIRMWARE }}
+
+      - name: 上传bin目录
+        uses: actions/upload-artifact@main
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        with:
+          name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: openwrt/bin
+
+      - name: 上传到 WeTransfer
+        id: wetransfer
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
+        run: |
+          curl -fsSL git.io/file-transfer | sh
+          ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
+          echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
+          echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+
+      - name: 生成发布标签
+        id: tag
+        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+        run: |
+          echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+          touch release.txt
+          [ ${{ steps.compile.outputs.status }} = 'success' ] && echo "编译成功" >> release.txt
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 创建发布
+        uses: softprops/action-gh-release@v1
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          name: ${{ env.FILE_NAME }}-${{ env.DATE }}
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          body_path: release.txt
+          files: ${{ env.FIRMWARE }}/*
