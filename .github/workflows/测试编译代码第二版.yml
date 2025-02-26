@@ -1,4 +1,4 @@
-name: 测试编译代码第二版
+name: 测试编译代码 - 优化缓存版
 
 on:
   repository_dispatch:
@@ -78,7 +78,7 @@ jobs:
         libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
         mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
         libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-        vim wget xmlto xxd zlib1g-dev python3-setuptools
+        vim wget xmlto xxd zlib1g-dev python3-setuptools linux-headers-generic
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
@@ -89,7 +89,7 @@ jobs:
     - name: Clone source code
       working-directory: ./
       run: |
-        rm -rf openwrt  # 清理旧目录
+        rm -rf openwrt
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
         cd openwrt
         sudo chown -R $USER:$GROUPS .
@@ -101,30 +101,28 @@ jobs:
         path: |
           openwrt/staging_dir/toolchain-*
           openwrt/build_dir/toolchain-*
-        key: toolchain-fixed-cache
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
         restore-keys: |
-          toolchain-fixed-cache-
-          toolchain-
+          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
     - name: Restore package cache
-      id: package-cache
       uses: actions/cache@v3
       with:
         path: |
           openwrt/bin/packages
+          openwrt/package_hashes
           previous_packages.txt
-        key: packages-fixed-cache
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
         restore-keys: |
-          packages-fixed-cache-
-          packages-
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
     - name: Restore ccache
       uses: actions/cache@v3
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-fixed-cache-${{ github.run_id }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
         restore-keys: |
-          ccache-fixed-cache-
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
 
     - name: Load custom feeds
       run: |
@@ -156,14 +154,12 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
     - name: Download package and resolve dependencies
-      id: package
       run: |
         cd openwrt
         make defconfig
         make oldconfig <<< "y"
         timeout 30m make download -j2 V=s || echo "Warning: Download timed out or failed, proceeding..."
-        find dl -size -1024c -exec ls -l {} \; || echo "Warning: Failed to list small files, proceeding..."
-        find dl -size -1024c -exec rm -f {} \; || echo "Warning: Failed to remove small files, proceeding..."
+        find dl -size -1024c -exec rm -f {} \;
 
     - name: Detect changes and compile
       id: compile
@@ -173,57 +169,93 @@ jobs:
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
         echo "Starting compilation with ccache"
 
+        # Compile toolchain if not cached
         if [ ! -d "staging_dir/toolchain-*" ]; then
           echo "Toolchain not found in cache, compiling..."
           make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j8 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j4 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
           make -j1 V=s tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }}
         else
           echo "Toolchain restored from cache, skipping compilation."
         fi
 
-        echo "Current SHA: ${{ github.sha }}"
+        # Generate current package list
         grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
 
-        if [ -f "../previous_packages.txt" ]; then
-          echo "Comparing current and previous package configurations..."
-          if ! cmp -s current_packages.txt ../previous_packages.txt; then
-            echo "Package configuration has changed, rebuilding all packages..."
-            make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
-            cp current_packages.txt ../previous_packages.txt
-          else
-            echo "Package configuration unchanged, using cached packages."
-          fi
-        else
+        # Create package_hashes directory if not exists
+        mkdir -p package_hashes
+
+        # First run: compile everything
+        if [ ! -f "../previous_packages.txt" ]; then
           echo "First run detected, compiling all packages..."
           make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
           make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
-          cp current_packages.txt ../previous_packages.txt
-        fi
-
-        git fetch origin $REPO_BRANCH
-        if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
-          echo "Source code updated, rebuilding kernel..."
-          make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
-          make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j4 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j1 V=s target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
+          # Generate package hashes
+          for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+            pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
+            if [ -n "$pkg_dir" ]; then
+              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "package_hashes/$pkg"
+            fi
+          done
+          mv current_packages.txt ../previous_packages.txt
         else
-          echo "Source code unchanged, skipping kernel rebuild."
-        fi
+          echo "Incremental build detected..."
+          # Compare packages for additions and removals
+          comm -13 ../previous_packages.txt current_packages.txt > added_packages.txt
+          comm -23 ../previous_packages.txt current_packages.txt > removed_packages.txt
 
-        echo "Building target filesystem..."
-        make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-        make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-        make -j4 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-        make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }}
+          # Check for updated packages
+          touch compile_list.txt
+          for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+            pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
+            if [ -n "$pkg_dir" ]; then
+              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "package_hashes/$pkg.current"
+              if [ -f "package_hashes/$pkg" ]; then
+                if ! cmp -s "package_hashes/$pkg" "package_hashes/$pkg.current"; then
+                  echo "CONFIG_PACKAGE_$pkg=y" >> compile_list.txt
+                fi
+              else
+                echo "CONFIG_PACKAGE_$pkg=y" >> compile_list.txt
+              fi
+              mv "package_hashes/$pkg.current" "package_hashes/$pkg"
+            fi
+          done
+          cat added_packages.txt >> compile_list.txt
+
+          # Clean removed packages
+          if [ -s removed_packages.txt ]; then
+            echo "Cleaning removed packages..."
+            while read -r pkg; do
+              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name"
+            done < removed_packages.txt
+          fi
+
+          # Compile added or updated packages
+          if [ -s compile_list.txt ]; then
+            echo "Compiling added or updated packages..."
+            while read -r pkg; do
+              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+              make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+            done < compile_list.txt
+          else
+            echo "No packages to compile."
+          fi
+
+          # Check kernel or feeds update
+          git fetch origin $REPO_BRANCH
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
+            echo "Source updated, rebuilding kernel..."
+            make target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
+            make target/linux/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make target/linux/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+          fi
+
+          echo "Building target filesystem..."
+          make target/install -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make target/install -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+          mv current_packages.txt ../previous_packages.txt
+        fi
 
         echo "status=success" >> $GITHUB_OUTPUT
         echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
@@ -237,7 +269,7 @@ jobs:
         path: |
           openwrt/staging_dir/toolchain-*
           openwrt/build_dir/toolchain-*
-        key: toolchain-fixed-cache
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
     - name: Save package cache
       uses: actions/cache@v3
@@ -245,15 +277,16 @@ jobs:
       with:
         path: |
           openwrt/bin/packages
+          openwrt/package_hashes
           previous_packages.txt
-        key: packages-fixed-cache
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
     - name: Save ccache
       uses: actions/cache@v3
       if: steps.compile.outputs.status == 'success'
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-fixed-cache-${{ github.run_id }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
 
     - name: Check space usage
       if: (!cancelled())
