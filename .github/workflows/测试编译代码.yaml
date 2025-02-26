@@ -17,29 +17,29 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 检出代码（原始版本）
+      # 检出代码
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 初始化环境（原始版本）
+      # 初始化环境
       - name: Initialization environment
         run: |
           sudo timedatectl set-timezone "Asia/Shanghai"
           sudo mkdir -p /workdir
           sudo chown $USER:$GROUPS /workdir
 
-      # 更新和安装依赖（原始完整列表）
+      # 更新和安装依赖
       - name: Update and Install packages
         run: |
           sudo -E apt-get update
-          sudo -E apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext git gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch patchelf pkgconf python2.7 python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip vim wget xmlto xxd zlib1g-dev
+          sudo -E apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext git gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch patchelf pkgconf python2.7 python3 python3-pip python3- ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip vim wget xmlto xxd zlib1g-dev
 
-      # 获取源码（原始版本）
+      # 获取源码
       - name: Clone source code
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
 
-      # 加载 ccache 缓存（原始版本）
+      # 加载 ccache 缓存
       - name: Load Cache
         uses: actions/cache@v3
         with:
@@ -50,7 +50,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-ccache-
 
-      # 添加耗时 package 和固件缓存（新功能）
+      # 缓存耗时 package 和固件
       - name: Cache Compiled Artifacts
         id: cache-artifacts
         uses: actions/cache@v3
@@ -60,12 +60,13 @@ jobs:
             openwrt/bin/packages/*/packages  # 非核心、非关键 package
           key: ${{ runner.os }}-artifacts-${{ hashFiles('Gork3.config', 'openwrt/.git/FETCH_HEAD') }}
 
-      # 编译固件（添加增量逻辑）
+      # 编译固件（包含原始清理方法）
       - name: Compile the firmware
         run: |
           cd openwrt
           cp -f $GITHUB_WORKSPACE/$CONFIG_FILE .config
           [ -e $GITHUB_WORKSPACE/$DIY_P1_SH ] && bash $GITHUB_WORKSPACE/$DIY_P1_SH
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc  # 原始清理方法
           make defconfig
           [ -e $GITHUB_WORKSPACE/$DIY_P2_SH ] && bash $GITHUB_WORKSPACE/$DIY_P2_SH
           export PATH="/usr/lib/ccache:$PATH"
@@ -88,20 +89,20 @@ jobs:
           name: OpenWrt_firmware
           path: openwrt/bin/targets/*/*/*
 
-      # 删除旧运行（原始版本）
+      # 删除旧运行
       - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v2
         with:
           retain_days: 1
           keep_minimum_runs: 3
 
-      # 准备发布（原始版本）
+      # 准备发布
       - name: Prepare Release
         run: |
           mkdir Firmware_Release
           cp -r openwrt/bin/targets/*/*/* Firmware_Release/
 
-      # 上传到 Release（原始版本）
+      # 上传到 Release
       - name: Upload to Release
         if: env.UPLOAD_RELEASE == 'true' && github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v1
