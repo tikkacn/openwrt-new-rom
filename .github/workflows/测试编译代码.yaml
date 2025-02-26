@@ -1,267 +1,364 @@
-name: 测试编译代码
+name: Build X86_64 OpenWrt（Gork3编译CC增量缓存优化版）
 
 on:
+  repository_dispatch:
   workflow_dispatch:
-    inputs:
-      clean_cache:
-        description: '是否清除缓存（输入yes清除）'
-        required: false
-        default: 'no'
 
 env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: 增量缓存优化.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
-  UPLOAD_COWTRANSFER: false
-  UPLOAD_WETRANSFER: true
-  UPLOAD_RELEASE: false
+  UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  FILE_NAME: Gork
-  PRODUCT_NAME: Gork
+  CCACHE_DIR: $GITHUB_WORKSPACE/ccache
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    if: github.event.repository.owner.id == github.event.sender.id || ! github.event.sender.id
 
     steps:
-      - name: 检查项目分支
-        uses: actions/checkout@main
-        with:
-          ref: main
+    - name: Before freeing up disk space
+      run: |
+        echo "Before freeing up disk space"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
 
-      # 添加缓存键计算
-      - name: 计算缓存键
-        id: cache-key
-        run: |
-          if [ -f "$CONFIG_FILE" ]; then
-            echo "config_hash=$(md5sum "$CONFIG_FILE" | awk '{print $1}')" >> $GITHUB_OUTPUT
-            echo "使用配置文件 $CONFIG_FILE 计算哈希值"
+    - name: Optimize Disk Space
+      uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
+      with:
+        operate_sudo: "True"
+        general_include: ".+"
+        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
+        docker_include: ".+"
+        docker_prune: "True"
+        docker_clean: "True"
+        apt_prune: "True"
+        apt_clean: "True"
+        homebrew_prune: "True"
+        homebrew_clean: "True"
+        npm_prune: "True"
+        npm_clean: "True"
+        os_swap: "True"
+
+    - name: Freeing up disk space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 2048
+        swap-size-mb: 1
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+
+    - name: Free up disk space complete
+      run: |
+        echo "Free up disk space complete"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
+
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+        vim wget xmlto xxd zlib1g-dev python3-setuptools
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
+        /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
+        sudo timedatectl set-timezone "$TZ"
+        sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
+
+    - name: Clone source code
+      working-directory: ./
+      run: |
+        rm -rf openwrt  # 清理旧目录
+        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+        cd openwrt
+        sudo chown -R $USER:$GROUPS .
+        find . -type f -name "*.sh" -exec chmod +x {} \;
+
+    - name: Restore tools/toolchain cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          openwrt/staging_dir/toolchain-*
+          openwrt/build_dir/toolchain-*
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+        restore-keys: |
+          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    - name: Restore package cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          openwrt/bin/packages
+          ../previous_packages.txt
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+        restore-keys: |
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    - name: Restore ccache
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
+        restore-keys: |
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+
+    - name: Install feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds install -a
+
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        if [ ! -e "$CONFIG_FILE" ]; then
+          echo "Error: $CONFIG_FILE not found!" >&2
+          exit 1
+        fi
+        mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Download package and resolve dependencies
+      id: package
+      run: |
+        cd openwrt
+        make defconfig
+        make oldconfig <<< "y"
+        timeout 30m make download -j2 V=s || echo "Warning: Download timed out or failed, proceeding..."
+        find dl -size -1024c -exec ls -l {} \; || echo "Warning: Failed to list small files, proceeding..."
+        find dl -size -1024c -exec rm -f {} \; || echo "Warning: Failed to remove small files, proceeding..."
+
+    - name: Detect changes and compile
+      id: compile
+      run: |
+        cd openwrt
+        ccache -M 5G
+        export CCACHE_DIR=${{ env.CCACHE_DIR }}
+        echo "Starting compilation with ccache"
+
+        if [ ! -d "staging_dir/toolchain-*" ]; then
+          echo "Toolchain not found in cache, compiling..."
+          make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j8 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j4 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j1 V=s tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }}
+        else
+          echo "Toolchain restored from cache, skipping compilation."
+        fi
+
+        echo "Current SHA: ${{ github.sha }}"
+        grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
+        echo "Checking previous_packages.txt..."
+        ls -l ../previous_packages.txt || echo "previous_packages.txt not found"
+        if [ ! -f ../previous_packages.txt ]; then
+          echo "First run detected, compiling all packages..."
+          make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+          cp current_packages.txt ../previous_packages.txt
+        else
+          echo "Incremental build detected..."
+          comm -13 ../previous_packages.txt current_packages.txt > ../added_packages.txt
+          comm -23 ../previous_packages.txt current_packages.txt > ../removed_packages.txt
+          comm -12 ../previous_packages.txt current_packages.txt > ../unchanged_packages.txt || touch ../unchanged_packages.txt
+          cat ../added_packages.txt > ../compile_list.txt
+
+          mkdir -p ../package_hashes
+          for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+            pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
+            if [ -n "$pkg_dir" ]; then
+              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "../package_hashes/$pkg.current"
+            fi
+          done
+          if [ -s ../unchanged_packages.txt ]; then
+            for pkg in $(cat ../unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+              if [ -f "../package_hashes/$pkg.current" ] && [ -f "../package_hashes/$pkg.previous" ]; then
+                if ! cmp -s "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"; then
+                  echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
+                fi
+              elif [ -f "../package_hashes/$pkg.current" ]; then
+                echo "CONFIG_PACKAGE_$pkg=y" >> ../compile_list.txt
+              fi
+              [ -f "../package_hashes/$pkg.current" ] && mv "../package_hashes/$pkg.current" "../package_hashes/$pkg.previous"
+            done
+          fi
+
+          if [ -s ../removed_packages.txt ]; then
+            echo "Cleaning removed packages..."
+            while read -r pkg; do
+              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              pkg_dir=$(find package feeds -type d -name "$pkg_name" | head -n 1)
+              if [ -n "$pkg_dir" ]; then
+                echo "Cleaning package: $pkg_name"
+                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name, proceeding..."
+              else
+                echo "Skipping cleanup of $pkg_name: package not found"
+              fi
+            done < ../removed_packages.txt
+          fi
+
+          if [ -s ../compile_list.txt ]; then
+            echo "Compiling added or updated packages..."
+            while read -r pkg; do
+              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              pkg_dir=$(find package feeds -type d -name "$pkg_name" | head -n 1)
+              if [ -n "$pkg_dir" ]; then
+                echo "Compiling package: $pkg_name"
+                make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name, proceeding..."
+                make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+                make -j8 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+                make -j4 package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+                make -j1 V=s package/$pkg_name/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
+              else
+                echo "Skipping $pkg_name: package not found"
+              fi
+            done < ../compile_list.txt
           else
-            echo "config_hash=default" >> $GITHUB_OUTPUT
-            echo "未找到配置文件 $CONFIG_FILE，使用默认哈希值"
+            echo "No new or updated packages to compile."
           fi
 
-      - name: Optimize Disk Space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-        
-      - name: 安装编译环境
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          docker rmi $(docker images -q)
-          sudo -E rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android
-          sudo -E apt-get update
-          sudo -E apt-get -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell openjdk* adoptopenjdk* mysql* php* mongodb* dotnet* moby* snapd* || true
-          sudo -E apt-get -y install $(curl -fsSL https://raw.githubusercontent.com/garypang13/OpenWrt_x86_64/main/diy/depends)
-          sudo -E apt-get -y autoremove --purge
-          sudo -E apt-get clean
-          sudo timedatectl set-timezone "$TZ"
-          sudo mkdir -p /workdir
-          sudo chown $USER:$GROUPS /workdir
-          df -hT
-
-      - name: 克隆源代码
-        working-directory: /workdir
-        run: |
-          df -hT $PWD
-          git clone https://github.com/coolsnowwolf/lede openwrt
-          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-          cd openwrt
-          useVersionInfo=$(git show -s --date=short --format="Author: %an<br/>date: %cd<br/>commit: %s<br/>commit hash: %H")
-          echo "useVersionInfo=$useVersionInfo" >> $GITHUB_ENV
-          echo "DATE=$(date "+%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
-          echo "DATE1=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
-      
-      # 恢复DL目录缓存
-      - name: 恢复下载缓存
-        uses: actions/cache@v3
-        with:
-          path: /workdir/openwrt/dl
-          key: dl-cache-${{ steps.cache-key.outputs.config_hash }}
-          restore-keys: |
-            dl-cache-
-      
-      # IPK包优先缓存
-      - name: 恢复IPK包缓存
-        uses: actions/cache@v3
-        id: ipk-cache
-        if: github.event.inputs.clean_cache != 'yes'
-        with:
-          path: /workdir/openwrt/bin/packages
-          key: ipk-${{ steps.cache-key.outputs.config_hash }}-${{ github.run_id }}
-          restore-keys: |
-            ipk-${{ steps.cache-key.outputs.config_hash }}-
-            ipk-
-
-      # 验证IPK缓存状态
-      - name: 验证IPK缓存
-        run: |
-          echo "使用配置文件哈希: ${{ steps.cache-key.outputs.config_hash }}"
-          echo "IPK缓存状态: ${{ steps.ipk-cache.outputs.cache-hit == 'true' && '已命中' || '未命中' }}"
-          if [ -d /workdir/openwrt/bin/packages ]; then
-            echo "======== IPK包缓存统计 ========"
-            find /workdir/openwrt/bin/packages -name "*.ipk" | wc -l
-            echo "⬆️ IPK包数量"
-            du -sh /workdir/openwrt/bin/packages
-            echo "⬆️ IPK包总大小"
-          else
-            echo "未找到缓存的IPK包目录，将创建新目录"
-            mkdir -p /workdir/openwrt/bin/packages
+          git fetch origin $REPO_BRANCH
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
+             [ ! -f "../feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat ../feeds_hash)" ]; then
+            echo "Source or feeds updated, rebuilding kernel..."
+            make -j$(nproc) target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
+            make -j$(nproc) target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make -j8 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make -j4 target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make -j1 V=s target/linux/compile CCACHE_DIR=${{ env.CCACHE_DIR }}
+            sha256sum feeds.conf.default | awk '{print $1}' > ../feeds_hash
           fi
-            
-      # 其他构建缓存
-      - name: 恢复编译缓存
-        uses: actions/cache@v3
-        if: github.event.inputs.clean_cache != 'yes'
-        with:
-          path: |
-            /workdir/openwrt/build_dir
-            /workdir/openwrt/staging_dir
-            ~/.ccache
-          key: build-cache-${{ steps.cache-key.outputs.config_hash }}-${{ github.run_id }}
-          restore-keys: |
-            build-cache-${{ steps.cache-key.outputs.config_hash }}-
-            build-cache-
 
-      - name: 加载自定义 feeds 配置
-        run: |
-          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-          chmod +x $DIY_P1_SH
-          cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P1_SH
+          echo "Building target filesystem..."
+          make -j$(nproc) target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j8 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j4 target/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j1 V=s target/install CCACHE_DIR=${{ env.CCACHE_DIR }}
+          mv current_packages.txt ../previous_packages.txt
+        fi
 
-      - name: 更新 feeds
-        run: cd openwrt && ./scripts/feeds update -a
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "固件大小：$(du -sh bin/targets/*/*)"
 
-      - name: 安装 feeds
-        run: cd openwrt && ./scripts/feeds install -a
+    - name: Save tools/toolchain cache
+      uses: actions/cache@v3
+      if: always()
+      with:
+        path: |
+          openwrt/staging_dir/toolchain-*
+          openwrt/build_dir/toolchain-*
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
-      - name: 加载自定义配置
-        run: |
-          [ -e files ] && mv files openwrt/files
-          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-          chmod +x $DIY_P2_SH
-          cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P2_SH
-          
-      - name: 配置 ccache
-        run: |
-          cd openwrt
-          mkdir -p ~/.ccache
-          echo "max_size = 10G" > ~/.ccache/ccache.conf
-          echo "compression = true" >> ~/.ccache/ccache.conf
+    - name: Save package cache
+      uses: actions/cache@v3
+      if: always()
+      with:
+        path: |
+          openwrt/bin/packages
+          ../previous_packages.txt
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
-      - name: 下载软件包
-        id: package
-        run: |
-          cd openwrt
-          make defconfig
-          make download -j8
-          find dl -size -1024c -exec ls -l {} \;
-          find dl -size -1024c -exec rm -f {} \;
+    - name: Save ccache
+      uses: actions/cache@v3
+      if: always()
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest-${{ github.run_id }}
 
-      - name: Freeing up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
 
-      - name: 编译固件
-        id: compile
-        run: |
-          cd openwrt
-          echo -e "$(nproc) thread compile"
-          
-          # 设置环境变量启用ccache
-          export CCACHE_DIR=~/.ccache
-          export PATH=/usr/lib/ccache:$PATH
-          
-          # 检测缓存的IPK包
-          if [ -d bin/packages ] && [ "$(find bin/packages -name "*.ipk" | wc -l)" -gt 0 ]; then
-            echo "====================================="
-            echo "发现已缓存的IPK包，将优先使用"
-            echo "缓存的IPK包数量: $(find bin/packages -name "*.ipk" | wc -l)"
-            echo "====================================="
-          fi
-          
-          make -j$(nproc) || make -j1 V=s
-          
-          echo "status=success" >> $GITHUB_OUTPUT
-          grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-          [ -s DEVICE_NAME ] && echo "DEVICE_NAME=$(cat DEVICE_NAME)" >> $GITHUB_ENV
-          echo "FILE_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-          
-          # 输出ccache统计信息
-          ccache -s
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin
 
-      - name: Free up disk space complete
-        if: (!cancelled())
-        run: |
-          df -hT
-          
-      - name: 检查空间使用情况
-        if: (!cancelled())
-        run: df -hT
+    - name: Organize files
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: 整理文件
-        id: organize
-        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-        run: |
-          cd openwrt/bin/targets/*/*
-          rm -rf packages
-          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-          echo "status=success" >> $GITHUB_OUTPUT
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
 
-      - name: 上传固件目录
-        uses: actions/upload-artifact@main
-        if: steps.organize.outputs.status == 'success' && !cancelled()
-        with:
-          name: ${{ env.FILE_NAME }}_${{ env.DATE1 }}
-          path: ${{ env.FIRMWARE }}
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: 上传bin目录
-        uses: actions/upload-artifact@main
-        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-        with:
-          name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-          path: openwrt/bin
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v1
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
 
-      - name: 上传到 WeTransfer
-        id: wetransfer
-        if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-        run: |
-          curl -fsSL git.io/file-transfer | sh
-          ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
-          echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
-          echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
 
-      - name: 生成发布标签
-        id: tag
-        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-        run: |
-          echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-          touch release.txt
-          [ ${{ steps.compile.outputs.status }} = 'success' ] && echo "编译成功" >> release.txt
-          echo "status=success" >> $GITHUB_OUTPUT
-
-      - name: 创建发布
-        uses: softprops/action-gh-release@v1
-        if: steps.tag.outputs.status == 'success' && !cancelled()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          name: ${{ env.FILE_NAME }}-${{ env.DATE }}
-          tag_name: ${{ steps.tag.outputs.release_tag }} ▋
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@v0.1.0
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
