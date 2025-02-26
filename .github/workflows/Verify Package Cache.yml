@@ -1,0 +1,53 @@
+name: Verify Package Cache
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up environment
+      run: |
+        echo "REPO_URL=https://github.com/coolsnowwolf/lede" >> $GITHUB_ENV
+        echo "REPO_BRANCH=master" >> $GITHUB_ENV
+
+    - name: Check package size
+      run: |
+        echo "Size of openwrt/bin/packages: $(du -sh openwrt/bin/packages | cut -f1)"
+        echo "Size of ../previous_packages.txt: $(du -sh ../previous_packages.txt | cut -f1)"
+
+    - name: Check paths
+      run: |
+        if [ -d "openwrt/bin/packages" ]; then echo "openwrt/bin/packages exists"; else echo "openwrt/bin/packages does not exist"; fi
+        if [ -f "../previous_packages.txt" ]; then echo "../previous_packages.txt exists"; else echo "../previous_packages.txt does not exist"; fi
+
+    - name: Check cache key
+      run: |
+        echo "Toolchain Cache Key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest"
+        echo "Package Cache Key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest"
+
+    - name: Check network
+      run: |
+        if ping -c 4 github.com; then echo "Network is OK"; else echo "Network problem detected"; fi
+
+    - name: Restore package cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          openwrt/bin/packages
+          ../previous_packages.txt
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+
+    - name: Save package cache
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache@v3
+      with:
+        path: |
+          openwrt/bin/packages
+          ../previous_packages.txt
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
