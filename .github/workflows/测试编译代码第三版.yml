@@ -88,10 +88,7 @@ jobs:
     - name: Setup build directory
       working-directory: ./
       run: |
-        # 清理无关分区
         sudo rm -rf /mnt/* /tmp/*
-        
-        # 创建并清理专用构建目录
         mkdir -p /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp
         rm -rf /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/build_dir
         rm -rf /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/tmp
@@ -102,19 +99,14 @@ jobs:
     - name: Clone source code
       working-directory: ./
       run: |
-        # 克隆源码
         rm -rf openwrt
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || (sleep 5 && git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt)
         cd openwrt
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
-        
-        # 设置符号链接
         rm -rf build_dir tmp
         ln -s /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/build_dir build_dir
         ln -s /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/tmp tmp
-        
-        # 调试：检查目录状态
         echo "Directory status after setup:"
         ls -ld build_dir tmp
         readlink -f build_dir tmp
@@ -158,12 +150,29 @@ jobs:
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
+        # 验证 .config 是否成功加载
+        if [ ! -f .config ]; then
+          echo "Error: Failed to load .config into openwrt directory!"
+          exit 1
+        fi
+        echo "OpenWrt .config loaded successfully:"
+        ls -l .config
 
     - name: Download package and resolve dependencies
       run: |
         cd openwrt
         make defconfig
         make oldconfig <<< "y"
+        # 强制生成内核配置
+        echo "Generating kernel .config..."
+        make kernel_oldconfig <<< "y" || { echo "Error: Failed to generate kernel .config"; exit 1; }
+        # 检查内核 .config 是否存在
+        if [ ! -f build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config ]; then
+          echo "Error: Kernel .config not generated at build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config!"
+          exit 1
+        fi
+        echo "Kernel .config generated successfully:"
+        ls -l build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config
         timeout 60m make download -j2 V=s || timeout 30m make download -j1 V=s || { echo "Error: Download failed after retry, aborting..."; exit 1; }
         find dl -size -1024c -exec rm -f {} \;
 
@@ -246,8 +255,8 @@ jobs:
 
           # Check kernel or feeds update
           git fetch origin $REPO_BRANCH
-          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
-            echo "Source updated, rebuilding kernel..."
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || [ ! -f "build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config" ]; then
+            echo "Source updated or kernel .config missing, rebuilding kernel..."
             make target/linux/clean
             make target/linux/compile -j8 || \
             make target/linux/compile -j1 V=s
