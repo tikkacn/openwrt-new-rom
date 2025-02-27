@@ -15,6 +15,7 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+  BUILD_TEMP_DIR: /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp
 
 jobs:
   build:
@@ -84,17 +85,28 @@ jobs:
         /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
+        # 设置 ccache 目录
+        mkdir -p $BUILD_TEMP_DIR/ccache
+        export CCACHE_DIR=$BUILD_TEMP_DIR/ccache
+        echo "CCACHE_DIR=$BUILD_TEMP_DIR/ccache" >> $GITHUB_ENV
 
     - name: Setup build directory
       working-directory: ./
       run: |
-        sudo rm -rf /mnt/* /tmp/*
-        mkdir -p /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp
-        rm -rf /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/build_dir
-        rm -rf /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/tmp
-        mkdir -p /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/build_dir
-        mkdir -p /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/tmp
-        sudo chown -R $USER:$GROUPS /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp
+        # 清理无关分区
+        sudo rm -rf /mnt/* /tmp/* /var/cache/*
+        
+        # 创建并清理专用构建目录
+        mkdir -p $BUILD_TEMP_DIR
+        rm -rf $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir
+        mkdir -p $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir
+        sudo chown -R $USER:$GROUPS $BUILD_TEMP_DIR
+        
+        # 重定向系统 /tmp 和 /var/cache
+        sudo mount --bind $BUILD_TEMP_DIR/tmp /tmp
+        sudo mount --bind $BUILD_TEMP_DIR/tmp /var/cache
+        echo "System /tmp and /var/cache redirected to $BUILD_TEMP_DIR/tmp"
+        df -hT
 
     - name: Clone source code
       working-directory: ./
@@ -104,12 +116,15 @@ jobs:
         cd openwrt
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
-        rm -rf build_dir tmp
-        ln -s /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/build_dir build_dir
-        ln -s /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/tmp tmp
+        # 设置所有构建目录
+        rm -rf build_dir tmp bin staging_dir
+        ln -s $BUILD_TEMP_DIR/build_dir build_dir
+        ln -s $BUILD_TEMP_DIR/tmp tmp
+        ln -s $BUILD_TEMP_DIR/bin bin
+        ln -s $BUILD_TEMP_DIR/staging_dir staging_dir
         echo "Directory status after setup:"
-        ls -ld build_dir tmp
-        readlink -f build_dir tmp
+        ls -ld build_dir tmp bin staging_dir
+        readlink -f build_dir tmp bin staging_dir
 
     - name: Restore package cache
       uses: actions/cache@v3
@@ -143,36 +158,39 @@ jobs:
       run: |
         [ -e files ] && mv files openwrt/files
         if [ ! -e "$CONFIG_FILE" ]; then
-          echo "Error: $CONFIG_FILE not found!" >&2
+          echo "Error: $CONFIG_FILE not found in $GITHUB_WORKSPACE!" >&2
+          ls -la $GITHUB_WORKSPACE
           exit 1
         fi
-        mv $CONFIG_FILE openwrt/.config
+        echo "Copying $CONFIG_FILE to openwrt/.config..."
+        cp $CONFIG_FILE openwrt/.config
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
-        # 验证 .config 是否成功加载
         if [ ! -f .config ]; then
-          echo "Error: Failed to load .config into openwrt directory!"
+          echo "Error: .config not found after copying!"
           exit 1
         fi
-        echo "OpenWrt .config loaded successfully:"
+        echo ".config loaded successfully:"
         ls -l .config
 
     - name: Download package and resolve dependencies
       run: |
         cd openwrt
-        make defconfig
-        make oldconfig <<< "y"
-        # 强制生成内核配置
-        echo "Generating kernel .config..."
-        make kernel_oldconfig <<< "y" || { echo "Error: Failed to generate kernel .config"; exit 1; }
-        # 检查内核 .config 是否存在
-        if [ ! -f build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config ]; then
-          echo "Error: Kernel .config not generated at build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config!"
+        echo "Disk usage before configuration:"
+        df -hT
+        echo "Generating OpenWrt configuration..."
+        make defconfig || { echo "Error: make defconfig failed"; exit 1; }
+        echo "Updating kernel configuration..."
+        make kernel_oldconfig <<< "y" || { echo "Error: make kernel_oldconfig failed"; exit 1; }
+        KERNEL_CONFIG="build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config"
+        if [ ! -f "$KERNEL_CONFIG" ]; then
+          echo "Error: Kernel .config not generated at $KERNEL_CONFIG!"
+          ls -l build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/ || echo "Directory not found"
           exit 1
         fi
         echo "Kernel .config generated successfully:"
-        ls -l build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config
+        ls -l "$KERNEL_CONFIG"
         timeout 60m make download -j2 V=s || timeout 30m make download -j1 V=s || { echo "Error: Download failed after retry, aborting..."; exit 1; }
         find dl -size -1024c -exec rm -f {} \;
 
@@ -183,24 +201,23 @@ jobs:
         echo "Starting compilation"
         echo "Resource usage before compilation:"
         free -m && df -hT
-
-        # Always compile toolchain
+        # 指定所有构建目录
+        export STAGING_DIR=$BUILD_TEMP_DIR/staging_dir
+        export BUILD_DIR=$BUILD_TEMP_DIR/build_dir
+        export TMP_DIR=$BUILD_TEMP_DIR/tmp
+        export BIN_DIR=$BUILD_TEMP_DIR/bin
+        
         echo "Compiling toolchain..."
         make -j8 tools/install toolchain/install || \
         make -j1 V=s tools/install toolchain/install
 
-        # Generate current package list
         grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
-
-        # Create package_hashes directory if not exists
         mkdir -p package_hashes
 
-        # First run: compile everything
         if [ ! -f "../previous_packages.txt" ]; then
           echo "First run detected, compiling all packages..."
           make -j8 || \
           make -j1 V=s
-          # Generate package hashes
           for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
             pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
             if [ -n "$pkg_dir" ]; then
@@ -210,11 +227,9 @@ jobs:
           mv current_packages.txt ../previous_packages.txt
         else
           echo "Incremental build detected..."
-          # Compare packages for additions and removals
           comm -13 ../previous_packages.txt current_packages.txt > added_packages.txt
           comm -23 ../previous_packages.txt current_packages.txt > removed_packages.txt
 
-          # Check for updated packages
           touch compile_list.txt
           for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
             pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
@@ -232,7 +247,6 @@ jobs:
           done
           cat added_packages.txt >> compile_list.txt
 
-          # Clean removed packages
           if [ -s removed_packages.txt ]; then
             echo "Cleaning removed packages..."
             while read -r pkg; do
@@ -241,7 +255,6 @@ jobs:
             done < removed_packages.txt
           fi
 
-          # Compile added or updated packages
           if [ -s compile_list.txt ]; then
             echo "Compiling added or updated packages..."
             while read -r pkg; do
@@ -253,9 +266,8 @@ jobs:
             echo "No packages to compile."
           fi
 
-          # Check kernel or feeds update
           git fetch origin $REPO_BRANCH
-          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || [ ! -f "build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config" ]; then
+          if [ ! -f "build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config" ] || [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
             echo "Source updated or kernel .config missing, rebuilding kernel..."
             make target/linux/clean
             make target/linux/compile -j8 || \
@@ -295,6 +307,13 @@ jobs:
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
+
+    - name: Cleanup temporary files
+      if: always()
+      run: |
+        sudo umount /tmp || echo "No /tmp mount to remove"
+        sudo umount /var/cache || echo "No /var/cache mount to remove"
+        sudo rm -rf /mnt/* /tmp/* /var/cache/*
 
     - name: Upload bin directory
       uses: actions/upload-artifact@main
