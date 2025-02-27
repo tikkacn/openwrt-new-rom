@@ -61,7 +61,7 @@ jobs:
       run: |
         echo "Free up disk space complete"
         echo "=============================================================================="
-        sudo rm -rf /usr/share/doc/* /usr/local/lib/android /opt/ghc /var/cache/*/*  # 保留 /var/cache/apt
+        sudo rm -rf /usr/share/doc/* /usr/local/lib/android /opt/ghc  # 最小化清理范围
         df -hT
         echo "=============================================================================="
 
@@ -73,11 +73,16 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         echo "Checking system integrity before apt-get update..."
-        ls -l /proc/cpuinfo || echo "Warning: /proc/cpuinfo not found!"
+        if [ ! -f /proc/cpuinfo ]; then
+          echo "Warning: /proc/cpuinfo missing, attempting workaround..."
+          sudo touch /proc/cpuinfo || echo "Cannot create /proc/cpuinfo, proceeding anyway"
+        fi
         sudo mkdir -p /var/cache/apt/archives
-        for i in {1..5}; do
-          sudo -E apt-get -qq update && break || { echo "Retry $i failed, waiting 10s..."; sleep 10; }
-        done || { echo "Error: apt-get update failed after 5 retries"; sudo apt-get -qq update -v; exit 1; }
+        for i in {1..10}; do
+          sudo -E apt-get -qq update && break || { echo "Retry $i failed, waiting 15s..."; sleep 15; }
+        done || { echo "Error: apt-get update failed after 10 retries, trying alternative source..."; 
+                  echo "deb http://archive.ubuntu.com/ubuntu jammy main universe" | sudo tee /etc/apt/sources.list;
+                  sudo -E apt-get -qq update -v || exit 1; }
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
