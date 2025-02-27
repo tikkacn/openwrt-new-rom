@@ -85,27 +85,31 @@ jobs:
         /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
-        # 设置 ccache 目录
+        # 设置 ccache 和临时环境变量
         mkdir -p $BUILD_TEMP_DIR/ccache
         export CCACHE_DIR=$BUILD_TEMP_DIR/ccache
         echo "CCACHE_DIR=$BUILD_TEMP_DIR/ccache" >> $GITHUB_ENV
+        export TMPDIR=$BUILD_TEMP_DIR/tmp
+        echo "TMPDIR=$BUILD_TEMP_DIR/tmp" >> $GITHUB_ENV
 
     - name: Setup build directory
       working-directory: ./
       run: |
-        # 清理无关分区
-        sudo rm -rf /mnt/* /tmp/* /var/cache/*
+        # 清理所有可能占用空间的系统路径
+        sudo rm -rf /mnt/* /tmp/* /var/cache/* /var/tmp/* /usr/local/*
         
         # 创建并清理专用构建目录
         mkdir -p $BUILD_TEMP_DIR
-        rm -rf $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir
-        mkdir -p $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir
+        rm -rf $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir $BUILD_TEMP_DIR/dl
+        mkdir -p $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir $BUILD_TEMP_DIR/dl
         sudo chown -R $USER:$GROUPS $BUILD_TEMP_DIR
         
-        # 重定向系统 /tmp 和 /var/cache
+        # 重定向所有相关系统路径
         sudo mount --bind $BUILD_TEMP_DIR/tmp /tmp
         sudo mount --bind $BUILD_TEMP_DIR/tmp /var/cache
-        echo "System /tmp and /var/cache redirected to $BUILD_TEMP_DIR/tmp"
+        sudo mount --bind $BUILD_TEMP_DIR/tmp /var/tmp
+        sudo mount --bind $BUILD_TEMP_DIR/tmp /usr/local
+        echo "System paths (/tmp, /var/cache, /var/tmp, /usr/local) redirected to $BUILD_TEMP_DIR/tmp"
         df -hT
 
     - name: Clone source code
@@ -117,14 +121,15 @@ jobs:
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
         # 设置所有构建目录
-        rm -rf build_dir tmp bin staging_dir
+        rm -rf build_dir tmp bin staging_dir dl
         ln -s $BUILD_TEMP_DIR/build_dir build_dir
         ln -s $BUILD_TEMP_DIR/tmp tmp
         ln -s $BUILD_TEMP_DIR/bin bin
         ln -s $BUILD_TEMP_DIR/staging_dir staging_dir
+        ln -s $BUILD_TEMP_DIR/dl dl
         echo "Directory status after setup:"
-        ls -ld build_dir tmp bin staging_dir
-        readlink -f build_dir tmp bin staging_dir
+        ls -ld build_dir tmp bin staging_dir dl
+        readlink -f build_dir tmp bin staging_dir dl
 
     - name: Restore package cache
       uses: actions/cache@v3
@@ -191,8 +196,14 @@ jobs:
         fi
         echo "Kernel .config generated successfully:"
         ls -l "$KERNEL_CONFIG"
+        echo "Disk usage before download:"
+        df -hT
+        # 下载依赖，重定向 dl 目录
+        export DL_DIR=$BUILD_TEMP_DIR/dl
         timeout 60m make download -j2 V=s || timeout 30m make download -j1 V=s || { echo "Error: Download failed after retry, aborting..."; exit 1; }
         find dl -size -1024c -exec rm -f {} \;
+        echo "Disk usage after download:"
+        df -hT
 
     - name: Detect changes and compile
       id: compile
@@ -206,6 +217,7 @@ jobs:
         export BUILD_DIR=$BUILD_TEMP_DIR/build_dir
         export TMP_DIR=$BUILD_TEMP_DIR/tmp
         export BIN_DIR=$BUILD_TEMP_DIR/bin
+        export DL_DIR=$BUILD_TEMP_DIR/dl
         
         echo "Compiling toolchain..."
         make -j8 tools/install toolchain/install || \
@@ -313,7 +325,9 @@ jobs:
       run: |
         sudo umount /tmp || echo "No /tmp mount to remove"
         sudo umount /var/cache || echo "No /var/cache mount to remove"
-        sudo rm -rf /mnt/* /tmp/* /var/cache/*
+        sudo umount /var/tmp || echo "No /var/tmp mount to remove"
+        sudo umount /usr/local || echo "No /usr/local mount to remove"
+        sudo rm -rf /mnt/* /tmp/* /var/cache/* /var/tmp/* /usr/local/*
 
     - name: Upload bin directory
       uses: actions/upload-artifact@main
