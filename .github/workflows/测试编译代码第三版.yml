@@ -29,23 +29,6 @@ jobs:
         df -hT
         echo "=============================================================================="
 
-    - name: Optimize Disk Space
-      uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
-      with:
-        operate_sudo: "True"
-        general_include: ".+"
-        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
-        docker_include: ".+"
-        docker_prune: "True"
-        docker_clean: "True"
-        apt_prune: "True"
-        apt_clean: "True"
-        homebrew_prune: "True"
-        homebrew_clean: "True"
-        npm_prune: "True"
-        npm_clean: "True"
-        os_swap: "True"
-
     - name: Freeing up disk space
       uses: easimon/maximize-build-space@master
       with:
@@ -61,7 +44,6 @@ jobs:
       run: |
         echo "Free up disk space complete"
         echo "=============================================================================="
-        sudo rm -rf /usr/share/doc/* /usr/local/lib/android /opt/ghc  # 最小化清理范围
         df -hT
         echo "=============================================================================="
 
@@ -74,15 +56,15 @@ jobs:
       run: |
         echo "Checking system integrity before apt-get update..."
         if [ ! -f /proc/cpuinfo ]; then
-          echo "Warning: /proc/cpuinfo missing, attempting workaround..."
-          sudo touch /proc/cpuinfo || echo "Cannot create /proc/cpuinfo, proceeding anyway"
+          echo "Warning: /proc/cpuinfo missing, proceeding with fallback..."
+          sudo dpkg --configure -a
         fi
         sudo mkdir -p /var/cache/apt/archives
-        for i in {1..10}; do
-          sudo -E apt-get -qq update && break || { echo "Retry $i failed, waiting 15s..."; sleep 15; }
-        done || { echo "Error: apt-get update failed after 10 retries, trying alternative source..."; 
-                  echo "deb http://archive.ubuntu.com/ubuntu jammy main universe" | sudo tee /etc/apt/sources.list;
-                  sudo -E apt-get -qq update -v || exit 1; }
+        for i in {1..5}; do
+          sudo -E apt-get -qq update --allow-insecure-repositories && break || { echo "Retry $i failed, waiting 10s..."; sleep 10; }
+        done || { echo "Error: apt-get update failed after 5 retries, trying alternative source..."; 
+                  echo "deb http://archive.ubuntu.com/ubuntu jammy main universe restricted multiverse" | sudo tee /etc/apt/sources.list;
+                  sudo -E apt-get -qq update --allow-insecure-repositories || exit 1; }
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
