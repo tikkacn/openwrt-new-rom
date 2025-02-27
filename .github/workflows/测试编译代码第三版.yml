@@ -31,12 +31,26 @@ jobs:
 
     - name: Pre-cleanup and redirect system paths
       run: |
-        # 创建临时目录并清理系统路径
+        # 创建临时目录
         sudo mkdir -p $BUILD_TEMP_DIR
         sudo rm -rf $BUILD_TEMP_DIR/*
         sudo mkdir -p $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/cache
         sudo chown -R $USER:$GROUPS $BUILD_TEMP_DIR
-        sudo rm -rf /mnt/* /tmp/* /var/cache/* /var/tmp/* /usr/local/*
+        
+        # 检查并卸载交换文件
+        if [ -f /mnt/swapfile ]; then
+          sudo swapoff /mnt/swapfile || echo "Warning: Failed to disable swapfile at /mnt/swapfile"
+          sudo rm -f /mnt/swapfile || echo "Warning: Failed to remove /mnt/swapfile"
+        fi
+        if [ -f /swapfile ]; then
+          sudo swapoff /swapfile || echo "Warning: Failed to disable swapfile at /swapfile"
+          sudo rm -f /swapfile || echo "Warning: Failed to remove /swapfile"
+        fi
+        
+        # 清理系统路径
+        sudo rm -rf /mnt/* /tmp/* /var/cache/* /var/tmp/* /usr/local/* || echo "Warning: Some files could not be removed"
+        
+        # 重定向系统路径
         sudo mount --bind $BUILD_TEMP_DIR/tmp /tmp
         sudo mount --bind $BUILD_TEMP_DIR/cache /var/cache
         sudo mount --bind $BUILD_TEMP_DIR/tmp /var/tmp
@@ -72,7 +86,7 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
-        tmp-pv-loop-path: $BUILD_TEMP_DIR/tmp-pv.img  # 重定向临时 PV 文件到 121GB 分区
+        tmp-pv-loop-path: $BUILD_TEMP_DIR/tmp-pv.img
 
     - name: Free up disk space complete
       run: |
@@ -102,7 +116,6 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
         
-        # 设置 ccache 和临时环境变量
         mkdir -p $BUILD_TEMP_DIR/ccache
         export CCACHE_DIR=$BUILD_TEMP_DIR/ccache
         echo "CCACHE_DIR=$BUILD_TEMP_DIR/ccache" >> $GITHUB_ENV
