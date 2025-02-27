@@ -27,17 +27,18 @@ jobs:
         echo "Before freeing up disk space"
         echo "=============================================================================="
         df -hT
+        echo "Active swap:"
+        cat /proc/swaps
         echo "=============================================================================="
 
     - name: Pre-cleanup and redirect system paths
       run: |
-        # 创建临时目录
         sudo mkdir -p $BUILD_TEMP_DIR
         sudo rm -rf $BUILD_TEMP_DIR/*
         sudo mkdir -p $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/cache
         sudo chown -R $USER:$GROUPS $BUILD_TEMP_DIR
         
-        # 检查并卸载交换文件
+        # 卸载并删除所有交换文件
         if [ -f /mnt/swapfile ]; then
           sudo swapoff /mnt/swapfile || echo "Warning: Failed to disable swapfile at /mnt/swapfile"
           sudo rm -f /mnt/swapfile || echo "Warning: Failed to remove /mnt/swapfile"
@@ -46,6 +47,7 @@ jobs:
           sudo swapoff /swapfile || echo "Warning: Failed to disable swapfile at /swapfile"
           sudo rm -f /swapfile || echo "Warning: Failed to remove /swapfile"
         fi
+        sudo swapoff -a
         
         # 清理系统路径
         sudo rm -rf /mnt/* /tmp/* /var/cache/* /var/tmp/* /usr/local/* || echo "Warning: Some files could not be removed"
@@ -58,6 +60,8 @@ jobs:
         sudo mount --bind $BUILD_TEMP_DIR/tmp /mnt
         echo "System paths redirected to $BUILD_TEMP_DIR"
         df -hT
+        echo "Active mounts:"
+        mount | grep -E "/tmp|/var/cache|/var/tmp|/usr/local|/mnt|$BUILD_TEMP_DIR"
 
     - name: Optimize Disk Space
       uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
@@ -76,17 +80,15 @@ jobs:
         npm_clean: "True"
         os_swap: "True"
 
-    - name: Freeing up disk space
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 2048
-        swap-size-mb: 1024
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
-        tmp-pv-loop-path: $BUILD_TEMP_DIR/tmp-pv.img
+    - name: Freeing up disk space without LVM
+      run: |
+        echo "Removing unwanted software manually..."
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force || echo "No docker images to prune"
+        echo "Disk usage after manual cleanup:"
+        df -hT
+        echo "Active swap:"
+        cat /proc/swaps
 
     - name: Free up disk space complete
       run: |
