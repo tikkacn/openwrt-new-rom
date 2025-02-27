@@ -1,4 +1,4 @@
-name: 测试编译代码第三版
+name: 测试编译代码 - 复用package包缓存增量编译版
 
 on:
   repository_dispatch:
@@ -15,19 +15,25 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  CCACHE_DIR: $GITHUB_WORKSPACE/ccache
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
+    - name: Before freeing up disk space
+      run: |
+        echo "Before freeing up disk space"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
+
     - name: Optimize Disk Space
       uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
       with:
         operate_sudo: "True"
         general_include: ".+"
-        general_exclude: "^GCC$|^G\\\\+\\\\+$|Clang|LLVM"
+        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
         docker_include: ".+"
         docker_prune: "True"
         docker_clean: "True"
@@ -49,6 +55,13 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
+
+    - name: Free up disk space complete
+      run: |
+        echo "Free up disk space complete"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
 
     - name: Checkout
       uses: actions/checkout@main
@@ -126,7 +139,7 @@ jobs:
         cd openwrt
         make defconfig
         make oldconfig <<< "y"
-        # 延长超时时间到60分钟并添加重试，如果失败则中止
+        # 延长超时至60分钟并添加重试，若失败则中止
         timeout 60m make download -j2 V=s || timeout 30m make download -j1 V=s || { echo "Error: Download failed after retry, aborting..."; exit 1; }
         find dl -size -1024c -exec rm -f {} \;
 
@@ -134,11 +147,14 @@ jobs:
       id: compile
       run: |
         cd openwrt
-        ccache -M 5G
-        export CCACHE_DIR=${{ env.CCACHE_DIR }}
-        echo "Starting compilation with ccache"
+        echo "Starting compilation"
         echo "Resource usage before compilation:"
         free -m && df -hT
+
+        # Always compile toolchain
+        echo "Compiling toolchain..."
+        make -j8 tools/install toolchain/install || \
+        make -j1 V=s tools/install toolchain/install
 
         # Generate current package list
         grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
@@ -149,8 +165,8 @@ jobs:
         # First run: compile everything
         if [ ! -f "../previous_packages.txt" ]; then
           echo "First run detected, compiling all packages..."
-          make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+          make -j8 || \
+          make -j1 V=s
           # Generate package hashes
           for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
             pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
@@ -188,7 +204,7 @@ jobs:
             echo "Cleaning removed packages..."
             while read -r pkg; do
               pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-              make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name"
+              make package/$pkg_name/clean || echo "Warning: Failed to clean $pkg_name"
             done < removed_packages.txt
           fi
 
@@ -197,8 +213,8 @@ jobs:
             echo "Compiling added or updated packages..."
             while read -r pkg; do
               pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-              make package/$pkg_name/compile -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-              make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+              make package/$pkg_name/compile -j8 || \
+              make package/$pkg_name/compile -j1 V=s
             done < compile_list.txt
           else
             echo "No packages to compile."
@@ -208,14 +224,14 @@ jobs:
           git fetch origin $REPO_BRANCH
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
             echo "Source updated, rebuilding kernel..."
-            make target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
-            make target/linux/compile -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make target/linux/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+            make target/linux/clean
+            make target/linux/compile -j8 || \
+            make target/linux/compile -j1 V=s
           fi
 
           echo "Building target filesystem..."
-          make target/install -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make target/install -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+          make target/install -j8 || \
+          make target/install -j1 V=s
           mv current_packages.txt ../previous_packages.txt
         fi
 
@@ -243,6 +259,10 @@ jobs:
           openwrt/package_hashes
           previous_packages.txt
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
 
     - name: Upload bin directory
       uses: actions/upload-artifact@main
