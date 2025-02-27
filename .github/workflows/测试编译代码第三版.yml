@@ -49,8 +49,8 @@ jobs:
     - name: Freeing up disk space
       uses: easimon/maximize-build-space@master
       with:
-        root-reserve-mb: 512    # 减少到 512MB
-        swap-size-mb: 3072      # 增加 swap 到 3GB
+        root-reserve-mb: 512
+        swap-size-mb: 3072
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
@@ -61,7 +61,7 @@ jobs:
       run: |
         echo "Free up disk space complete"
         echo "=============================================================================="
-        sudo rm -rf /usr/share/* /usr/local/lib/* /opt/* /var/cache/*  # 清理更多冗余文件
+        sudo rm -rf /usr/share/doc/* /usr/local/lib/android /opt/ghc /var/cache/*/*  # 保留 /var/cache/apt
         df -hT
         echo "=============================================================================="
 
@@ -72,7 +72,12 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo -E apt-get -qq update || sudo -E apt-get -qq update
+        echo "Checking system integrity before apt-get update..."
+        ls -l /proc/cpuinfo || echo "Warning: /proc/cpuinfo not found!"
+        sudo mkdir -p /var/cache/apt/archives
+        for i in {1..5}; do
+          sudo -E apt-get -qq update && break || { echo "Retry $i failed, waiting 10s..."; sleep 10; }
+        done || { echo "Error: apt-get update failed after 5 retries"; sudo apt-get -qq update -v; exit 1; }
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
@@ -157,7 +162,7 @@ jobs:
         make defconfig
         make oldconfig <<< "y"
         for i in {1..3}; do
-          rm -rf dl  # 每次重试前清理
+          rm -rf dl
           timeout 60m make download -j2 V=s && break || echo "Retry $i failed, retrying..."
         done || { echo "Error: Download failed after 3 retries"; exit 1; }
         find dl -size -1024c -exec rm -f {} \;
@@ -168,9 +173,9 @@ jobs:
       run: |
         cd openwrt
         AVAIL_SPACE=$(df -h / | awk 'NR==2 {print $4}' | sed 's/G//')
-        if (( $(echo "$AVAIL_SPACE < 50" | bc -l) )); then
+        if (( $(echo "$AVAIL_SPACE < 90" | bc -l) )); then
           echo "Available space ($AVAIL_SPACE GB) too low, cleaning up..."
-          rm -rf build_dir/* staging_dir/*tmp* || true
+          rm -rf build_dir/* staging_dir/*tmp* bin/packages/* || true
         fi
         df -hT
 
@@ -179,7 +184,7 @@ jobs:
         cd openwrt
         ccache -M 5G
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
-        make -j4 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+        make -j2 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
         make -j1 V=s tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }}
         echo "Toolchain compiled, disk usage:"
         df -hT
@@ -194,23 +199,21 @@ jobs:
         echo "Resource usage before compilation:"
         free -m && df -hT
 
-        # Compile toolchain if not cached
-        if [ ! -d "staging_dir/toolchain-*" ]; then
-          echo "Toolchain not found in cache, already compiled."
+        if [ -f "../previous_packages.txt" ]; then
+          echo "Incremental build detected, cleaning old build_dir..."
+          rm -rf build_dir/* || true
+          echo "Post-clean disk usage:"
+          df -hT
         fi
 
-        # Generate current package list
         grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
-
-        # Create package_hashes directory if not exists
         mkdir -p package_hashes
 
-        # First run: compile everything
         if [ ! -f "../previous_packages.txt" ]; then
           echo "First run detected, compiling all packages..."
-          make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
-          # Generate package hashes
+          make -j2 CCACHE_DIR=${{ env.CCACHE_DIR }} || make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+          echo "Post-full-compile disk usage:"
+          df -hT
           for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
             pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
             if [ -n "$pkg_dir" ]; then
@@ -220,11 +223,8 @@ jobs:
           mv current_packages.txt ../previous_packages.txt
         else
           echo "Incremental build detected..."
-          # Compare packages for additions and removals
           comm -13 ../previous_packages.txt current_packages.txt > added_packages.txt
           comm -23 ../previous_packages.txt current_packages.txt > removed_packages.txt
-
-          # Check for updated packages
           touch compile_list.txt
           for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
             pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
@@ -238,41 +238,46 @@ jobs:
           done
           cat added_packages.txt >> compile_list.txt
 
-          # Clean removed packages
           if [ -s removed_packages.txt ]; then
             echo "Cleaning removed packages..."
             while read -r pkg; do
               pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
               make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name"
             done < removed_packages.txt
+            echo "Post-clean disk usage:"
+            df -hT
           fi
 
-          # Compile added or updated packages
           if [ -s compile_list.txt ]; then
             echo "Compiling added or updated packages..."
             while read -r pkg; do
               pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-              make package/$pkg_name/compile -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-              make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+              make package/$pkg_name/compile -j2 CCACHE_DIR=${{ env.CCACHE_DIR }} || make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
             done < compile_list.txt
+            echo "Post-package-compile disk usage:"
+            df -hT
           else
             echo "No packages to compile."
           fi
 
-          # Check kernel or feeds update
           git fetch origin $REPO_BRANCH
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
             echo "Source updated, rebuilding kernel..."
             make target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
-            make target/linux/compile -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-            make target/linux/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+            make target/linux/compile -j2 CCACHE_DIR=${{ env.CCACHE_DIR }} || make target/linux/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+            echo "Post-kernel-compile disk usage:"
+            df -hT
           fi
-
-          echo "Building target filesystem..."
-          make target/install -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
-          make target/install -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
-          mv current_packages.txt ../previous_packages.txt
         fi
+
+        echo "Building target filesystem..."
+        AVAIL_SPACE=$(df -h / | awk 'NR==2 {print $4}' | sed 's/G//')
+        if (( $(echo "$AVAIL_SPACE < 50" | bc -l) )); then
+          echo "Available space ($AVAIL_SPACE GB) too low for target/install, cleaning up..."
+          rm -rf build_dir/*tmp* || true
+        fi
+        make target/install -j2 CCACHE_DIR=${{ env.CCACHE_DIR }} || make target/install -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+        mv current_packages.txt ../previous_packages.txt
 
         ccache -s >> $GITHUB_WORKSPACE/ccache_stats.txt
         echo "Resource usage after compilation:"
@@ -327,12 +332,18 @@ jobs:
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled() && steps.compile.outputs.status == 'success'
       run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+        if [ -d "openwrt/bin/targets" ] && [ -n "$(find openwrt/bin/targets -type f -name '*.bin' -size +1M)" ]; then
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "Error: No valid firmware found in openwrt/bin/targets!"
+          echo "status=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@main
