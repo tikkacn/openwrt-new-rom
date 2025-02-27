@@ -29,6 +29,22 @@ jobs:
         df -hT
         echo "=============================================================================="
 
+    - name: Pre-cleanup and redirect system paths
+      run: |
+        # 创建临时目录并清理系统路径
+        sudo mkdir -p $BUILD_TEMP_DIR
+        sudo rm -rf $BUILD_TEMP_DIR/*
+        sudo mkdir -p $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/cache
+        sudo chown -R $USER:$GROUPS $BUILD_TEMP_DIR
+        sudo rm -rf /mnt/* /tmp/* /var/cache/* /var/tmp/* /usr/local/*
+        sudo mount --bind $BUILD_TEMP_DIR/tmp /tmp
+        sudo mount --bind $BUILD_TEMP_DIR/cache /var/cache
+        sudo mount --bind $BUILD_TEMP_DIR/tmp /var/tmp
+        sudo mount --bind $BUILD_TEMP_DIR/tmp /usr/local
+        sudo mount --bind $BUILD_TEMP_DIR/tmp /mnt
+        echo "System paths redirected to $BUILD_TEMP_DIR"
+        df -hT
+
     - name: Optimize Disk Space
       uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
       with:
@@ -56,6 +72,7 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
+        tmp-pv-loop-path: $BUILD_TEMP_DIR/tmp-pv.img  # 重定向临时 PV 文件到 121GB 分区
 
     - name: Free up disk space complete
       run: |
@@ -81,29 +98,24 @@ jobs:
         vim wget xmlto xxd zlib1g-dev python3-setuptools linux-headers-generic
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
-        /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
+        sudo rm -rf /etc/apt/sources.list.d/*
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
         
-        # 提前设置构建临时目录并重定向所有系统路径
-        mkdir -p $BUILD_TEMP_DIR
-        rm -rf $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir $BUILD_TEMP_DIR/dl $BUILD_TEMP_DIR/ccache
-        mkdir -p $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir $BUILD_TEMP_DIR/dl $BUILD_TEMP_DIR/ccache
-        sudo chown -R $USER:$GROUPS $BUILD_TEMP_DIR
-        
-        sudo rm -rf /mnt/* /tmp/* /var/cache/* /var/tmp/* /usr/local/*
-        sudo mount --bind $BUILD_TEMP_DIR/tmp /tmp
-        sudo mount --bind $BUILD_TEMP_DIR/tmp /var/cache
-        sudo mount --bind $BUILD_TEMP_DIR/tmp /var/tmp
-        sudo mount --bind $BUILD_TEMP_DIR/tmp /usr/local
-        echo "System paths (/tmp, /var/cache, /var/tmp, /usr/local) redirected to $BUILD_TEMP_DIR/tmp"
-        
+        # 设置 ccache 和临时环境变量
+        mkdir -p $BUILD_TEMP_DIR/ccache
         export CCACHE_DIR=$BUILD_TEMP_DIR/ccache
         echo "CCACHE_DIR=$BUILD_TEMP_DIR/ccache" >> $GITHUB_ENV
         export TMPDIR=$BUILD_TEMP_DIR/tmp
         echo "TMPDIR=$BUILD_TEMP_DIR/tmp" >> $GITHUB_ENV
         df -hT
+
+    - name: Setup build directory
+      working-directory: ./
+      run: |
+        rm -rf $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir $BUILD_TEMP_DIR/dl
+        mkdir -p $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir $BUILD_TEMP_DIR/dl
+        sudo chown -R $USER:$GROUPS $BUILD_TEMP_DIR
 
     - name: Clone source code
       working-directory: ./
@@ -113,7 +125,6 @@ jobs:
         cd openwrt
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
-        # 设置所有构建目录
         rm -rf build_dir tmp bin staging_dir dl
         ln -s $BUILD_TEMP_DIR/build_dir build_dir
         ln -s $BUILD_TEMP_DIR/tmp tmp
@@ -202,7 +213,6 @@ jobs:
         ls -l "$KERNEL_CONFIG"
         echo "Disk usage before download:"
         df -hT
-        # 下载依赖，重定向 dl 目录
         export DL_DIR=$BUILD_TEMP_DIR/dl
         timeout 60m make download -j2 V=s || timeout 30m make download -j1 V=s || { echo "Error: Download failed after retry, aborting..."; exit 1; }
         find dl -size -1024c -exec rm -f {} \;
@@ -216,7 +226,6 @@ jobs:
         echo "Starting compilation"
         echo "Resource usage before compilation:"
         free -m && df -hT
-        # 指定所有构建目录
         export STAGING_DIR=$BUILD_TEMP_DIR/staging_dir
         export BUILD_DIR=$BUILD_TEMP_DIR/build_dir
         export TMP_DIR=$BUILD_TEMP_DIR/tmp
@@ -331,6 +340,7 @@ jobs:
         sudo umount /var/cache || echo "No /var/cache mount to remove"
         sudo umount /var/tmp || echo "No /var/tmp mount to remove"
         sudo umount /usr/local || echo "No /usr/local mount to remove"
+        sudo umount /mnt || echo "No /mnt mount to remove"
         sudo rm -rf /mnt/* /tmp/* /var/cache/* /var/tmp/* /usr/local/*
 
     - name: Upload bin directory
