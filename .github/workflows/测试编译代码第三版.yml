@@ -49,7 +49,7 @@ jobs:
       uses: easimon/maximize-build-space@master
       with:
         root-reserve-mb: 2048
-        swap-size-mb: 1024  # 增大 swap 到 1GB，避免内存不足
+        swap-size-mb: 1024
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
@@ -70,7 +70,7 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo -E apt-get -qq update || sudo -E apt-get -qq update  # 添加重试
+        sudo -E apt-get -qq update || sudo -E apt-get -qq update
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
@@ -85,15 +85,23 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
-    - name: Clone source code and setup build directory
+    - name: Setup build directory
       working-directory: ./
       run: |
         # 清理无关分区
         sudo rm -rf /mnt/* /tmp/*
         
-        # 创建专用构建目录在 121GB 分区
+        # 创建并清理专用构建目录
         mkdir -p /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp
-        
+        rm -rf /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/build_dir
+        rm -rf /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/tmp
+        mkdir -p /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/build_dir
+        mkdir -p /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/tmp
+        sudo chown -R $USER:$GROUPS /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp
+
+    - name: Clone source code
+      working-directory: ./
+      run: |
         # 克隆源码
         rm -rf openwrt
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || (sleep 5 && git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt)
@@ -101,10 +109,15 @@ jobs:
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
         
-        # 设置构建目录为符号链接
+        # 设置符号链接
         rm -rf build_dir tmp
         ln -s /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/build_dir build_dir
         ln -s /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/tmp tmp
+        
+        # 调试：检查目录状态
+        echo "Directory status after setup:"
+        ls -ld build_dir tmp
+        readlink -f build_dir tmp
 
     - name: Restore package cache
       uses: actions/cache@v3
@@ -151,7 +164,6 @@ jobs:
         cd openwrt
         make defconfig
         make oldconfig <<< "y"
-        # 延长超时至60分钟并添加重试，若失败则中止
         timeout 60m make download -j2 V=s || timeout 30m make download -j1 V=s || { echo "Error: Download failed after retry, aborting..."; exit 1; }
         find dl -size -1024c -exec rm -f {} \;
 
@@ -250,7 +262,6 @@ jobs:
         echo "Resource usage after compilation:"
         free -m && df -hT
         echo "固件大小：$(du -sh bin/targets/*/*)"
-        # 验证固件是否生成
         if [ -d "bin/targets" ] && [ -n "$(find bin/targets -type f -name '*.bin' -size +1M)" ]; then
           echo "Firmware generated successfully!"
         else
