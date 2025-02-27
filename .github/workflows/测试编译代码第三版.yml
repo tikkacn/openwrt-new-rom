@@ -149,7 +149,7 @@ jobs:
         # First run: compile everything
         if [ ! -f "../previous_packages.txt" ]; then
           echo "First run detected, compiling all packages..."
-          make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
           make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
           # Generate package hashes
           for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
@@ -197,7 +197,7 @@ jobs:
             echo "Compiling added or updated packages..."
             while read -r pkg; do
               pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-              make package/$pkg_name/compile -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+              make package/$pkg_name/compile -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
               make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
             done < compile_list.txt
           else
@@ -209,12 +209,12 @@ jobs:
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
             echo "Source updated, rebuilding kernel..."
             make target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
-            make target/linux/compile -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make target/linux/compile -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
             make target/linux/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
           fi
 
           echo "Building target filesystem..."
-          make target/install -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make target/install -j4 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
           make target/install -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
           mv current_packages.txt ../previous_packages.txt
         fi
