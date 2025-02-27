@@ -50,7 +50,7 @@ jobs:
       uses: easimon/maximize-build-space@master
       with:
         root-reserve-mb: 2048
-        swap-size-mb: 1
+        swap-size-mb: 1024  # 增大 swap 到 1GB，避免内存不足
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
@@ -71,7 +71,7 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo -E apt-get -qq update
+        sudo -E apt-get -qq update || sudo -E apt-get -qq update  # 添加重试
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
@@ -90,7 +90,7 @@ jobs:
       working-directory: ./
       run: |
         rm -rf openwrt
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || (sleep 5 && git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt)  # 添加重试
         cd openwrt
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
@@ -158,7 +158,8 @@ jobs:
         cd openwrt
         make defconfig
         make oldconfig <<< "y"
-        timeout 30m make download -j2 V=s || echo "Warning: Download timed out or failed, proceeding..."
+        # 延长超时至60分钟并添加重试，若失败则中止
+        timeout 60m make download -j2 V=s || timeout 30m make download -j1 V=s || { echo "Error: Download failed after retry, aborting..."; exit 1; }
         find dl -size -1024c -exec rm -f {} \;
 
     - name: Detect changes and compile
@@ -168,11 +169,13 @@ jobs:
         ccache -M 5G
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
         echo "Starting compilation with ccache"
+        echo "Resource usage before compilation:"
+        free -m && df -hT
 
         # Compile toolchain if not cached
         if [ ! -d "staging_dir/toolchain-*" ]; then
           echo "Toolchain not found in cache, compiling..."
-          make -j$(nproc) tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j8 tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }} || \
           make -j1 V=s tools/install toolchain/install CCACHE_DIR=${{ env.CCACHE_DIR }}
         else
           echo "Toolchain restored from cache, skipping compilation."
@@ -187,7 +190,7 @@ jobs:
         # First run: compile everything
         if [ ! -f "../previous_packages.txt" ]; then
           echo "First run detected, compiling all packages..."
-          make -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
           make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
           # Generate package hashes
           for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
@@ -235,7 +238,7 @@ jobs:
             echo "Compiling added or updated packages..."
             while read -r pkg; do
               pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-              make package/$pkg_name/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+              make package/$pkg_name/compile -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
               make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
             done < compile_list.txt
           else
@@ -247,20 +250,30 @@ jobs:
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
             echo "Source updated, rebuilding kernel..."
             make target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
-            make target/linux/compile -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make target/linux/compile -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
             make target/linux/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
           fi
 
           echo "Building target filesystem..."
-          make target/install -j$(nproc) CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make target/install -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
           make target/install -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
           mv current_packages.txt ../previous_packages.txt
+        fi
+
+        echo "Resource usage after compilation:"
+        free -m && df -hT
+        echo "固件大小：$(du -sh bin/targets/*/*)"
+        # 验证固件是否生成
+        if [ -d "bin/targets" ] && [ -n "$(find bin/targets -type f -name '*.bin' -size +1M)" ]; then
+          echo "Firmware generated successfully!"
+        else
+          echo "Error: No valid firmware found!"
+          exit 1
         fi
 
         echo "status=success" >> $GITHUB_OUTPUT
         echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-        echo "固件大小：$(du -sh bin/targets/*/*)"
 
     - name: Save tools/toolchain cache
       uses: actions/cache@v3
