@@ -15,25 +15,19 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+  CCACHE_DIR: $GITHUB_WORKSPACE/ccache
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Before freeing up disk space
-      run: |
-        echo "Before freeing up disk space"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
-
     - name: Optimize Disk Space
       uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
       with:
         operate_sudo: "True"
         general_include: ".+"
-        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
+        general_exclude: "^GCC$|^G\\\\+\\\\+$|Clang|LLVM"
         docker_include: ".+"
         docker_prune: "True"
         docker_clean: "True"
@@ -49,19 +43,12 @@ jobs:
       uses: easimon/maximize-build-space@master
       with:
         root-reserve-mb: 2048
-        swap-size-mb: 1024
+        swap-size-mb: 1024  # 增大 swap 到 1GB，避免内存不足
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
-
-    - name: Free up disk space complete
-      run: |
-        echo "Free up disk space complete"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
 
     - name: Checkout
       uses: actions/checkout@main
@@ -70,9 +57,9 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo -E apt-get -qq update || sudo -E apt-get -qq update
+        sudo -E apt-get -qq update || sudo -E apt-get -qq update  # 添加重试
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-        bzip2 cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
         libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
         mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
@@ -89,7 +76,7 @@ jobs:
       working-directory: ./
       run: |
         rm -rf openwrt
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || (sleep 5 && git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt)
+        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || (sleep 5 && git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt)  # 添加重试
         cd openwrt
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
@@ -99,6 +86,7 @@ jobs:
       with:
         path: |
           openwrt/bin/packages
+          openwrt/package_hashes
           previous_packages.txt
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
         restore-keys: |
@@ -138,6 +126,7 @@ jobs:
         cd openwrt
         make defconfig
         make oldconfig <<< "y"
+        # 延长超时时间到60分钟并添加重试，如果失败则中止
         timeout 60m make download -j2 V=s || timeout 30m make download -j1 V=s || { echo "Error: Download failed after retry, aborting..."; exit 1; }
         find dl -size -1024c -exec rm -f {} \;
 
@@ -145,40 +134,90 @@ jobs:
       id: compile
       run: |
         cd openwrt
-        echo "Starting compilation"
+        ccache -M 5G
+        export CCACHE_DIR=${{ env.CCACHE_DIR }}
+        echo "Starting compilation with ccache"
         echo "Resource usage before compilation:"
         free -m && df -hT
 
         # Generate current package list
         grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
 
+        # Create package_hashes directory if not exists
+        mkdir -p package_hashes
+
         # First run: compile everything
         if [ ! -f "../previous_packages.txt" ]; then
           echo "First run detected, compiling all packages..."
-          make -j8 || make -j1 V=s
+          make -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+          # Generate package hashes
+          for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+            pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
+            if [ -n "$pkg_dir" ]; then
+              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "package_hashes/$pkg"
+            fi
+          done
           mv current_packages.txt ../previous_packages.txt
         else
           echo "Incremental build detected..."
           # Compare packages for additions and removals
-          if ! cmp -s current_packages.txt ../previous_packages.txt; then
-            echo "Package configuration has changed, rebuilding all packages..."
-            make -j8 || make -j1 V=s
-            mv current_packages.txt ../previous_packages.txt
-          else
-            echo "Package configuration unchanged, using cached packages."
+          comm -13 ../previous_packages.txt current_packages.txt > added_packages.txt
+          comm -23 ../previous_packages.txt current_packages.txt > removed_packages.txt
+
+          # Check for updated packages
+          touch compile_list.txt
+          for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+            pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
+            if [ -n "$pkg_dir" ]; then
+              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "package_hashes/$pkg.current"
+              if [ -f "package_hashes/$pkg" ]; then
+                if ! cmp -s "package_hashes/$pkg" "package_hashes/$pkg.current"; then
+                  echo "CONFIG_PACKAGE_$pkg=y" >> compile_list.txt
+                fi
+              else
+                echo "CONFIG_PACKAGE_$pkg=y" >> compile_list.txt
+              fi
+              mv "package_hashes/$pkg.current" "package_hashes/$pkg"
+            fi
+          done
+          cat added_packages.txt >> compile_list.txt
+
+          # Clean removed packages
+          if [ -s removed_packages.txt ]; then
+            echo "Cleaning removed packages..."
+            while read -r pkg; do
+              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              make package/$pkg_name/clean CCACHE_DIR=${{ env.CCACHE_DIR }} || echo "Warning: Failed to clean $pkg_name"
+            done < removed_packages.txt
           fi
-        fi
 
-        # Check kernel or feeds update
-        git fetch origin $REPO_BRANCH
-        if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
-          echo "Source updated, rebuilding kernel..."
-          make target/linux/clean
-          make target/linux/compile -j8 || make target/linux/compile -j1 V=s
-        fi
+          # Compile added or updated packages
+          if [ -s compile_list.txt ]; then
+            echo "Compiling added or updated packages..."
+            while read -r pkg; do
+              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              make package/$pkg_name/compile -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+              make package/$pkg_name/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+            done < compile_list.txt
+          else
+            echo "No packages to compile."
+          fi
 
-        echo "Building target filesystem..."
-        make target/install -j8 || make target/install -j1 V=s
+          # Check kernel or feeds update
+          git fetch origin $REPO_BRANCH
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
+            echo "Source updated, rebuilding kernel..."
+            make target/linux/clean CCACHE_DIR=${{ env.CCACHE_DIR }}
+            make target/linux/compile -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+            make target/linux/compile -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+          fi
+
+          echo "Building target filesystem..."
+          make target/install -j8 CCACHE_DIR=${{ env.CCACHE_DIR }} || \
+          make target/install -j1 V=s CCACHE_DIR=${{ env.CCACHE_DIR }}
+          mv current_packages.txt ../previous_packages.txt
+        fi
 
         echo "Resource usage after compilation:"
         free -m && df -hT
@@ -201,12 +240,9 @@ jobs:
       with:
         path: |
           openwrt/bin/packages
+          openwrt/package_hashes
           previous_packages.txt
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
-
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
 
     - name: Upload bin directory
       uses: actions/upload-artifact@main
