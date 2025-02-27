@@ -85,14 +85,26 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
-    - name: Clone source code
+    - name: Clone source code and setup build directory
       working-directory: ./
       run: |
+        # 清理无关分区
+        sudo rm -rf /mnt/* /tmp/*
+        
+        # 创建专用构建目录在 121GB 分区
+        mkdir -p /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp
+        
+        # 克隆源码
         rm -rf openwrt
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || (sleep 5 && git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt)  # 添加重试
+        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || (sleep 5 && git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt)
         cd openwrt
         sudo chown -R $USER:$GROUPS .
         find . -type f -name "*.sh" -exec chmod +x {} \;
+        
+        # 设置构建目录为符号链接
+        rm -rf build_dir tmp
+        ln -s /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/build_dir build_dir
+        ln -s /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp/tmp tmp
 
     - name: Restore package cache
       uses: actions/cache@v3
