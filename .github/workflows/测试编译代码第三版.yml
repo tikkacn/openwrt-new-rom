@@ -1,397 +1,269 @@
-name: 测试编译代码第三版
+name: Build OpenWrt with Package Cache
 
 on:
   repository_dispatch:
   workflow_dispatch:
+  # Uncomment below to enable scheduled builds
+  # schedule:
+  #   - cron: '0 16 * * *'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: 增量缓存优化.config
+  CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  BUILD_TEMP_DIR: /home/runner/work/openwrt-new-rom/openwrt-new-rom/build_temp
+  PACKAGES_CACHE_DIR: packages_cache
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Before freeing up disk space
+    - name: Disk Space Info Before Cleanup
       run: |
-        echo "Before freeing up disk space"
-        echo "=============================================================================="
+        echo "Disk space before cleanup:"
         df -hT
-        echo "Active swap:"
-        cat /proc/swaps
-        echo "=============================================================================="
 
-    - name: Pre-cleanup and redirect system paths
-      run: |
-        sudo mkdir -p $BUILD_TEMP_DIR
-        sudo rm -rf $BUILD_TEMP_DIR/*
-        sudo mkdir -p $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/cache
-        sudo chown -R $USER:$GROUPS $BUILD_TEMP_DIR
-        
-        # 卸载并删除所有交换文件
-        if [ -f /mnt/swapfile ]; then
-          sudo swapoff /mnt/swapfile || echo "Warning: Failed to disable swapfile at /mnt/swapfile"
-          sudo rm -f /mnt/swapfile || echo "Warning: Failed to remove /mnt/swapfile"
-        fi
-        if [ -f /swapfile ]; then
-          sudo swapoff /swapfile || echo "Warning: Failed to disable swapfile at /swapfile"
-          sudo rm -f /swapfile || echo "Warning: Failed to remove /swapfile"
-        fi
-        sudo swapoff -a
-        
-        # 清理系统路径
-        sudo rm -rf /mnt/* /tmp/* /var/cache/* /var/tmp/* /usr/local/* || echo "Warning: Some files could not be removed"
-        
-        # 重定向系统路径
-        sudo mount --bind $BUILD_TEMP_DIR/tmp /tmp
-        sudo mount --bind $BUILD_TEMP_DIR/cache /var/cache
-        sudo mount --bind $BUILD_TEMP_DIR/tmp /var/tmp
-        sudo mount --bind $BUILD_TEMP_DIR/tmp /usr/local
-        sudo mount --bind $BUILD_TEMP_DIR/tmp /mnt
-        echo "System paths redirected to $BUILD_TEMP_DIR"
-        df -hT
-        echo "Active mounts:"
-        mount | grep -E "/tmp|/var/cache|/var/tmp|/usr/local|/mnt|$BUILD_TEMP_DIR"
-
-    - name: Optimize Disk Space
-      uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
+    - name: Maximize Build Space
+      uses: easimon/maximize-build-space@master
       with:
-        operate_sudo: "True"
-        general_include: ".+"
-        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
-        docker_include: ".+"
-        docker_prune: "True"
-        docker_clean: "True"
-        apt_prune: "True"
-        apt_clean: "True"
-        homebrew_prune: "True"
-        homebrew_clean: "True"
-        npm_prune: "True"
-        npm_clean: "True"
-        os_swap: "True"
-
-    - name: Freeing up disk space without LVM
+        root-reserve-mb: 2048
+        swap-size-mb: 1024
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+        
+    - name: Remove Unused Software
       run: |
-        echo "Removing unwanted software manually..."
-        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force || echo "No docker images to prune"
-        echo "Disk usage after manual cleanup:"
-        df -hT
-        echo "Active swap:"
-        cat /proc/swaps
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell
+        sudo apt-get purge -y azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell openjdk* adoptopenjdk* mongodb* dotnet* moby* snapd* || true
 
-    - name: Free up disk space complete
+    - name: Disk Space Info After Cleanup
       run: |
-        echo "Free up disk space complete"
-        echo "=============================================================================="
+        echo "Disk space after cleanup:"
         df -hT
-        echo "=============================================================================="
 
     - name: Checkout
       uses: actions/checkout@main
 
-    - name: Initialization environment
+    - name: Initialize Environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo -E apt-get -qq update || sudo -E apt-get -qq update
+        sudo -E apt-get -qq update
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
         libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
         mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
         libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-        vim wget xmlto xxd zlib1g-dev python3-setuptools linux-headers-generic
+        vim wget xmlto xxd zlib1g-dev python3-setuptools
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
-        sudo rm -rf /etc/apt/sources.list.d/*
         sudo timedatectl set-timezone "$TZ"
-        sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
-        
-        mkdir -p $BUILD_TEMP_DIR/ccache
-        export CCACHE_DIR=$BUILD_TEMP_DIR/ccache
-        echo "CCACHE_DIR=$BUILD_TEMP_DIR/ccache" >> $GITHUB_ENV
-        export TMPDIR=$BUILD_TEMP_DIR/tmp
-        echo "TMPDIR=$BUILD_TEMP_DIR/tmp" >> $GITHUB_ENV
-        df -hT
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
 
-    - name: Setup build directory
-      working-directory: ./
+    - name: Clone Source Code
+      working-directory: /workdir
       run: |
-        rm -rf $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir $BUILD_TEMP_DIR/dl
-        mkdir -p $BUILD_TEMP_DIR/build_dir $BUILD_TEMP_DIR/tmp $BUILD_TEMP_DIR/bin $BUILD_TEMP_DIR/staging_dir $BUILD_TEMP_DIR/dl
-        sudo chown -R $USER:$GROUPS $BUILD_TEMP_DIR
-
-    - name: Clone source code
-      working-directory: ./
-      run: |
-        rm -rf openwrt
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt || (sleep 5 && git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt)
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
         cd openwrt
-        sudo chown -R $USER:$GROUPS .
-        find . -type f -name "*.sh" -exec chmod +x {} \;
-        rm -rf build_dir tmp bin staging_dir dl
-        ln -s $BUILD_TEMP_DIR/build_dir build_dir
-        ln -s $BUILD_TEMP_DIR/tmp tmp
-        ln -s $BUILD_TEMP_DIR/bin bin
-        ln -s $BUILD_TEMP_DIR/staging_dir staging_dir
-        ln -s $BUILD_TEMP_DIR/dl dl
-        echo "Directory status after setup:"
-        ls -ld build_dir tmp bin staging_dir dl
-        readlink -f build_dir tmp bin staging_dir dl
-        df -hT
+        echo "OPENWRT_ROOT=$PWD" >> $GITHUB_ENV
+        echo "PACKAGE_LASTMOD=$(date +%s)" >> $GITHUB_ENV
 
-    - name: Restore package cache
-      uses: actions/cache@v3
-      with:
-        path: |
-          openwrt/bin/packages
-          openwrt/package_hashes
-          previous_packages.txt
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
-        restore-keys: |
-          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
-
-    - name: Load custom feeds
+    - name: Load Custom Configuration
       run: |
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
-        df -hT
 
-    - name: Update feeds
+    - name: Update Feeds
       run: |
         cd openwrt
-        echo "Disk usage before updating feeds:"
-        df -hT
         ./scripts/feeds update -a
-        echo "Disk usage after updating feeds:"
-        df -hT
 
-    - name: Install feeds
+    - name: Install Feeds
       run: |
         cd openwrt
-        echo "Disk usage before installing feeds:"
-        df -hT
         ./scripts/feeds install -a
-        echo "Disk usage after installing feeds:"
-        df -hT
 
-    - name: Load custom configuration
+    - name: Load Final Configuration
       run: |
-        [ -e files ] && mv files openwrt/files
-        if [ ! -e "$CONFIG_FILE" ]; then
-          echo "Error: $CONFIG_FILE not found in $GITHUB_WORKSPACE!" >&2
-          ls -la $GITHUB_WORKSPACE
-          exit 1
-        fi
-        echo "Copying $CONFIG_FILE to openwrt/.config..."
-        cp $CONFIG_FILE openwrt/.config
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
-        if [ ! -f .config ]; then
-          echo "Error: .config not found after copying!"
-          exit 1
-        fi
-        echo ".config loaded successfully:"
-        ls -l .config
-        df -hT
-
-    - name: Download package and resolve dependencies
-      run: |
-        cd openwrt
-        echo "Disk usage before configuration:"
-        df -hT
-        echo "Generating OpenWrt configuration..."
-        make defconfig || { echo "Error: make defconfig failed"; exit 1; }
-        echo "Updating kernel configuration..."
-        make kernel_oldconfig <<< "y" || { echo "Error: make kernel_oldconfig failed"; exit 1; }
-        KERNEL_CONFIG="build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config"
-        if [ ! -f "$KERNEL_CONFIG" ]; then
-          echo "Error: Kernel .config not generated at $KERNEL_CONFIG!"
-          ls -l build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/ || echo "Directory not found"
-          exit 1
-        fi
-        echo "Kernel .config generated successfully:"
-        ls -l "$KERNEL_CONFIG"
-        echo "Disk usage before download:"
-        df -hT
-        export DL_DIR=$BUILD_TEMP_DIR/dl
-        timeout 60m make download -j2 V=s || timeout 30m make download -j1 V=s || { echo "Error: Download failed after retry, aborting..."; exit 1; }
-        find dl -size -1024c -exec rm -f {} \;
-        echo "Disk usage after download:"
-        df -hT
-
-    - name: Detect changes and compile
-      id: compile
-      run: |
-        cd openwrt
-        echo "Starting compilation"
-        echo "Resource usage before compilation:"
-        free -m && df -hT
-        export STAGING_DIR=$BUILD_TEMP_DIR/staging_dir
-        export BUILD_DIR=$BUILD_TEMP_DIR/build_dir
-        export TMP_DIR=$BUILD_TEMP_DIR/tmp
-        export BIN_DIR=$BUILD_TEMP_DIR/bin
-        export DL_DIR=$BUILD_TEMP_DIR/dl
         
-        echo "Compiling toolchain..."
-        make -j8 tools/install toolchain/install || \
-        make -j1 V=s tools/install toolchain/install
+    - name: Generate Config Hash
+      id: config_hash
+      run: |
+        cd openwrt
+        # Generate hash of feeds.conf.default and .config for package section
+        grep "^CONFIG_PACKAGE_" .config | sort > package_configs.txt
+        PACKAGE_CONFIG_HASH=$(sha256sum package_configs.txt | cut -d' ' -f1)
+        FEEDS_HASH=$(sha256sum feeds.conf.default | cut -d' ' -f1)
+        # Combine feeds and package config hash
+        COMBINED_HASH="${FEEDS_HASH}_${PACKAGE_CONFIG_HASH}"
+        echo "COMBINED_HASH=${COMBINED_HASH}" >> $GITHUB_ENV
+        echo "combined_hash=${COMBINED_HASH}" >> $GITHUB_OUTPUT
+        echo "Generated hash: ${COMBINED_HASH}"
 
-        grep "^CONFIG_PACKAGE" .config | sort > current_packages.txt
-        mkdir -p package_hashes
-
-        if [ ! -f "../previous_packages.txt" ]; then
-          echo "First run detected, compiling all packages..."
-          make -j8 || \
-          make -j1 V=s
-          for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
-            pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
-            if [ -n "$pkg_dir" ]; then
-              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "package_hashes/$pkg"
-            fi
-          done
-          mv current_packages.txt ../previous_packages.txt
-        else
-          echo "Incremental build detected..."
-          comm -13 ../previous_packages.txt current_packages.txt > added_packages.txt
-          comm -23 ../previous_packages.txt current_packages.txt > removed_packages.txt
-
-          touch compile_list.txt
-          for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
-            pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
-            if [ -n "$pkg_dir" ]; then
-              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "package_hashes/$pkg.current"
-              if [ -f "package_hashes/$pkg" ]; then
-                if ! cmp -s "package_hashes/$pkg" "package_hashes/$pkg.current"; then
-                  echo "CONFIG_PACKAGE_$pkg=y" >> compile_list.txt
-                fi
-              else
-                echo "CONFIG_PACKAGE_$pkg=y" >> compile_list.txt
-              fi
-              mv "package_hashes/$pkg.current" "package_hashes/$pkg"
-            fi
-          done
-          cat added_packages.txt >> compile_list.txt
-
-          if [ -s removed_packages.txt ]; then
-            echo "Cleaning removed packages..."
-            while read -r pkg; do
-              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-              make package/$pkg_name/clean || echo "Warning: Failed to clean $pkg_name"
-            done < removed_packages.txt
-          fi
-
-          if [ -s compile_list.txt ]; then
-            echo "Compiling added or updated packages..."
-            while read -r pkg; do
-              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-              make package/$pkg_name/compile -j8 || \
-              make package/$pkg_name/compile -j1 V=s
-            done < compile_list.txt
-          else
-            echo "No packages to compile."
-          fi
-
-          git fetch origin $REPO_BRANCH
-          if [ ! -f "build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.75/.config" ] || [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ]; then
-            echo "Source updated or kernel .config missing, rebuilding kernel..."
-            make target/linux/clean
-            make target/linux/compile -j8 || \
-            make target/linux/compile -j1 V=s
-          fi
-
-          echo "Building target filesystem..."
-          make target/install -j8 || \
-          make target/install -j1 V=s
-          mv current_packages.txt ../previous_packages.txt
-        fi
-
-        echo "Resource usage after compilation:"
-        free -m && df -hT
-        echo "固件大小：$(du -sh bin/targets/*/*)"
-        if [ -d "bin/targets" ] && [ -n "$(find bin/targets -type f -name '*.bin' -size +1M)" ]; then
-          echo "Firmware generated successfully!"
-        else
-          echo "Error: No valid firmware found!"
-          exit 1
-        fi
-
-        echo "status=success" >> $GITHUB_OUTPUT
-        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    - name: Save package cache
+    # Try to restore package cache based on config hash
+    - name: Restore Package Cache
+      id: cache-packages
       uses: actions/cache@v3
-      if: steps.compile.outputs.status == 'success'
       with:
         path: |
+          openwrt/staging_dir/packages
+          openwrt/staging_dir/hostpkg
+          openwrt/build_dir/target-*/packages
+          openwrt/build_dir/hostpkg
           openwrt/bin/packages
-          openwrt/package_hashes
-          previous_packages.txt
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+        key: packages-${{ env.COMBINED_HASH }}
+        restore-keys: |
+          packages-${{ env.COMBINED_HASH }}
 
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
+    # Setup ccache
+    - name: Setup ccache
+      run: |
+        echo "Setting up ccache..."
+        mkdir -p ~/.ccache
+        echo "max_size = 5G" > ~/.ccache/ccache.conf
+        echo "compression = true" >> ~/.ccache/ccache.conf
+        echo "compression_level = 9" >> ~/.ccache/ccache.conf
+        echo "hash_dir = false" >> ~/.ccache/ccache.conf
+        echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+        echo "Using ccache directory: $HOME/.ccache"
 
-    - name: Cleanup temporary files
+    - name: Make Defconfig
+      run: |
+        cd openwrt
+        make defconfig
+        
+    - name: Download Package Sources
+      id: download
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Packages Only With Cache
+      id: compile-packages
+      run: |
+        cd openwrt
+        echo "::group::Compile Packages"
+        
+        # Set CCACHE environment
+        export CCACHE_DIR=$HOME/.ccache
+        ccache -s
+        
+        # If package cache was not found or partially found
+        echo "Building all packages..."
+        
+        # First identify all selected packages
+        grep "^CONFIG_PACKAGE_" .config | cut -d= -f1 | sed 's/CONFIG_PACKAGE_//' > selected_packages.txt
+        
+        # Build all packages specifically with progressive fallback
+        while IFS= read -r pkg; do
+          echo "Building package: $pkg"
+          make package/${pkg}/compile -j$(nproc) || \
+          make package/${pkg}/compile -j8 || \
+          make package/${pkg}/compile -j4 || \
+          make package/${pkg}/compile -j1 V=s
+        done < selected_packages.txt
+        
+        # Display ccache stats after building
+        ccache -s
+        
+        echo "::endgroup::"
+        
+        # Package compilation timestamp for reference
+        echo "PACKAGES_TIMESTAMP=$(date +%s)" >> $GITHUB_ENV
+
+    - name: Compile Firmware
+      id: compile-firmware
+      run: |
+        cd openwrt
+        echo "::group::Compile Firmware"
+        
+        # Set CCACHE environment
+        export CCACHE_DIR=$HOME/.ccache
+        
+        # Build the rest of the firmware with progressive fallback
+        echo "Building firmware with progressive parallelism..."
+        make -j$(nproc) || \
+        make -j8 || \
+        make -j4 || \
+        make -j1 V=s
+        
+        echo "::endgroup::"
+        
+        echo "status=success" >> $GITHUB_OUTPUT
+        
+        # Detect device name for artifact naming
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config > deviceinfo
+        if [ -s deviceinfo ]; then
+          DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')
+        else
+          DEVICE_NAME=$(grep '^CONFIG_TARGET.*=y' .config | grep -v '=m' | sed -r 's/CONFIG_TARGET_(.*)=y/\1/' | head -1)
+        fi
+        
+        echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        
+        # Show firmware size
+        echo "Firmware size:"
+        du -h bin/targets/*/*/* 2>/dev/null || echo "No firmware found"
+
+    - name: Check Space Usage
       if: always()
       run: |
-        sudo umount /tmp || echo "No /tmp mount to remove"
-        sudo umount /var/cache || echo "No /var/cache mount to remove"
-        sudo umount /var/tmp || echo "No /var/tmp mount to remove"
-        sudo umount /usr/local || echo "No /usr/local mount to remove"
-        sudo umount /mnt || echo "No /mnt mount to remove"
-        sudo rm -rf /mnt/* /tmp/* /var/cache/* /var/tmp/* /usr/local/*
+        echo "Space usage after compilation:"
+        df -hT
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
-
-    - name: Organize files
+    - name: Organize Files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: steps.compile-firmware.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload firmware directory
+    - name: Upload Firmware to Artifacts
       uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: OpenWrt-${{ env.DEVICE_NAME }}-${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
-    - name: Generate release tag
+    - name: Generate Release Tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile-firmware.outputs.status == 'success'
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
+        echo "This is an automated build of OpenWrt firmware." > release.txt
+        echo "- Device: ${{ env.DEVICE_NAME }}" >> release.txt
+        echo "- Date: $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload firmware to release
+    - name: Upload Firmware to Release
       uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
+      if: steps.tag.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -399,15 +271,15 @@ jobs:
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
-    - name: Delete workflow runs
+    - name: Clean Up Old Workflow Runs
       uses: Mattraks/delete-workflow-runs@v2
       with:
         retain_days: 1
         keep_minimum_runs: 3
 
-    - name: Remove old Releases
+    - name: Remove Old Releases
       uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true'
       with:
         keep_latest: 3
         delete_tags: true
