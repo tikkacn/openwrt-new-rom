@@ -3,7 +3,6 @@ name: 测试编译代码第三版
 on:
   repository_dispatch:
   workflow_dispatch:
-  # Uncomment below to enable scheduled builds
   # schedule:
   #   - cron: '0 16 * * *'
 
@@ -18,17 +17,14 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  PACKAGES_CACHE_DIR: packages_cache
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Disk Space Info Before Cleanup
-      run: |
-        echo "Disk space before cleanup:"
-        df -hT
+    - name: Checkout
+      uses: actions/checkout@main
 
     - name: Maximize Build Space
       uses: easimon/maximize-build-space@master
@@ -40,19 +36,6 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
-        
-    - name: Remove Unused Software
-      run: |
-        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell
-        sudo apt-get purge -y azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell openjdk* adoptopenjdk* mongodb* dotnet* moby* snapd* || true
-
-    - name: Disk Space Info After Cleanup
-      run: |
-        echo "Disk space after cleanup:"
-        df -hT
-
-    - name: Checkout
-      uses: actions/checkout@main
 
     - name: Initialize Environment
       env:
@@ -75,11 +58,9 @@ jobs:
     - name: Clone Source Code
       working-directory: /workdir
       run: |
+        df -hT
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-        cd openwrt
-        echo "OPENWRT_ROOT=$PWD" >> $GITHUB_ENV
-        echo "PACKAGE_LASTMOD=$(date +%s)" >> $GITHUB_ENV
 
     - name: Load Custom Configuration
       run: |
@@ -105,8 +86,9 @@ jobs:
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
+        make defconfig
 
-    # Try to restore package cache with a static name
+    # 使用actions/cache/restore恢复缓存，但不自动保存
     - name: Restore Package Cache
       id: cache-packages
       uses: actions/cache/restore@v3
@@ -115,99 +97,42 @@ jobs:
           openwrt/staging_dir/packages
           openwrt/staging_dir/hostpkg
           openwrt/build_dir/target-*/packages
-          openwrt/build_dir/hostpkg
           openwrt/bin/packages
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
         restore-keys: |
           packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
-    # Cache for ccache
-    - name: Restore ccache
-      uses: actions/cache/restore@v3
-      with:
-        path: ~/.ccache
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
-        restore-keys: |
-          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
-    
-    - name: Configure ccache
-      run: |
-        echo "Setting up ccache..."
-        mkdir -p ~/.ccache
-        echo "max_size = 5G" > ~/.ccache/ccache.conf
-        echo "compression = true" >> ~/.ccache/ccache.conf
-        echo "compression_level = 9" >> ~/.ccache/ccache.conf
-        echo "hash_dir = false" >> ~/.ccache/ccache.conf
-        echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
-        echo "Using ccache directory: $HOME/.ccache"
-
-    - name: Make Defconfig
-      run: |
-        cd openwrt
-        make defconfig
-        
     - name: Download Package Sources
-      id: download
       run: |
         cd openwrt
         make download -j8 || make download -j1 V=s
         find dl -size -1024c -exec ls -l {} \; || true
         find dl -size -1024c -exec rm -f {} \; || true
 
-    - name: Compile Packages Only With Cache
-      id: compile-packages
-      run: |
-        cd openwrt
-        echo "::group::Compile Packages"
-        
-        # Set CCACHE environment
-        export CCACHE_DIR=$HOME/.ccache
-        ccache -s
-        
-        # If package cache was not found or partially found
-        echo "Building all packages..."
-        
-        # First identify all selected packages
-        grep "^CONFIG_PACKAGE_" .config | cut -d= -f1 | sed 's/CONFIG_PACKAGE_//' > selected_packages.txt
-        
-        # Build all packages specifically with progressive fallback
-        while IFS= read -r pkg; do
-          echo "Building package: $pkg"
-          make package/${pkg}/compile -j$(nproc) || \
-          make package/${pkg}/compile -j8 || \
-          make package/${pkg}/compile -j4 || \
-          make package/${pkg}/compile -j1 V=s
-        done < selected_packages.txt
-        
-        # Display ccache stats after building
-        ccache -s
-        
-        echo "::endgroup::"
-        
-        # Package compilation timestamp for reference
-        echo "PACKAGES_TIMESTAMP=$(date +%s)" >> $GITHUB_ENV
-
     - name: Compile Firmware
-      id: compile-firmware
+      id: compile
       run: |
         cd openwrt
         echo "::group::Compile Firmware"
+        echo "Starting compilation..."
         
-        # Set CCACHE environment
-        export CCACHE_DIR=$HOME/.ccache
+        # Display if package cache was hit
+        if [ "${{ steps.cache-packages.outputs.cache-hit }}" = "true" ]; then
+          echo "Package cache was successfully restored!"
+          ls -la staging_dir/packages/ || echo "No packages directory"
+          ls -la bin/packages/ || echo "No bin/packages directory"
+        else
+          echo "Package cache was not found or not restored."
+        fi
         
-        # Build the rest of the firmware with progressive fallback
-        echo "Building firmware with progressive parallelism..."
-        make -j$(nproc) || \
-        make -j8 || \
-        make -j4 || \
-        make -j1 V=s
+        # Use progressive parallelism for compilation
+        make -j$(nproc) || make -j8 || make -j4 || make -j1 V=s
         
         echo "::endgroup::"
         
         echo "status=success" >> $GITHUB_OUTPUT
         
-        # Detect device name for artifact naming
+        # Detect target for artifact naming
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config > deviceinfo
         if [ -s deviceinfo ]; then
           DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')
@@ -220,38 +145,23 @@ jobs:
         
         # Show firmware size
         echo "Firmware size:"
-        du -h bin/targets/*/*/* 2>/dev/null || echo "No firmware found"
+        du -h bin/targets/*/* 2>/dev/null || echo "No firmware found"
 
-    # Save the package cache only after successful compilation
+    # 只在成功编译后保存缓存
     - name: Save Package Cache
-      if: steps.compile-firmware.outputs.status == 'success'
+      if: steps.compile.outputs.status == 'success'
       uses: actions/cache/save@v3
       with:
         path: |
           openwrt/staging_dir/packages
           openwrt/staging_dir/hostpkg
           openwrt/build_dir/target-*/packages
-          openwrt/build_dir/hostpkg
           openwrt/bin/packages
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
-    # Save ccache after successful compilation
-    - name: Save ccache
-      if: steps.compile-firmware.outputs.status == 'success'
-      uses: actions/cache/save@v3
-      with:
-        path: ~/.ccache
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
-
-    - name: Check Space Usage
-      if: always()
-      run: |
-        echo "Space usage after compilation:"
-        df -hT
-
     - name: Organize Files
       id: organize
-      if: steps.compile-firmware.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
@@ -267,13 +177,14 @@ jobs:
 
     - name: Generate Release Tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && steps.compile-firmware.outputs.status == 'success'
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
         echo "This is an automated build of OpenWrt firmware." > release.txt
         echo "- Device: ${{ env.DEVICE_NAME }}" >> release.txt
         echo "- Date: $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
+        echo "- Package cache hit: ${{ steps.cache-packages.outputs.cache-hit }}" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload Firmware to Release
