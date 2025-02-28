@@ -11,8 +11,6 @@ env:
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
@@ -64,12 +62,9 @@ jobs:
 
     - name: Load Custom Configuration
       run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default || true
+        [ -e files ] && mv files openwrt/files || true
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config || true
 
     - name: Update Feeds
       run: |
@@ -81,11 +76,9 @@ jobs:
         cd openwrt
         ./scripts/feeds install -a
 
-    - name: Load Final Configuration
+    - name: Configure Build
       run: |
-        chmod +x $DIY_P2_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
         make defconfig
 
     # 使用actions/cache/restore恢复缓存，但不自动保存
