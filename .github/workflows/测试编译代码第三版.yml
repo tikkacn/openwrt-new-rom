@@ -105,25 +105,11 @@ jobs:
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
-        
-    - name: Generate Config Hash
-      id: config_hash
-      run: |
-        cd openwrt
-        # Generate hash of feeds.conf.default and .config for package section
-        grep "^CONFIG_PACKAGE_" .config | sort > package_configs.txt
-        PACKAGE_CONFIG_HASH=$(sha256sum package_configs.txt | cut -d' ' -f1)
-        FEEDS_HASH=$(sha256sum feeds.conf.default | cut -d' ' -f1)
-        # Combine feeds and package config hash
-        COMBINED_HASH="${FEEDS_HASH}_${PACKAGE_CONFIG_HASH}"
-        echo "COMBINED_HASH=${COMBINED_HASH}" >> $GITHUB_ENV
-        echo "combined_hash=${COMBINED_HASH}" >> $GITHUB_OUTPUT
-        echo "Generated hash: ${COMBINED_HASH}"
 
-    # Try to restore package cache based on config hash
+    # Try to restore package cache with a static name
     - name: Restore Package Cache
       id: cache-packages
-      uses: actions/cache@v3
+      uses: actions/cache/restore@v3
       with:
         path: |
           openwrt/staging_dir/packages
@@ -131,12 +117,20 @@ jobs:
           openwrt/build_dir/target-*/packages
           openwrt/build_dir/hostpkg
           openwrt/bin/packages
-        key: packages-${{ env.COMBINED_HASH }}
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
         restore-keys: |
-          packages-${{ env.COMBINED_HASH }}
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
-    # Setup ccache
-    - name: Setup ccache
+    # Cache for ccache
+    - name: Restore ccache
+      uses: actions/cache/restore@v3
+      with:
+        path: ~/.ccache
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+        restore-keys: |
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+    
+    - name: Configure ccache
       run: |
         echo "Setting up ccache..."
         mkdir -p ~/.ccache
@@ -156,9 +150,9 @@ jobs:
       id: download
       run: |
         cd openwrt
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+        make download -j8 || make download -j1 V=s
+        find dl -size -1024c -exec ls -l {} \; || true
+        find dl -size -1024c -exec rm -f {} \; || true
 
     - name: Compile Packages Only With Cache
       id: compile-packages
@@ -227,6 +221,27 @@ jobs:
         # Show firmware size
         echo "Firmware size:"
         du -h bin/targets/*/*/* 2>/dev/null || echo "No firmware found"
+
+    # Save the package cache only after successful compilation
+    - name: Save Package Cache
+      if: steps.compile-firmware.outputs.status == 'success'
+      uses: actions/cache/save@v3
+      with:
+        path: |
+          openwrt/staging_dir/packages
+          openwrt/staging_dir/hostpkg
+          openwrt/build_dir/target-*/packages
+          openwrt/build_dir/hostpkg
+          openwrt/bin/packages
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+
+    # Save ccache after successful compilation
+    - name: Save ccache
+      if: steps.compile-firmware.outputs.status == 'success'
+      uses: actions/cache/save@v3
+      with:
+        path: ~/.ccache
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
     - name: Check Space Usage
       if: always()
