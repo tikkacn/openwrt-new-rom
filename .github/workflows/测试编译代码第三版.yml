@@ -3,8 +3,6 @@ name: 测试编译代码第三版
 on:
   repository_dispatch:
   workflow_dispatch:
-  # schedule:
-  #   - cron: '0 16 * * *'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
@@ -13,330 +11,146 @@ env:
   CONFIG_FILE: 增量缓存优化.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  CCACHE_DIR: $GITHUB_WORKSPACE/ccache
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: 检查磁盘空间
-      run: |
-        echo "初始磁盘空间状态"
-        df -hT
+    - name: 检查初始磁盘空间
+      run: df -hT
 
     - name: 优化磁盘空间
-      uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
-      with:
-        operate_sudo: "True"
-        general_include: ".+"
-        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
-        docker_include: ".+"
-        docker_prune: "True"
-        docker_clean: "True"
-        apt_prune: "True"
-        apt_clean: "True"
-        homebrew_prune: "True"
-        homebrew_clean: "True"
-        npm_prune: "True"
-        npm_clean: "True"
-        os_swap: "True"
-
-    - name: 释放更多磁盘空间
       uses: easimon/maximize-build-space@master
       with:
         root-reserve-mb: 1024
-        swap-size-mb: 1
+        swap-size-mb: 2048
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
 
-    - name: 清理后的磁盘空间
-      run: |
-        echo "清理后的磁盘空间状态"
-        df -hT
-
-    - name: 检出代码
-      uses: actions/checkout@main
+    - name: 检出工作流代码
+      uses: actions/checkout@v4
 
     - name: 初始化编译环境
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
-        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-        vim wget xmlto xxd zlib1g-dev python3-setuptools
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
+        sudo apt-get update -qq
+        sudo apt-get install -qq -y --no-install-recommends \
+          build-essential curl gawk gcc-multilib g++-multilib git libncurses5-dev \
+          libssl-dev python3 rsync subversion unzip wget zlib1g-dev
+        sudo apt-get autoremove -y --purge
+        sudo apt-get clean -y
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
 
     - name: 克隆源代码
       run: |
-        echo "检查可用磁盘空间和挂载点"
-        df -hT
-        
-        # 使用扩展的LVM卷作为工作目录
-        WORK_DIR="/home/runner/work/openwrt-new-rom/openwrt-new-rom"
-        if [ -d "$WORK_DIR" ] && [ $(df -h "$WORK_DIR" | tail -1 | awk '{print $4}' | sed 's/G//') -gt 50 ]; then
-          echo "使用扩展的LVM卷作为工作目录: $WORK_DIR"
-          cd $WORK_DIR
-        else
-          echo "使用标准工作目录: /workdir"
-          cd /workdir
-        fi
-        
-        # 克隆代码
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-        
-        # 创建软链接到GITHUB_WORKSPACE
-        echo "工作目录: $PWD"
-        ln -sf $PWD/openwrt $GITHUB_WORKSPACE/openwrt
-        
-        # 输出当前工作目录路径以便后续使用
-        echo "OPENWRT_ROOT=$PWD/openwrt" >> $GITHUB_ENV
+        cd /workdir
+        git clone --depth=1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
+        ln -sf /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
+        echo "OPENWRT_ROOT=/workdir/openwrt" >> $GITHUB_ENV
 
-    - name: 恢复缓存的工具链
-      uses: actions/cache/restore@v3
-      id: cache-toolchain
-      with:
-        path: |
-          ${{ env.OPENWRT_ROOT }}/staging_dir/toolchain-*
-          ${{ env.OPENWRT_ROOT }}/build_dir/toolchain-*
-        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
-        restore-keys: |
-          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+    - name: 计算 Feeds 和 Config 的哈希
+      id: hash
+      run: |
+        cd openwrt
+        [ -e "$GITHUB_WORKSPACE/$FEEDS_CONF" ] && cp "$GITHUB_WORKSPACE/$FEEDS_CONF" feeds.conf.default
+        echo "feeds_hash=$(sha256sum feeds.conf.default | awk '{print $1}')" >> $GITHUB_OUTPUT
+        [ -e "$GITHUB_WORKSPACE/$CONFIG_FILE" ] && cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
+        grep "^CONFIG_PACKAGE_" .config | sort > package_list.txt
+        echo "package_hash=$(sha256sum package_list.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
 
-    - name: 恢复软件包缓存
-      uses: actions/cache/restore@v3
+    - name: 恢复非核心包缓存
+      uses: actions/cache@v4
       id: cache-packages
       with:
-        path: |
-          ${{ env.OPENWRT_ROOT }}/bin/packages
-          ${{ env.OPENWRT_ROOT }}/build_dir/target-*/packages
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+        path: ${{ env.OPENWRT_ROOT }}/bin/packages
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ steps.hash.outputs.feeds_hash }}-${{ steps.hash.outputs.package_hash }}
         restore-keys: |
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ steps.hash.outputs.feeds_hash }}-
           packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
-    - name: 初始化 ccache
-      uses: actions/cache/restore@v3
-      id: cache-ccache
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.run_id }}
-        restore-keys: |
-          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
-
-    - name: 加载自定义feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
-
-    - name: 更新feeds
+    - name: 加载和更新 Feeds
       run: |
         cd openwrt
         ./scripts/feeds update -a
-
-    - name: 安装feeds
-      run: |
-        cd openwrt
         ./scripts/feeds install -a
 
-    - name: 加载自定义配置
+    - name: 加载自定义配置和脚本
       run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        [ -e "$GITHUB_WORKSPACE/files" ] && mv "$GITHUB_WORKSPACE/files" .
+        chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH" "$GITHUB_WORKSPACE/$DIY_P2_SH"
+        "$GITHUB_WORKSPACE/$DIY_P1_SH"
+        "$GITHUB_WORKSPACE/$DIY_P2_SH"
 
     - name: 下载软件包源码
-      id: package
       run: |
         cd openwrt
         make defconfig
-        make download -j8 || make download -j1
-        find dl -size -1024c -exec ls -l {} \; || true
-        find dl -size -1024c -exec rm -f {} \; || true
-        
-        # 定期清理下载缓存，避免磁盘空间不足
-        du -sh dl/
-        find dl/ -type f -not -name "*.tar*" -not -name "*.gz*" -not -name "*.xz*" -delete
-
-    - name: 初始化 ccache
-      run: |
-        cd openwrt
-        mkdir -p $CCACHE_DIR
-        ccache -M 2G  # 降低ccache大小以节省空间
-        ccache -o compression=true
-        ccache -o compression_level=9
-        ccache -z
-
-    - name: 获取当前源码哈希值
-      id: source-hash
-      run: |
-        cd openwrt
-        echo "source_hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-        echo "feeds_hash=$(sha256sum feeds.conf.default | awk '{print $1}')" >> $GITHUB_OUTPUT
-
-    - name: 提取当前配置包列表
-      id: package-list
-      run: |
-        cd openwrt
-        grep "^CONFIG_PACKAGE_" .config | sort > current_packages.txt
-        echo "package_hash=$(sha256sum current_packages.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
-        echo "工具链缓存状态: ${{ steps.cache-toolchain.outputs.cache-hit || 'miss' }}"
-        echo "软件包缓存状态: ${{ steps.cache-packages.outputs.cache-hit || 'miss' }}"
-        echo "当前包设置哈希: ${{ steps.package-list.outputs.package_hash }}"
+        make download -j$(nproc) || make download -j1 V=s
 
     - name: 编译固件
       id: compile
       run: |
         cd openwrt
-        echo "开始编译，使用ccache加速"
-        export CCACHE_DIR=${{ env.CCACHE_DIR }}
-        
-        # 定期清理临时文件，防止磁盘空间不足
-        function clean_temp_files() {
-          echo "清理临时文件..."
-          find /tmp -type f -name "*.o" -delete
-          rm -rf /tmp/ccache
-          sync
-          echo "当前磁盘空间状态:"
-          df -h
-        }
-        
-        # 初始显示磁盘空间
-        df -h
-
-        # 如果工具链缓存未命中，先编译工具链
-        if [ "${{ steps.cache-toolchain.outputs.cache-hit }}" != "true" ]; then
-          echo "工具链缓存未命中，先编译工具链..."
-          make -j$(nproc) tools/install toolchain/install || \
-          make -j8 tools/install toolchain/install || \
-          make -j1 V=s tools/install toolchain/install
-          clean_temp_files
-        else
-          echo "使用缓存的工具链，跳过工具链编译"
-        fi
-
-        # 编译固件，使用更保守的并行数防止内存不足
-        echo "开始编译主固件..."
-        
-        # 首先尝试使用较少的线程数，可以降低内存使用
-        make -j$(($(nproc) / 2)) || {
-          clean_temp_files
-          make -j4 || {
-            clean_temp_files
-            make -j2 || {
-              clean_temp_files
-              make -j1 V=s
-            }
-          }
-        }
-
-        echo "编译完成，统计ccache使用情况"
-        ccache -s
-
-        echo "固件大小：$(du -sh bin/targets/*/*)"
-        
+        make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: 保存工具链缓存
-      uses: actions/cache/save@v3
+    - name: 保存非核心包缓存
+      uses: actions/cache/save@v4
       if: steps.compile.outputs.status == 'success'
       with:
-        path: |
-          ${{ env.OPENWRT_ROOT }}/staging_dir/toolchain-*
-          ${{ env.OPENWRT_ROOT }}/build_dir/toolchain-*
-        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+        path: ${{ env.OPENWRT_ROOT }}/bin/packages
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ steps.hash.outputs.feeds_hash }}-${{ steps.hash.outputs.package_hash }}
 
-    - name: 保存软件包缓存
-      uses: actions/cache/save@v3
-      if: steps.compile.outputs.status == 'success'
-      with:
-        path: |
-          ${{ env.OPENWRT_ROOT }}/bin/packages
-          ${{ env.OPENWRT_ROOT }}/build_dir/target-*/packages
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
-
-    - name: 保存ccache缓存
-      uses: actions/cache/save@v3
-      if: steps.compile.outputs.status == 'success'
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
-
-    - name: 检查空间使用情况
-      if: (!cancelled())
-      run: df -hT
-
-    - name: 整理文件
+    - name: 整理固件文件
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: env.UPLOAD_FIRMWARE == 'true' && steps.compile.outputs.status == 'success'
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: 上传固件到artifacts
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
+    - name: 上传固件到 Artifacts
+      uses: actions/upload-artifact@v4
+      if: steps.organize.outcome == 'success'
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: OpenWrt_firmware_${{ env.DEVICE_NAME }}_${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
-    - name: 生成发布标签
+    - name: 生成发布信息
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        echo "构建时间: $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
+        echo "构建时间: $(date +"%Y-%m-%d %H:%M:%S")" > release.txt
         echo "设备型号: ${{ env.DEVICE_NAME }}" >> release.txt
-        echo "使用源码: ${{ steps.source-hash.outputs.source_hash }}" >> release.txt
-        echo "packages状态: ${{ steps.cache-packages.outputs.cache-hit || '全新编译' }}" >> release.txt
         echo "固件大小: $(du -sh ${{ env.FIRMWARE }})" >> release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: 上传固件到Releases
-      uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: 上传固件到 Releases
+      uses: softprops/action-gh-release@v2
+      if: steps.tag.outcome == 'success'
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: 清理旧的工作流运行
-      uses: Mattraks/delete-workflow-runs@v2
+    - name: 清理旧的工作流
+      if: always()
+      uses: actions/delete-workflow-runs@v2
       with:
         retain_days: 1
         keep_minimum_runs: 3
-
-    - name: 清理旧版本
-      uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
