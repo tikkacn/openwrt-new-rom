@@ -1,4 +1,4 @@
-name: Build OpenWrt with Package Cache
+name: 测试编译代码第三版
 
 on:
   repository_dispatch:
