@@ -30,9 +30,26 @@ jobs:
         df -hT
 
     - name: 优化磁盘空间
+      uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
+      with:
+        operate_sudo: "True"
+        general_include: ".+"
+        general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
+        docker_include: ".+"
+        docker_prune: "True"
+        docker_clean: "True"
+        apt_prune: "True"
+        apt_clean: "True"
+        homebrew_prune: "True"
+        homebrew_clean: "True"
+        npm_prune: "True"
+        npm_clean: "True"
+        os_swap: "True"
+
+    - name: 释放更多磁盘空间
       uses: easimon/maximize-build-space@master
       with:
-        root-reserve-mb: 2048
+        root-reserve-mb: 1024
         swap-size-mb: 1
         remove-dotnet: 'true'
         remove-android: 'true'
@@ -67,19 +84,37 @@ jobs:
         sudo chown $USER:$GROUPS /workdir
 
     - name: 克隆源代码
-      working-directory: /workdir
       run: |
+        echo "检查可用磁盘空间和挂载点"
         df -hT
+        
+        # 使用扩展的LVM卷作为工作目录
+        WORK_DIR="/home/runner/work/openwrt-new-rom/openwrt-new-rom"
+        if [ -d "$WORK_DIR" ] && [ $(df -h "$WORK_DIR" | tail -1 | awk '{print $4}' | sed 's/G//') -gt 50 ]; then
+          echo "使用扩展的LVM卷作为工作目录: $WORK_DIR"
+          cd $WORK_DIR
+        else
+          echo "使用标准工作目录: /workdir"
+          cd /workdir
+        fi
+        
+        # 克隆代码
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        
+        # 创建软链接到GITHUB_WORKSPACE
+        echo "工作目录: $PWD"
+        ln -sf $PWD/openwrt $GITHUB_WORKSPACE/openwrt
+        
+        # 输出当前工作目录路径以便后续使用
+        echo "OPENWRT_ROOT=$PWD/openwrt" >> $GITHUB_ENV
 
     - name: 恢复缓存的工具链
       uses: actions/cache/restore@v3
       id: cache-toolchain
       with:
         path: |
-          /workdir/openwrt/staging_dir/toolchain-*
-          /workdir/openwrt/build_dir/toolchain-*
+          ${{ env.OPENWRT_ROOT }}/staging_dir/toolchain-*
+          ${{ env.OPENWRT_ROOT }}/build_dir/toolchain-*
         key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
         restore-keys: |
           toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
@@ -89,11 +124,8 @@ jobs:
       id: cache-packages
       with:
         path: |
-          /workdir/openwrt/bin/packages
-          /workdir/openwrt/build_dir/target-*/root-*
-          /workdir/openwrt/build_dir/target-*/packages
-          /workdir/openwrt/staging_dir/packages
-          /workdir/openwrt/staging_dir/target-*/packages
+          ${{ env.OPENWRT_ROOT }}/bin/packages
+          ${{ env.OPENWRT_ROOT }}/build_dir/target-*/packages
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
         restore-keys: |
           packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
@@ -137,15 +169,19 @@ jobs:
       run: |
         cd openwrt
         make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+        make download -j8 || make download -j1
+        find dl -size -1024c -exec ls -l {} \; || true
+        find dl -size -1024c -exec rm -f {} \; || true
+        
+        # 定期清理下载缓存，避免磁盘空间不足
+        du -sh dl/
+        find dl/ -type f -not -name "*.tar*" -not -name "*.gz*" -not -name "*.xz*" -delete
 
     - name: 初始化 ccache
       run: |
         cd openwrt
         mkdir -p $CCACHE_DIR
-        ccache -M 10G
+        ccache -M 2G  # 降低ccache大小以节省空间
         ccache -o compression=true
         ccache -o compression_level=9
         ccache -z
@@ -173,6 +209,19 @@ jobs:
         cd openwrt
         echo "开始编译，使用ccache加速"
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
+        
+        # 定期清理临时文件，防止磁盘空间不足
+        function clean_temp_files() {
+          echo "清理临时文件..."
+          find /tmp -type f -name "*.o" -delete
+          rm -rf /tmp/ccache
+          sync
+          echo "当前磁盘空间状态:"
+          df -h
+        }
+        
+        # 初始显示磁盘空间
+        df -h
 
         # 如果工具链缓存未命中，先编译工具链
         if [ "${{ steps.cache-toolchain.outputs.cache-hit }}" != "true" ]; then
@@ -180,16 +229,25 @@ jobs:
           make -j$(nproc) tools/install toolchain/install || \
           make -j8 tools/install toolchain/install || \
           make -j1 V=s tools/install toolchain/install
+          clean_temp_files
         else
           echo "使用缓存的工具链，跳过工具链编译"
         fi
 
-        # 编译固件
+        # 编译固件，使用更保守的并行数防止内存不足
         echo "开始编译主固件..."
-        make -j$(nproc) || \
-        make -j8 || \
-        make -j4 || \
-        make -j1 V=s
+        
+        # 首先尝试使用较少的线程数，可以降低内存使用
+        make -j$(($(nproc) / 2)) || {
+          clean_temp_files
+          make -j4 || {
+            clean_temp_files
+            make -j2 || {
+              clean_temp_files
+              make -j1 V=s
+            }
+          }
+        }
 
         echo "编译完成，统计ccache使用情况"
         ccache -s
@@ -205,8 +263,8 @@ jobs:
       if: steps.compile.outputs.status == 'success'
       with:
         path: |
-          /workdir/openwrt/staging_dir/toolchain-*
-          /workdir/openwrt/build_dir/toolchain-*
+          ${{ env.OPENWRT_ROOT }}/staging_dir/toolchain-*
+          ${{ env.OPENWRT_ROOT }}/build_dir/toolchain-*
         key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
     - name: 保存软件包缓存
@@ -214,11 +272,8 @@ jobs:
       if: steps.compile.outputs.status == 'success'
       with:
         path: |
-          /workdir/openwrt/bin/packages
-          /workdir/openwrt/build_dir/target-*/root-*
-          /workdir/openwrt/build_dir/target-*/packages
-          /workdir/openwrt/staging_dir/packages
-          /workdir/openwrt/staging_dir/target-*/packages
+          ${{ env.OPENWRT_ROOT }}/bin/packages
+          ${{ env.OPENWRT_ROOT }}/build_dir/target-*/packages
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
     - name: 保存ccache缓存
