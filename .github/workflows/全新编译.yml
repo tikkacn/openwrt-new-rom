@@ -1,0 +1,123 @@
+name: 全新编译
+
+on:
+  workflow_dispatch:  # 手动触发
+  push:               # 推送代码时触发
+    branches:
+      - main
+
+env:
+  # 全局环境变量
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  CONFIG_REPO_URL: https://github.com/tikkacn/openwrt-new-rom
+  CONFIG_BRANCH: main
+  FEEDS_CONF_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/feeds.conf.default
+  CONFIG_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/%E5%A2%9E%E9%87%8F%E7%BC%93%E5%AD%98%E4%BC%98%E5%8C%96.config
+  WORK_DIR: ${{github.workspace}}
+  CACHE_DIR: ${{github.workspace}}/cache
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04  # 使用 Ubuntu 22.04 环境
+    steps:
+      # 1. 检出代码
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      # 2. 清理磁盘空间
+      - name: Clean Up Disk Space
+        run: |
+          echo "Disk space before cleanup:"
+          df -h
+          # 移除不必要的预装软件和缓存
+          sudo apt-get remove -y --purge '^dotnet-.*' '^llvm-.*' 'powershell' 'azure-cli' 'snapd' 'google-*' 'mono-*' 'mysql-*' 'postgresql-*' || true
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          # 清理 Docker 镜像和容器（如果存在）
+          docker system prune -a -f --volumes || true
+          # 清理临时文件和缓存
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /snap
+          sudo rm -rf /tmp/* /var/tmp/* /var/cache/* || true
+          echo "Disk space after cleanup:"
+          df -h
+
+      # 3. 安装 Python 2.7（Ubuntu 22.04 默认不支持）
+      - name: Install Python 2.7
+        run: |
+          sudo add-apt-repository ppa:deadsnakes/ppa -y
+          sudo apt-get update
+          sudo apt-get install -y python2.7
+
+      # 4. 设置构建环境
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo -E apt-get -qq install \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext \
+            gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+            mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 \
+            python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools subversion \
+            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev python3-setuptools
+
+      # 5. 创建缓存目录并恢复缓存
+      - name: Restore Package Cache
+        uses: actions/cache@v3
+        with:
+          path: ${{env.CACHE_DIR}}/dl
+          key: ${{runner.os}}-openwrt-packages-${{github.sha}}
+          restore-keys: |
+            ${{runner.os}}-openwrt-packages-
+
+      # 6. 克隆 OpenWrt LEDE 源码
+      - name: Clone LEDE Source
+        run: |
+          git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
+          cd openwrt
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      # 7. 下载 feeds.conf.default 和 .config 文件
+      - name: Download Configuration Files
+        run: |
+          curl -L -o openwrt/feeds.conf.default "$FEEDS_CONF_URL"
+          curl -L -o openwrt/.config "$CONFIG_URL"
+
+      # 8. 更新和安装 Feeds
+      - name: Update and Install Feeds
+        working-directory: ${{env.WORK_DIR}}/openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # 9. 下载并缓存 Packages
+      - name: Download Packages with Cache
+        working-directory: ${{env.WORK_DIR}}/openwrt
+        run: |
+          mkdir -p $CACHE_DIR/dl
+          ln -sf $CACHE_DIR/dl dl
+          make defconfig
+          make download -j$(nproc)
+
+      # 10. 编译固件
+      - name: Compile OpenWrt Firmware
+        working-directory: ${{env.WORK_DIR}}/openwrt
+        run: |
+          make -j$(nproc) V=s
+
+      # 11. 整理并上传固件
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v3
+        with:
+          name: OpenWrt_Firmware
+          path: ${{env.WORK_DIR}}/openwrt/bin/targets/*/*/*.bin
+
+      # 12. 整理并上传 Packages
+      - name: Upload Packages
+        uses: actions/upload-artifact@v3
+        with:
+          name: OpenWrt_Packages
+          path: ${{env.WORK_DIR}}/openwrt/bin/packages/*/*
