@@ -108,16 +108,16 @@ jobs:
         run: |
           make -j$(nproc) V=s
 
-      # 11. 整理并上传固件
+      # 11. 整理并上传固件（使用 v4）
       - name: Upload Firmware
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: OpenWrt_Firmware
           path: ${{env.WORK_DIR}}/openwrt/bin/targets/*/*/*.bin
 
-      # 12. 整理并上传 Packages
+      # 12. 整理并上传 Packages（使用 v4）
       - name: Upload Packages
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: OpenWrt_Packages
           path: ${{env.WORK_DIR}}/openwrt/bin/packages/*/*
