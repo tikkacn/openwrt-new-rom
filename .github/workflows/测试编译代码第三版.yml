@@ -10,32 +10,45 @@ env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: .config
+  CONFIG_FILE: 增量缓存优化.config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+  CCACHE_DIR: $GITHUB_WORKSPACE/ccache
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@main
+    - name: 检查磁盘空间
+      run: |
+        echo "初始磁盘空间状态"
+        df -hT
 
-    - name: Maximize Build Space
+    - name: 优化磁盘空间
       uses: easimon/maximize-build-space@master
       with:
         root-reserve-mb: 2048
-        swap-size-mb: 1024
+        swap-size-mb: 1
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
 
-    - name: Initialize Environment
+    - name: 清理后的磁盘空间
+      run: |
+        echo "清理后的磁盘空间状态"
+        df -hT
+
+    - name: 检出代码
+      uses: actions/checkout@main
+
+    - name: 初始化编译环境
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
@@ -53,136 +66,204 @@ jobs:
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
 
-    - name: Clone Source Code
+    - name: 克隆源代码
       working-directory: /workdir
       run: |
         df -hT
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    - name: Load Custom Configuration
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default || true
-        [ -e files ] && mv files openwrt/files || true
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config || true
+    - name: 恢复缓存的工具链
+      uses: actions/cache/restore@v3
+      id: cache-toolchain
+      with:
+        path: |
+          /workdir/openwrt/staging_dir/toolchain-*
+          /workdir/openwrt/build_dir/toolchain-*
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+        restore-keys: |
+          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
-    - name: Update Feeds
+    - name: 恢复软件包缓存
+      uses: actions/cache/restore@v3
+      id: cache-packages
+      with:
+        path: |
+          /workdir/openwrt/bin/packages
+          /workdir/openwrt/build_dir/target-*/root-*
+          /workdir/openwrt/build_dir/target-*/packages
+          /workdir/openwrt/staging_dir/packages
+          /workdir/openwrt/staging_dir/target-*/packages
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+        restore-keys: |
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    - name: 初始化 ccache
+      uses: actions/cache/restore@v3
+      id: cache-ccache
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ github.run_id }}
+        restore-keys: |
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    - name: 加载自定义feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: 更新feeds
       run: |
         cd openwrt
         ./scripts/feeds update -a
 
-    - name: Install Feeds
+    - name: 安装feeds
       run: |
         cd openwrt
         ./scripts/feeds install -a
 
-    - name: Configure Build
+    - name: 加载自定义配置
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: 下载软件包源码
+      id: package
       run: |
         cd openwrt
         make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
 
-    # 使用actions/cache/restore恢复缓存，但不自动保存
-    - name: Restore Package Cache
-      id: cache-packages
-      uses: actions/cache/restore@v3
-      with:
-        path: |
-          openwrt/staging_dir/packages
-          openwrt/staging_dir/hostpkg
-          openwrt/build_dir/target-*/packages
-          openwrt/bin/packages
-        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
-        restore-keys: |
-          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
-
-    - name: Download Package Sources
+    - name: 初始化 ccache
       run: |
         cd openwrt
-        make download -j8 || make download -j1 V=s
-        find dl -size -1024c -exec ls -l {} \; || true
-        find dl -size -1024c -exec rm -f {} \; || true
+        mkdir -p $CCACHE_DIR
+        ccache -M 10G
+        ccache -o compression=true
+        ccache -o compression_level=9
+        ccache -z
 
-    - name: Compile Firmware
+    - name: 获取当前源码哈希值
+      id: source-hash
+      run: |
+        cd openwrt
+        echo "source_hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+        echo "feeds_hash=$(sha256sum feeds.conf.default | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+    - name: 提取当前配置包列表
+      id: package-list
+      run: |
+        cd openwrt
+        grep "^CONFIG_PACKAGE_" .config | sort > current_packages.txt
+        echo "package_hash=$(sha256sum current_packages.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
+        echo "工具链缓存状态: ${{ steps.cache-toolchain.outputs.cache-hit || 'miss' }}"
+        echo "软件包缓存状态: ${{ steps.cache-packages.outputs.cache-hit || 'miss' }}"
+        echo "当前包设置哈希: ${{ steps.package-list.outputs.package_hash }}"
+
+    - name: 编译固件
       id: compile
       run: |
         cd openwrt
-        echo "::group::Compile Firmware"
-        echo "Starting compilation..."
-        
-        # Display if package cache was hit
-        if [ "${{ steps.cache-packages.outputs.cache-hit }}" = "true" ]; then
-          echo "Package cache was successfully restored!"
-          ls -la staging_dir/packages/ || echo "No packages directory"
-          ls -la bin/packages/ || echo "No bin/packages directory"
+        echo "开始编译，使用ccache加速"
+        export CCACHE_DIR=${{ env.CCACHE_DIR }}
+
+        # 如果工具链缓存未命中，先编译工具链
+        if [ "${{ steps.cache-toolchain.outputs.cache-hit }}" != "true" ]; then
+          echo "工具链缓存未命中，先编译工具链..."
+          make -j$(nproc) tools/install toolchain/install || \
+          make -j8 tools/install toolchain/install || \
+          make -j1 V=s tools/install toolchain/install
         else
-          echo "Package cache was not found or not restored."
+          echo "使用缓存的工具链，跳过工具链编译"
         fi
-        
-        # Use progressive parallelism for compilation
-        make -j$(nproc) || make -j8 || make -j4 || make -j1 V=s
-        
-        echo "::endgroup::"
+
+        # 编译固件
+        echo "开始编译主固件..."
+        make -j$(nproc) || \
+        make -j8 || \
+        make -j4 || \
+        make -j1 V=s
+
+        echo "编译完成，统计ccache使用情况"
+        ccache -s
+
+        echo "固件大小：$(du -sh bin/targets/*/*)"
         
         echo "status=success" >> $GITHUB_OUTPUT
-        
-        # Detect target for artifact naming
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config > deviceinfo
-        if [ -s deviceinfo ]; then
-          DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')
-        else
-          DEVICE_NAME=$(grep '^CONFIG_TARGET.*=y' .config | grep -v '=m' | sed -r 's/CONFIG_TARGET_(.*)=y/\1/' | head -1)
-        fi
-        
-        echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_ENV
-        echo "FILE_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-        
-        # Show firmware size
-        echo "Firmware size:"
-        du -h bin/targets/*/* 2>/dev/null || echo "No firmware found"
+        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    # 只在成功编译后保存缓存
-    - name: Save Package Cache
-      if: steps.compile.outputs.status == 'success'
+    - name: 保存工具链缓存
       uses: actions/cache/save@v3
+      if: steps.compile.outputs.status == 'success'
       with:
         path: |
-          openwrt/staging_dir/packages
-          openwrt/staging_dir/hostpkg
-          openwrt/build_dir/target-*/packages
-          openwrt/bin/packages
+          /workdir/openwrt/staging_dir/toolchain-*
+          /workdir/openwrt/build_dir/toolchain-*
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+
+    - name: 保存软件包缓存
+      uses: actions/cache/save@v3
+      if: steps.compile.outputs.status == 'success'
+      with:
+        path: |
+          /workdir/openwrt/bin/packages
+          /workdir/openwrt/build_dir/target-*/root-*
+          /workdir/openwrt/build_dir/target-*/packages
+          /workdir/openwrt/staging_dir/packages
+          /workdir/openwrt/staging_dir/target-*/packages
         key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
 
-    - name: Organize Files
+    - name: 保存ccache缓存
+      uses: actions/cache/save@v3
+      if: steps.compile.outputs.status == 'success'
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-latest
+
+    - name: 检查空间使用情况
+      if: (!cancelled())
+      run: df -hT
+
+    - name: 整理文件
       id: organize
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload Firmware to Artifacts
+    - name: 上传固件到artifacts
       uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
+      if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt-${{ env.DEVICE_NAME }}-${{ env.FILE_DATE }}
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
-    - name: Generate Release Tag
+    - name: 生成发布标签
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "This is an automated build of OpenWrt firmware." > release.txt
-        echo "- Device: ${{ env.DEVICE_NAME }}" >> release.txt
-        echo "- Date: $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
-        echo "- Package cache hit: ${{ steps.cache-packages.outputs.cache-hit }}" >> release.txt
+        echo "构建时间: $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
+        echo "设备型号: ${{ env.DEVICE_NAME }}" >> release.txt
+        echo "使用源码: ${{ steps.source-hash.outputs.source_hash }}" >> release.txt
+        echo "packages状态: ${{ steps.cache-packages.outputs.cache-hit || '全新编译' }}" >> release.txt
+        echo "固件大小: $(du -sh ${{ env.FIRMWARE }})" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload Firmware to Release
+    - name: 上传固件到Releases
       uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
+      if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -190,15 +271,15 @@ jobs:
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
-    - name: Clean Up Old Workflow Runs
+    - name: 清理旧的工作流运行
       uses: Mattraks/delete-workflow-runs@v2
       with:
         retain_days: 1
         keep_minimum_runs: 3
 
-    - name: Remove Old Releases
+    - name: 清理旧版本
       uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true'
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
         keep_latest: 3
         delete_tags: true
