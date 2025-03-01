@@ -1,10 +1,7 @@
 name: 全新编译
 
 on:
-  workflow_dispatch:  # 手动触发
-  push:               # 推送代码时触发
-    branches:
-      - main
+  workflow_dispatch:  # 仅保留手动触发
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
@@ -12,7 +9,7 @@ env:
   CONFIG_REPO_URL: https://github.com/tikkacn/openwrt-new-rom
   CONFIG_BRANCH: main
   FEEDS_CONF_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/feeds.conf.default
-  CONFIG_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/%E5%A2%9E%E9%87%8F%E7%BC%93%E5%AD%98%E4%BC%98%E5%8C%96.config
+  CONFIG_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/add_package.config  # 设置为 add_package.config
   WORK_DIR: ${{github.workspace}}
   CACHE_DIR: ${{github.workspace}}/cache
   TMP_DIR: ${{github.workspace}}/tmp
@@ -62,11 +59,11 @@ jobs:
         run: |
           sudo rm -rf /var/log/* /tmp/* /var/tmp/* /usr/share/doc/* /usr/share/man/* || true
           sudo find / -type f -name "*.log" -delete || true
-          sudo find / -type d -name "__pycache__" -exec rm -rf {} + || true
+          sudo find / -type d -name "__pycache__" -not -path "/snap/*" -exec rm -rf {} + || true
           echo "Additional cleanup complete"
           df -hT
 
-      # 6. 清理后检查工作目录空间
+      # 6. 清理后检查磁盘空间
       - name: Free Up Disk Space Complete
         run: |
           echo "Free up disk space complete"
@@ -145,7 +142,7 @@ jobs:
           curl -L -o ${{env.WORK_DIR}}/openwrt/.config "$CONFIG_URL"
           echo "Verifying .config file:"
           ls -lh ${{env.WORK_DIR}}/openwrt/.config
-          head -n 20 ${{env.WORK_DIR}}/openwrt/.config  # 显示前 20 行内容
+          head -n 20 ${{env.WORK_DIR}}/openwrt/.config
           if ! grep -q "^CONFIG_TARGET_" ${{env.WORK_DIR}}/openwrt/.config; then
             echo "Error: .config does not contain a valid CONFIG_TARGET_ setting. Please update the config file."
             exit 1
@@ -179,7 +176,7 @@ jobs:
           TMPDIR: ${{env.TMP_DIR}}
         run: |
           mkdir -p ${{env.TMP_DIR}}
-          make -j$(nproc) || make -j1 V=s  # 单线程时启用详细日志
+          make -j$(nproc) || make -j1 V=s
           echo "Checking bin directory contents:"
           ls -lh bin/targets/*/*/*.bin || echo "No .bin files found"
           ls -lh bin/packages/*/* || echo "No package files found"
