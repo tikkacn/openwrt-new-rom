@@ -15,7 +15,7 @@ env:
   CONFIG_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/%E5%A2%9E%E9%87%8F%E7%BC%93%E5%AD%98%E4%BC%98%E5%8C%96.config
   WORK_DIR: ${{github.workspace}}
   CACHE_DIR: ${{github.workspace}}/cache
-  TMP_DIR: ${{github.workspace}}/tmp  # 临时文件目录
+  TMP_DIR: ${{github.workspace}}/tmp
 
 jobs:
   build:
@@ -57,10 +57,10 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
-      # 5. 额外清理根分区
+      # 5. 额外清理（避免破坏 APT）
       - name: Additional Cleanup
         run: |
-          sudo rm -rf /var/lib/* /usr/share/* /var/log/* /tmp/* /var/tmp/* || true
+          sudo rm -rf /var/log/* /tmp/* /var/tmp/* /usr/share/doc/* /usr/share/man/* || true
           sudo find / -type f -name "*.log" -delete || true
           sudo find / -type d -name "__pycache__" -exec rm -rf {} + || true
           echo "Additional cleanup complete"
@@ -73,7 +73,6 @@ jobs:
           echo "=============================================================================="
           df -hT
           echo "=============================================================================="
-          # 检查工作目录可用空间（要求至少 20GB）
           REQUIRED_SPACE=20
           AVAILABLE_SPACE=$(df -BG ${{github.workspace}} | awk 'NR==2 {print $4}' | tr -d 'G')
           if [ "$AVAILABLE_SPACE" -lt "$REQUIRED_SPACE" ]; then
@@ -81,12 +80,18 @@ jobs:
             exit 1
           fi
 
-      # 7. 安装 Python 2.7
+      # 7. 检查 APT 状态并安装 Python 2.7
       - name: Install Python 2.7
         run: |
-          sudo add-apt-repository ppa:deadsnakes/ppa -y
+          # 检查 APT 是否可用
+          sudo apt-get update || (echo "APT update failed, attempting repair..." && sudo dpkg --configure -a && sudo apt-get update)
+          sudo add-apt-repository ppa:deadsnakes/ppa -y || (echo "Adding PPA failed, falling back to manual install..." && \
+            wget https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz && \
+            tar xzf Python-2.7.18.tgz && \
+            cd Python-2.7.18 && \
+            ./configure && make -j$(nproc) && sudo make install)
           sudo apt-get update
-          sudo apt-get install -y python2.7
+          sudo apt-get install -y python2.7 || echo "Python 2.7 already installed manually"
 
       # 8. 设置构建环境
       - name: Install Dependencies
@@ -160,11 +165,11 @@ jobs:
           echo "Disk space after download:"
           df -h
 
-      # 15. 编译固件（临时文件放入最大分区）
+      # 15. 编译固件
       - name: Compile OpenWrt Firmware
         working-directory: ${{env.WORK_DIR}}/openwrt
         env:
-          TMPDIR: ${{env.TMP_DIR}}  # 临时文件写入最大分区
+          TMPDIR: ${{env.TMP_DIR}}
         run: |
           mkdir -p ${{env.TMP_DIR}}
           make -j$(nproc) || make -j1
