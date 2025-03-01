@@ -9,7 +9,7 @@ env:
   CONFIG_REPO_URL: https://github.com/tikkacn/openwrt-new-rom
   CONFIG_BRANCH: main
   FEEDS_CONF_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/feeds.conf.default
-  CONFIG_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/add_package.config  # 设置为 add_package.config
+  CONFIG_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/.config  # 设置为 .config
   WORK_DIR: ${{github.workspace}}
   CACHE_DIR: ${{github.workspace}}/cache
   TMP_DIR: ${{github.workspace}}/tmp
