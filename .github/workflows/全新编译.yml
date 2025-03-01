@@ -15,6 +15,7 @@ env:
   CONFIG_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/%E5%A2%9E%E9%87%8F%E7%BC%93%E5%AD%98%E4%BC%98%E5%8C%96.config
   WORK_DIR: ${{github.workspace}}
   CACHE_DIR: ${{github.workspace}}/cache
+  TMP_DIR: ${{github.workspace}}/tmp  # 临时文件目录
 
 jobs:
   build:
@@ -56,28 +57,38 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
-      # 5. 清理后检查磁盘空间
+      # 5. 额外清理根分区
+      - name: Additional Cleanup
+        run: |
+          sudo rm -rf /var/lib/* /usr/share/* /var/log/* /tmp/* /var/tmp/* || true
+          sudo find / -type f -name "*.log" -delete || true
+          sudo find / -type d -name "__pycache__" -exec rm -rf {} + || true
+          echo "Additional cleanup complete"
+          df -hT
+
+      # 6. 清理后检查工作目录空间
       - name: Free Up Disk Space Complete
         run: |
           echo "Free up disk space complete"
           echo "=============================================================================="
           df -hT
           echo "=============================================================================="
+          # 检查工作目录可用空间（要求至少 20GB）
           REQUIRED_SPACE=20
-          AVAILABLE_SPACE=$(df -BG / | awk 'NR==2 {print $4}' | tr -d 'G')
+          AVAILABLE_SPACE=$(df -BG ${{github.workspace}} | awk 'NR==2 {print $4}' | tr -d 'G')
           if [ "$AVAILABLE_SPACE" -lt "$REQUIRED_SPACE" ]; then
-            echo "Error: Insufficient disk space ($AVAILABLE_SPACE GB available, $REQUIRED_SPACE GB required)"
+            echo "Error: Insufficient disk space in ${{github.workspace}} ($AVAILABLE_SPACE GB available, $REQUIRED_SPACE GB required)"
             exit 1
           fi
 
-      # 6. 安装 Python 2.7
+      # 7. 安装 Python 2.7
       - name: Install Python 2.7
         run: |
           sudo add-apt-repository ppa:deadsnakes/ppa -y
           sudo apt-get update
           sudo apt-get install -y python2.7
 
-      # 7. 设置构建环境
+      # 8. 设置构建环境
       - name: Install Dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -95,7 +106,7 @@ jobs:
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
 
-      # 8. 恢复 Package 源码缓存
+      # 9. 恢复 Package 源码缓存
       - name: Restore Package Source Cache
         uses: actions/cache@v3
         with:
@@ -104,7 +115,7 @@ jobs:
           restore-keys: |
             ${{runner.os}}-openwrt-packages-
 
-      # 9. 恢复编译后的 Package 二进制缓存
+      # 10. 恢复编译后的 Package 二进制缓存
       - name: Restore Package Binary Cache
         uses: actions/cache@v3
         with:
@@ -113,7 +124,7 @@ jobs:
           restore-keys: |
             ${{runner.os}}-openwrt-bin-packages-
 
-      # 10. 克隆 OpenWrt LEDE 源码
+      # 11. 克隆 OpenWrt LEDE 源码
       - name: Clone LEDE Source
         run: |
           rm -rf ${{env.WORK_DIR}}/openwrt
@@ -122,13 +133,13 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-      # 11. 下载 feeds.conf.default 和 .config 文件
+      # 12. 下载 feeds.conf.default 和 .config 文件
       - name: Download Configuration Files
         run: |
           curl -L -o ${{env.WORK_DIR}}/openwrt/feeds.conf.default "$FEEDS_CONF_URL"
           curl -L -o ${{env.WORK_DIR}}/openwrt/.config "$CONFIG_URL"
 
-      # 12. 更新和安装 Feeds
+      # 13. 更新和安装 Feeds
       - name: Update and Install Feeds
         working-directory: ${{env.WORK_DIR}}/openwrt
         run: |
@@ -137,7 +148,7 @@ jobs:
           echo "Disk space after feeds:"
           df -h
 
-      # 13. 下载并缓存 Packages
+      # 14. 下载并缓存 Packages
       - name: Download Packages with Cache
         working-directory: ${{env.WORK_DIR}}/openwrt
         run: |
@@ -149,16 +160,19 @@ jobs:
           echo "Disk space after download:"
           df -h
 
-      # 14. 编译固件（支持增量）
+      # 15. 编译固件（临时文件放入最大分区）
       - name: Compile OpenWrt Firmware
         working-directory: ${{env.WORK_DIR}}/openwrt
+        env:
+          TMPDIR: ${{env.TMP_DIR}}  # 临时文件写入最大分区
         run: |
+          mkdir -p ${{env.TMP_DIR}}
           make -j$(nproc) || make -j1
           make clean
           echo "Disk space after compilation:"
           df -h
 
-      # 15. 保存编译后的 Package 二进制缓存
+      # 16. 保存编译后的 Package 二进制缓存
       - name: Save Package Binary Cache
         uses: actions/cache@v3
         if: always()
@@ -166,14 +180,14 @@ jobs:
           path: ${{env.WORK_DIR}}/openwrt/bin/packages
           key: ${{runner.os}}-openwrt-bin-packages-${{github.sha}}
 
-      # 16. 上传固件
+      # 17. 上传固件
       - name: Upload Firmware
         uses: actions/upload-artifact@v4
         with:
           name: OpenWrt_Firmware
           path: ${{env.WORK_DIR}}/openwrt/bin/targets/*/*/*.bin
 
-      # 17. 上传 Packages
+      # 18. 上传 Packages
       - name: Upload Packages
         uses: actions/upload-artifact@v4
         with:
