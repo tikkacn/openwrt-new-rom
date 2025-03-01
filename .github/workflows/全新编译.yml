@@ -57,7 +57,7 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
-      # 5. 额外清理（避免破坏 APT）
+      # 5. 额外清理（保护 APT）
       - name: Additional Cleanup
         run: |
           sudo rm -rf /var/log/* /tmp/* /var/tmp/* /usr/share/doc/* /usr/share/man/* || true
@@ -80,18 +80,18 @@ jobs:
             exit 1
           fi
 
-      # 7. 检查 APT 状态并安装 Python 2.7
+      # 7. 安装 Python 2.7
       - name: Install Python 2.7
         run: |
-          # 检查 APT 是否可用
-          sudo apt-get update || (echo "APT update failed, attempting repair..." && sudo dpkg --configure -a && sudo apt-get update)
-          sudo add-apt-repository ppa:deadsnakes/ppa -y || (echo "Adding PPA failed, falling back to manual install..." && \
+          sudo apt-get update || (echo "APT update failed, repairing..." && sudo dpkg --configure -a && sudo apt-get update)
+          sudo add-apt-repository ppa:deadsnakes/ppa -y || (echo "Adding PPA failed, installing manually..." && \
             wget https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz && \
             tar xzf Python-2.7.18.tgz && \
             cd Python-2.7.18 && \
-            ./configure && make -j$(nproc) && sudo make install)
+            ./configure --prefix=/usr/local && make -j$(nproc) && sudo make install && \
+            sudo ln -sf /usr/local/bin/python2.7 /usr/bin/python2.7)
           sudo apt-get update
-          sudo apt-get install -y python2.7 || echo "Python 2.7 already installed manually"
+          sudo apt-get install -y python2.7 || echo "Python 2.7 installed manually"
 
       # 8. 设置构建环境
       - name: Install Dependencies
@@ -138,11 +138,18 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-      # 12. 下载 feeds.conf.default 和 .config 文件
+      # 12. 下载 feeds.conf.default 和 .config 文件，并验证
       - name: Download Configuration Files
         run: |
           curl -L -o ${{env.WORK_DIR}}/openwrt/feeds.conf.default "$FEEDS_CONF_URL"
           curl -L -o ${{env.WORK_DIR}}/openwrt/.config "$CONFIG_URL"
+          echo "Verifying .config file:"
+          ls -lh ${{env.WORK_DIR}}/openwrt/.config
+          head -n 20 ${{env.WORK_DIR}}/openwrt/.config  # 显示前 20 行内容
+          if ! grep -q "^CONFIG_TARGET_" ${{env.WORK_DIR}}/openwrt/.config; then
+            echo "Error: .config does not contain a valid CONFIG_TARGET_ setting. Please update the config file."
+            exit 1
+          fi
 
       # 13. 更新和安装 Feeds
       - name: Update and Install Feeds
@@ -172,8 +179,10 @@ jobs:
           TMPDIR: ${{env.TMP_DIR}}
         run: |
           mkdir -p ${{env.TMP_DIR}}
-          make -j$(nproc) || make -j1
-          make clean
+          make -j$(nproc) || make -j1 V=s  # 单线程时启用详细日志
+          echo "Checking bin directory contents:"
+          ls -lh bin/targets/*/*/*.bin || echo "No .bin files found"
+          ls -lh bin/packages/*/* || echo "No package files found"
           echo "Disk space after compilation:"
           df -h
 
@@ -191,6 +200,7 @@ jobs:
         with:
           name: OpenWrt_Firmware
           path: ${{env.WORK_DIR}}/openwrt/bin/targets/*/*/*.bin
+          if-no-files-found: error
 
       # 18. 上传 Packages
       - name: Upload Packages
@@ -198,3 +208,12 @@ jobs:
         with:
           name: OpenWrt_Packages
           path: ${{env.WORK_DIR}}/openwrt/bin/packages/*/*
+          if-no-files-found: error
+
+      # 19. 清理临时文件
+      - name: Cleanup
+        run: |
+          cd ${{env.WORK_DIR}}/openwrt
+          make clean
+          echo "Disk space after cleanup:"
+          df -h
