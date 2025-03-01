@@ -7,7 +7,6 @@ on:
       - main
 
 env:
-  # 全局环境变量
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   CONFIG_REPO_URL: https://github.com/tikkacn/openwrt-new-rom
@@ -19,38 +18,69 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # 使用 Ubuntu 22.04 环境
+    runs-on: ubuntu-22.04
     steps:
       # 1. 检出代码
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      # 2. 清理磁盘空间
-      - name: Clean Up Disk Space
+      # 2. 清理前检查磁盘空间
+      - name: Before Freeing Up Disk Space
         run: |
-          echo "Disk space before cleanup:"
-          df -h
-          # 移除不必要的预装软件和缓存
-          sudo apt-get remove -y --purge '^dotnet-.*' '^llvm-.*' 'powershell' 'azure-cli' 'snapd' 'google-*' 'mono-*' 'mysql-*' 'postgresql-*' || true
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-          # 清理 Docker 镜像和容器（如果存在）
-          docker system prune -a -f --volumes || true
-          # 清理临时文件和缓存
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /snap
-          sudo rm -rf /tmp/* /var/tmp/* /var/cache/* || true
-          echo "Disk space after cleanup:"
-          df -h
+          echo "Before freeing up disk space"
+          echo "=============================================================================="
+          df -hT
+          echo "=============================================================================="
 
-      # 3. 安装 Python 2.7（Ubuntu 22.04 默认不支持）
+      # 3. 使用磁盘优化工具
+      - name: Optimize Disk Space
+        uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
+        with:
+          operate_sudo: "True"
+          general_include: ".+"
+          general_exclude: "^GCC$|^G\\+\\+$|Clang|LLVM"
+          docker_prune: "True"
+          docker_clean: "True"
+          apt_prune: "True"
+          apt_clean: "True"
+
+      # 4. 最大化构建空间
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 1
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      # 5. 清理后检查磁盘空间
+      - name: Free Up Disk Space Complete
+        run: |
+          echo "Free up disk space complete"
+          echo "=============================================================================="
+          df -hT
+          echo "=============================================================================="
+          REQUIRED_SPACE=20
+          AVAILABLE_SPACE=$(df -BG / | awk 'NR==2 {print $4}' | tr -d 'G')
+          if [ "$AVAILABLE_SPACE" -lt "$REQUIRED_SPACE" ]; then
+            echo "Error: Insufficient disk space ($AVAILABLE_SPACE GB available, $REQUIRED_SPACE GB required)"
+            exit 1
+          fi
+
+      # 6. 安装 Python 2.7
       - name: Install Python 2.7
         run: |
           sudo add-apt-repository ppa:deadsnakes/ppa -y
           sudo apt-get update
           sudo apt-get install -y python2.7
 
-      # 4. 设置构建环境
+      # 7. 设置构建环境
       - name: Install Dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
           sudo -E apt-get -qq install \
@@ -62,9 +92,11 @@ jobs:
             mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 \
             python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools subversion \
             swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev python3-setuptools
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
 
-      # 5. 创建缓存目录并恢复缓存
-      - name: Restore Package Cache
+      # 8. 恢复 Package 源码缓存
+      - name: Restore Package Source Cache
         uses: actions/cache@v3
         with:
           path: ${{env.CACHE_DIR}}/dl
@@ -72,50 +104,76 @@ jobs:
           restore-keys: |
             ${{runner.os}}-openwrt-packages-
 
-      # 6. 克隆 OpenWrt LEDE 源码
+      # 9. 恢复编译后的 Package 二进制缓存
+      - name: Restore Package Binary Cache
+        uses: actions/cache@v3
+        with:
+          path: ${{env.WORK_DIR}}/openwrt/bin/packages
+          key: ${{runner.os}}-openwrt-bin-packages-${{github.sha}}
+          restore-keys: |
+            ${{runner.os}}-openwrt-bin-packages-
+
+      # 10. 克隆 OpenWrt LEDE 源码
       - name: Clone LEDE Source
         run: |
-          git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
-          cd openwrt
+          rm -rf ${{env.WORK_DIR}}/openwrt
+          git clone --depth 1 -b $REPO_BRANCH $REPO_URL ${{env.WORK_DIR}}/openwrt
+          cd ${{env.WORK_DIR}}/openwrt
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-      # 7. 下载 feeds.conf.default 和 .config 文件
+      # 11. 下载 feeds.conf.default 和 .config 文件
       - name: Download Configuration Files
         run: |
-          curl -L -o openwrt/feeds.conf.default "$FEEDS_CONF_URL"
-          curl -L -o openwrt/.config "$CONFIG_URL"
+          curl -L -o ${{env.WORK_DIR}}/openwrt/feeds.conf.default "$FEEDS_CONF_URL"
+          curl -L -o ${{env.WORK_DIR}}/openwrt/.config "$CONFIG_URL"
 
-      # 8. 更新和安装 Feeds
+      # 12. 更新和安装 Feeds
       - name: Update and Install Feeds
         working-directory: ${{env.WORK_DIR}}/openwrt
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          echo "Disk space after feeds:"
+          df -h
 
-      # 9. 下载并缓存 Packages
+      # 13. 下载并缓存 Packages
       - name: Download Packages with Cache
         working-directory: ${{env.WORK_DIR}}/openwrt
         run: |
-          mkdir -p $CACHE_DIR/dl
-          ln -sf $CACHE_DIR/dl dl
+          mkdir -p ${{env.CACHE_DIR}}/dl
+          ln -sf ${{env.CACHE_DIR}}/dl dl
           make defconfig
-          make download -j$(nproc)
+          timeout 30m make download -j2 || echo "Warning: Download timed out or failed, proceeding..."
+          find dl -size -1024c -exec rm -f {} \; || echo "Warning: Failed to remove small files, proceeding..."
+          echo "Disk space after download:"
+          df -h
 
-      # 10. 编译固件
+      # 14. 编译固件（支持增量）
       - name: Compile OpenWrt Firmware
         working-directory: ${{env.WORK_DIR}}/openwrt
         run: |
-          make -j$(nproc) V=s
+          make -j$(nproc) || make -j1
+          make clean
+          echo "Disk space after compilation:"
+          df -h
 
-      # 11. 整理并上传固件（使用 v4）
+      # 15. 保存编译后的 Package 二进制缓存
+      - name: Save Package Binary Cache
+        uses: actions/cache@v3
+        if: always()
+        with:
+          path: ${{env.WORK_DIR}}/openwrt/bin/packages
+          key: ${{runner.os}}-openwrt-bin-packages-${{github.sha}}
+
+      # 16. 上传固件
       - name: Upload Firmware
         uses: actions/upload-artifact@v4
         with:
           name: OpenWrt_Firmware
           path: ${{env.WORK_DIR}}/openwrt/bin/targets/*/*/*.bin
 
-      # 12. 整理并上传 Packages（使用 v4）
+      # 17. 上传 Packages
       - name: Upload Packages
         uses: actions/upload-artifact@v4
         with:
