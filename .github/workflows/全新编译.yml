@@ -9,7 +9,7 @@ env:
   CONFIG_REPO_URL: https://github.com/tikkacn/openwrt-new-rom
   CONFIG_BRANCH: main
   FEEDS_CONF_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/feeds.conf.default
-  CONFIG_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/.config  # 设置为 .config
+  CONFIG_URL: https://raw.githubusercontent.com/tikkacn/openwrt-new-rom/main/.config
   WORK_DIR: ${{github.workspace}}
   CACHE_DIR: ${{github.workspace}}/cache
   TMP_DIR: ${{github.workspace}}/tmp
@@ -142,9 +142,12 @@ jobs:
           curl -L -o ${{env.WORK_DIR}}/openwrt/.config "$CONFIG_URL"
           echo "Verifying .config file:"
           ls -lh ${{env.WORK_DIR}}/openwrt/.config
-          head -n 20 ${{env.WORK_DIR}}/openwrt/.config
+          wc -l ${{env.WORK_DIR}}/openwrt/.config
+          grep "CONFIG_TARGET_x86_64" ${{env.WORK_DIR}}/openwrt/.config
+          grep "CONFIG_TARGET_ROOTFS_PARTSIZE" ${{env.WORK_DIR}}/openwrt/.config
+          grep "CONFIG_PACKAGE_luci" ${{env.WORK_DIR}}/openwrt/.config
           if ! grep -q "^CONFIG_TARGET_" ${{env.WORK_DIR}}/openwrt/.config; then
-            echo "Error: .config does not contain a valid CONFIG_TARGET_ setting. Please update the config file."
+            echo "Error: .config does not contain a valid CONFIG_TARGET_ setting."
             exit 1
           fi
 
@@ -176,10 +179,16 @@ jobs:
           TMPDIR: ${{env.TMP_DIR}}
         run: |
           mkdir -p ${{env.TMP_DIR}}
+          echo "Final .config after defconfig:"
+          make defconfig
+          head -n 20 .config
+          grep "CONFIG_TARGET_ROOTFS_PARTSIZE" .config
           make -j$(nproc) || make -j1 V=s
+          echo "Generated firmware sizes:"
+          du -sh bin/targets/*/*/*.{bin,img.gz} || echo "No firmware files found"
           echo "Checking bin directory contents:"
-          ls -lh bin/targets/*/*/*.bin || echo "No .bin files found"
-          ls -lh bin/packages/*/* || echo "No package files found"
+          ls -lh bin/targets/*/*/*.{bin,img.gz} | head -n 5 || echo "No firmware files found"
+          ls -lh bin/packages/*/* | head -n 5 || echo "No package files found"
           echo "Disk space after compilation:"
           df -h
 
@@ -196,7 +205,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OpenWrt_Firmware
-          path: ${{env.WORK_DIR}}/openwrt/bin/targets/*/*/*.bin
+          path: ${{env.WORK_DIR}}/openwrt/bin/targets/*/*/*.{bin,img.gz}
           if-no-files-found: error
 
       # 18. 上传 Packages
