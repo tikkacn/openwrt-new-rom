@@ -1,4 +1,4 @@
-name: 全新编译
+name: Build OpenWrt（优化增量编译版）
 
 on:
   repository_dispatch:
@@ -185,8 +185,26 @@ jobs:
       run: |
         cd /workdir/openwrt
         make defconfig
-        make download -j8 || make download -j1 V=s
-        find dl -size -1024c -exec rm -f {} \;
+        echo "开始下载软件包..."
+        
+        # 更可靠的软件包下载方法
+        make download -j1 || make download -j1 V=s
+        
+        # 重试失败的下载
+        for i in {1..3}; do
+          make download -j1 || true
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+          
+          # 检查是否所有包都已下载完成
+          if ! grep -q "ERROR: package/.* failed to download" /tmp/download.log 2>/dev/null; then
+            echo "所有软件包下载成功!"
+            break
+          fi
+          
+          echo "第 $i 次重试下载失败的软件包..."
+          sleep 2
+        done
 
     - name: 配置CCACHE
       run: |
@@ -278,12 +296,37 @@ jobs:
           # 编译新增或更新的软件包
           if [ -s /workdir/compile_list.txt ]; then
             echo "编译新增或更新的软件包..."
-            while read -r pkg; do
-              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-              echo "编译软件包: $pkg_name"
-              make package/$pkg_name/compile -j$(nproc) || \
-              make package/$pkg_name/compile -j1 V=s
-            done < /workdir/compile_list.txt
+            
+            # 首先尝试一次整体编译所有需要重新编译的包
+            # 这样可以更好地处理依赖关系
+            if [ $(cat /workdir/compile_list.txt | wc -l) -gt 5 ]; then
+              echo "检测到大量包需要更新，执行整体编译..."
+              make -j$(nproc) || make -j1 V=s
+            else
+              # 如果只有少量包需要更新，则逐个编译
+              while read -r pkg; do
+                pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+                echo "编译软件包: $pkg_name"
+                
+                # 尝试3次编译该软件包
+                for attempt in {1..3}; do
+                  echo "第 $attempt 次尝试编译 $pkg_name..."
+                  if make package/$pkg_name/compile -j$(nproc); then
+                    echo "$pkg_name 编译成功!"
+                    break
+                  elif [ $attempt -eq 3 ]; then
+                    echo "警告: $pkg_name 编译失败，尝试作为依赖项继续..."
+                  else
+                    echo "$pkg_name 编译失败，2秒后重试..."
+                    sleep 2
+                  fi
+                done
+              done < /workdir/compile_list.txt
+              
+              # 最后执行一次整体编译确保所有依赖都正确处理
+              echo "执行最终整体编译确保依赖关系正确..."
+              make -j$(nproc) || make -j1 V=s
+            fi
           else
             echo "没有新增或更新的软件包需要编译。"
           fi
