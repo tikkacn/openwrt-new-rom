@@ -1,4 +1,4 @@
-name: Build OpenWrt（优化增量编译版）
+name: 全新编译
 
 on:
   repository_dispatch:
