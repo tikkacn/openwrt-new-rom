@@ -1,0 +1,374 @@
+name: Build OpenWrt（优化增量编译版）
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH调试'
+        required: false
+        default: 'false'
+      clean_build:
+        description: '清理缓存并完全重新编译'
+        required: false
+        default: 'false'
+      config_file:
+        description: '配置文件'
+        required: false
+        default: '增量缓存优化.config'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: ${{ github.event.inputs.config_file || '增量缓存优化.config' }}
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+  CCACHE_DIR: ${{ github.workspace }}/ccache
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id || !github.event.sender.id
+
+    steps:
+    - name: 显示磁盘空间使用情况(优化前)
+      run: |
+        echo "优化前磁盘空间情况："
+        df -hT
+
+    - name: 优化磁盘空间
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 2048
+        swap-size-mb: 1
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+
+    - name: 清理Docker资源
+      run: |
+        sudo docker image prune --all --force
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+
+    - name: 显示磁盘空间使用情况(优化后)
+      run: |
+        echo "优化后磁盘空间情况："
+        df -hT
+
+    - name: 检出代码
+      uses: actions/checkout@main
+
+    - name: 初始化环境
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL https://raw.githubusercontent.com/coolsnowwolf/lede/master/prereq-build.mk | grep -o 'package-y += .*' | sed 's/package-y += //g')
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+        vim wget xmlto xxd zlib1g-dev python3-setuptools
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+        echo "WORKDIR=/workdir" >> $GITHUB_ENV
+
+    - name: 克隆源代码
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        cd openwrt
+        find . -type f -name "*.sh" -exec chmod +x {} \;
+
+    # 恢复工具链缓存
+    - name: 恢复工具链缓存
+      uses: actions/cache@v3
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          /workdir/openwrt/staging_dir/toolchain-*
+          /workdir/openwrt/build_dir/toolchain-*
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}
+        restore-keys: |
+          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    # 恢复包缓存
+    - name: 恢复软件包缓存
+      uses: actions/cache@v3
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          /workdir/openwrt/build_dir/target-*
+          /workdir/openwrt/staging_dir/target-*
+          /workdir/openwrt/bin/packages
+          /workdir/package_hashes
+          /workdir/previous_packages.txt
+        key: packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}
+        restore-keys: |
+          packages-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    # 恢复下载缓存
+    - name: 恢复下载缓存
+      uses: actions/cache@v3
+      with:
+        path: |
+          /workdir/openwrt/dl
+        key: dl-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}
+        restore-keys: |
+          dl-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    # 恢复CCACHE缓存
+    - name: 恢复CCACHE缓存
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}
+        restore-keys: |
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    # 创建符号链接
+    - name: 创建符号链接
+      run: |
+        sudo mkdir -p -m 777 /mnt/openwrt/dl /mnt/openwrt/staging_dir
+        [ -d /workdir/openwrt/dl ] || mkdir -p /workdir/openwrt/dl
+        [ -d /workdir/openwrt/staging_dir ] || mkdir -p /workdir/openwrt/staging_dir
+
+    - name: 加载自定义feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF /workdir/openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd /workdir/openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: 更新feeds
+      run: |
+        cd /workdir/openwrt
+        ./scripts/feeds update -a
+
+    - name: 安装feeds
+      run: |
+        cd /workdir/openwrt
+        ./scripts/feeds install -a
+
+    - name: 加载自定义配置
+      run: |
+        [ -e files ] && mv files /workdir/openwrt/files
+        if [ ! -e "$CONFIG_FILE" ]; then
+          echo "Error: $CONFIG_FILE not found!" >&2
+          exit 1
+        fi
+        mv $CONFIG_FILE /workdir/openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd /workdir/openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: 开启SSH调试
+      uses: mxschmitt/action-tmate@v3
+      if: github.event.inputs.ssh == 'true'
+
+    - name: 下载软件包
+      id: package
+      run: |
+        cd /workdir/openwrt
+        make defconfig
+        make download -j8 || make download -j1 V=s
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: 配置CCACHE
+      run: |
+        cd /workdir/openwrt
+        echo "配置CCACHE参数"
+        mkdir -p ${{ env.CCACHE_DIR }}
+        ccache -o cache_dir=${{ env.CCACHE_DIR }}
+        ccache -o max_size=10G
+        ccache -z
+
+    - name: 增量编译固件
+      id: compile
+      run: |
+        cd /workdir/openwrt
+        echo -e "$(nproc) 线程编译"
+        
+        # 设置CCACHE环境变量
+        export CCACHE_DIR=${{ env.CCACHE_DIR }}
+        export PATH="/usr/lib/ccache:$PATH"
+        
+        # 如果是强制完全重新编译
+        if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
+          echo "进行完全重新编译..."
+          make -j$(nproc) || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # 检查工具链
+        if [ ! -d "staging_dir/toolchain-x86_64_gcc-*" ]; then
+          echo "工具链未缓存，编译工具链..."
+          make -j$(nproc) tools/install || make -j1 V=s tools/install
+          make -j$(nproc) toolchain/install || make -j1 V=s toolchain/install
+        else
+          echo "工具链已从缓存恢复，跳过编译。"
+        fi
+        
+        # 获取当前配置的软件包列表
+        grep "^CONFIG_PACKAGE" .config | sort > /workdir/current_packages.txt
+        
+        # 检查增量编译
+        if [ ! -f "/workdir/previous_packages.txt" ]; then
+          echo "首次运行，编译所有软件包..."
+          make -j$(nproc) || make -j1 V=s
+          cp /workdir/current_packages.txt /workdir/previous_packages.txt
+        else
+          echo "检测到增量编译..."
+          
+          # 比较软件包差异
+          mkdir -p /workdir/package_hashes
+          
+          # 检查已添加或已移除的软件包
+          comm -13 /workdir/previous_packages.txt /workdir/current_packages.txt > /workdir/added_packages.txt
+          comm -23 /workdir/previous_packages.txt /workdir/current_packages.txt > /workdir/removed_packages.txt
+          comm -12 /workdir/previous_packages.txt /workdir/current_packages.txt > /workdir/unchanged_packages.txt
+          
+          # 计算并比较软件包哈希值以检测更改
+          for pkg in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+            pkg_dir=$(find package feeds -type d -name "$pkg" | head -n 1)
+            if [ -n "$pkg_dir" ]; then
+              find "$pkg_dir" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum > "/workdir/package_hashes/$pkg.current"
+            fi
+          done
+          
+          # 检查已更改的软件包
+          cat /workdir/added_packages.txt > /workdir/compile_list.txt
+          if [ -s /workdir/unchanged_packages.txt ]; then
+            for pkg in $(cat /workdir/unchanged_packages.txt | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+              if [ -f "/workdir/package_hashes/$pkg.current" ] && [ -f "/workdir/package_hashes/$pkg.previous" ]; then
+                if ! cmp -s "/workdir/package_hashes/$pkg.current" "/workdir/package_hashes/$pkg.previous"; then
+                  echo "CONFIG_PACKAGE_$pkg=y" >> /workdir/compile_list.txt
+                fi
+              elif [ -f "/workdir/package_hashes/$pkg.current" ]; then
+                echo "CONFIG_PACKAGE_$pkg=y" >> /workdir/compile_list.txt
+              fi
+              [ -f "/workdir/package_hashes/$pkg.current" ] && mv "/workdir/package_hashes/$pkg.current" "/workdir/package_hashes/$pkg.previous"
+            done
+          fi
+          
+          # 处理已移除的软件包
+          if [ -s /workdir/removed_packages.txt ]; then
+            echo "清理已移除的软件包..."
+            while read -r pkg; do
+              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              make package/$pkg_name/clean || echo "警告: $pkg_name 清理失败，继续执行..."
+            done < /workdir/removed_packages.txt
+          fi
+          
+          # 编译新增或更新的软件包
+          if [ -s /workdir/compile_list.txt ]; then
+            echo "编译新增或更新的软件包..."
+            while read -r pkg; do
+              pkg_name=$(echo "$pkg" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              echo "编译软件包: $pkg_name"
+              make package/$pkg_name/compile -j$(nproc) || \
+              make package/$pkg_name/compile -j1 V=s
+            done < /workdir/compile_list.txt
+          else
+            echo "没有新增或更新的软件包需要编译。"
+          fi
+          
+          # 检查内核更新
+          git fetch origin $REPO_BRANCH
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$REPO_BRANCH)" ] || \
+             [ ! -f "/workdir/feeds_hash" ] || [ "$(sha256sum feeds.conf.default | awk '{print $1}')" != "$(cat /workdir/feeds_hash)" ]; then
+            echo "源代码或feeds已更新，重新编译内核..."
+            make target/linux/clean
+            make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
+            sha256sum feeds.conf.default | awk '{print $1}' > /workdir/feeds_hash
+          fi
+          
+          # 构建目标文件系统
+          echo "构建目标文件系统..."
+          make -j$(nproc) || make -j1 V=s
+          cp /workdir/current_packages.txt /workdir/previous_packages.txt
+        fi
+        
+        echo "状态：成功"
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        
+        # 显示CCACHE统计信息
+        ccache -s
+
+    - name: 检查空间使用情况
+      if: (!cancelled())
+      run: df -hT
+
+    - name: 整理文件
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd /workdir/openwrt/bin/targets/*/*
+        rm -rf packages
+        mkdir -p firmware
+        find . -maxdepth 1 -name "*combined*" -or -name "*sysupgrade*" | xargs -i cp {} ./firmware/
+        cp /workdir/openwrt/.config ./firmware/config.txt
+        zip -r firmware.zip firmware
+        echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
+        echo "FIRMWARE_ZIP=$PWD/firmware.zip" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件目录
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: 生成发布标签
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "## OpenWrt固件构建完成 📦" > release.txt
+        echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
+        echo "📂 固件下载" >> release.txt
+        echo "⚠️ 请在刷机前先做好备份！" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件到Releases
+      uses: softprops/action-gh-release@v2
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: 删除旧的工作流运行记录
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
+
+    - name: 删除旧的Releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
