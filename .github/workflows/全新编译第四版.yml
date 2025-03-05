@@ -1,4 +1,4 @@
-name: 全新编译
+name: 全新编译第四版
 
 on:
   repository_dispatch:
