@@ -1,0 +1,692 @@
+name: 全新编译
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH调试'
+        required: false
+        default: 'false'
+      clean_build:
+        description: '清理缓存并完全重新编译'
+        required: false
+        default: 'false'
+      config_file:
+        description: '配置文件'
+        required: false
+        default: '增量缓存优化.config'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: ${{ github.event.inputs.config_file || '增量缓存优化.config' }}
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+  CCACHE_DIR: /workdir/ccache
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id || !github.event.sender.id
+
+    steps:
+    - name: 显示磁盘空间使用情况(优化前)
+      run: |
+        echo "优化前磁盘空间情况："
+        df -hT
+
+    - name: 检出代码
+      uses: actions/checkout@main
+
+    - name: 优化磁盘空间
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 2048
+        swap-size-mb: 1
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+        build-mount-path: '/workdir'
+
+    - name: 清理Docker资源
+      run: |
+        sudo docker image prune --all --force
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+
+    - name: 显示磁盘空间使用情况(优化后)
+      run: |
+        echo "优化后磁盘空间情况："
+        df -hT
+        echo "工作目录空间情况："
+        df -hT /workdir
+
+    - name: 初始化环境
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL https://raw.githubusercontent.com/coolsnowwolf/lede/master/prereq-build.mk | grep -o 'package-y += .*' | sed 's/package-y += //g')
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+        vim wget xmlto xxd zlib1g-dev python3-setuptools jq
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        echo "WORKDIR=/workdir" >> $GITHUB_ENV
+
+    - name: 准备缓存目录
+      run: |
+        # 创建并设置正确权限
+        mkdir -p /workdir/package_info
+        mkdir -p /workdir/dl_cache
+        mkdir -p ${{ env.CCACHE_DIR }}
+        mkdir -p /workdir/build_state
+        chmod -R 777 /workdir
+
+    - name: 克隆源代码
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        cd openwrt
+        echo "项目版本: $(git rev-parse HEAD)" > /workdir/source_version.txt
+        find . -type f -name "*.sh" -exec chmod +x {} \;
+
+    # 恢复包哈希信息缓存
+    - name: 恢复包哈希信息缓存
+      uses: actions/cache@v3
+      id: cache-package-info
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          /workdir/package_info
+          /workdir/build_state
+        key: package-info-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}
+        restore-keys: |
+          package-info-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}
+
+    # 恢复构建中间产物缓存 - 工具链部分
+    - name: 恢复工具链缓存
+      uses: actions/cache@v3
+      id: cache-toolchain
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          /workdir/openwrt/staging_dir/toolchain-*
+          /workdir/openwrt/staging_dir/host
+          /workdir/openwrt/build_dir/toolchain-*
+        key: toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}
+        restore-keys: |
+          toolchain-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}
+
+    # 恢复构建中间产物缓存 - 目标相关部分
+    - name: 恢复目标构建缓存
+      uses: actions/cache@v3
+      id: cache-target-build
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          /workdir/openwrt/staging_dir/target-*
+          /workdir/openwrt/build_dir/target-*
+          /workdir/openwrt/build_dir/hostpkg
+          /workdir/openwrt/tmp
+          /workdir/openwrt/.config.old
+        key: target-build-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}
+        restore-keys: |
+          target-build-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+    
+    # 恢复已编译的packages目录
+    - name: 恢复已编译包缓存
+      uses: actions/cache@v3
+      id: cache-packages
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          /workdir/openwrt/bin/packages
+          /workdir/openwrt/bin/targets/*/packages
+        key: packages-bin-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}
+        restore-keys: |
+          packages-bin-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
+
+    # 恢复下载缓存
+    - name: 恢复下载缓存
+      uses: actions/cache@v3
+      id: cache-dl
+      with:
+        path: |
+          /workdir/dl_cache
+        key: dl-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}
+        restore-keys: |
+          dl-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}
+
+    # 恢复CCACHE缓存
+    - name: 恢复CCACHE缓存
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}
+        restore-keys: |
+          ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}
+
+    # 检查缓存恢复状态
+    - name: 检查缓存恢复状态
+      run: |
+        echo "包哈希信息缓存恢复状态: ${{ steps.cache-package-info.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "工具链缓存恢复状态: ${{ steps.cache-toolchain.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "目标构建缓存恢复状态: ${{ steps.cache-target-build.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "已编译包缓存恢复状态: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "下载缓存恢复状态: ${{ steps.cache-dl.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        
+        # 检查目录大小
+        echo "工具链缓存大小:"
+        du -sh /workdir/openwrt/staging_dir/toolchain-* 2>/dev/null || echo "目录不存在"
+        echo "目标构建缓存大小:"
+        du -sh /workdir/openwrt/build_dir/target-* 2>/dev/null || echo "目录不存在"
+        echo "已编译包缓存大小:"
+        du -sh /workdir/openwrt/bin/packages 2>/dev/null || echo "目录不存在"
+        
+        # 检查包哈希信息
+        if [ -f "/workdir/package_info/package_hashes.json" ]; then
+          echo "哈希文件存在，显示前10行内容:"
+          head -n 10 /workdir/package_info/package_hashes.json
+          echo "哈希文件大小: $(du -h /workdir/package_info/package_hashes.json | cut -f1)"
+          echo "哈希条目数量: $(grep -c ":" /workdir/package_info/package_hashes.json)"
+        else
+          echo "哈希文件不存在，将在首次编译时创建"
+        fi
+
+    # 链接下载缓存到dl目录
+    - name: 准备下载缓存
+      run: |
+        mkdir -p /workdir/openwrt/dl
+        if [ -d "/workdir/dl_cache" ] && [ "$(ls -A /workdir/dl_cache)" ]; then
+          echo "复制下载缓存到dl目录..."
+          cp -r /workdir/dl_cache/* /workdir/openwrt/dl/ || true
+        fi
+        chmod -R 755 /workdir/openwrt/dl
+
+    - name: 加载自定义feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF /workdir/openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd /workdir/openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: 更新feeds
+      run: |
+        cd /workdir/openwrt
+        ./scripts/feeds update -a
+
+    - name: 安装feeds
+      run: |
+        cd /workdir/openwrt
+        ./scripts/feeds install -a
+
+    - name: 加载自定义配置
+      run: |
+        [ -e files ] && mv files /workdir/openwrt/files
+        if [ ! -e "$CONFIG_FILE" ]; then
+          echo "Error: $CONFIG_FILE not found!" >&2
+          exit 1
+        fi
+        mv $CONFIG_FILE /workdir/openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd /workdir/openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: 开启SSH调试
+      uses: mxschmitt/action-tmate@v3
+      if: github.event.inputs.ssh == 'true'
+
+    - name: 配置增量编译选项
+      run: |
+        cd /workdir/openwrt
+        # 禁用自动重建和自动移除
+        echo "CONFIG_AUTOREMOVE=n" >> .config
+        echo "CONFIG_AUTOREBUILD=n" >> .config
+        # 应用配置
+        make defconfig
+
+    - name: 验证缓存包
+      if: steps.cache-packages.outputs.cache-hit == 'true' && inputs.clean_build != 'true'
+      run: |
+        cd /workdir/openwrt
+        
+        # 提取所有需要的包
+        grep "^CONFIG_PACKAGE_" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/' > /tmp/needed_packages.txt
+        
+        # 检查哪些包已存在
+        mkdir -p /workdir/build_state
+        echo "检查已有包..."
+        > /workdir/build_state/missing_packages.txt
+        > /workdir/build_state/existing_packages.txt
+        
+        for pkg in $(cat /tmp/needed_packages.txt); do
+          if find bin/packages -name "*${pkg}*.ipk" | grep -q .; then
+            echo "$pkg: 已存在"
+            echo "$pkg" >> /workdir/build_state/existing_packages.txt
+          else
+            echo "$pkg: 需要编译"
+            echo "$pkg" >> /workdir/build_state/missing_packages.txt
+          fi
+        done
+        
+        TOTAL_PKGS=$(cat /tmp/needed_packages.txt | wc -l)
+        EXISTING_PKGS=$(cat /workdir/build_state/existing_packages.txt | wc -l)
+        MISSING_PKGS=$(cat /workdir/build_state/missing_packages.txt | wc -l)
+        
+        echo "总包数: $TOTAL_PKGS"
+        echo "已存在包数: $EXISTING_PKGS"
+        echo "缺失包数: $MISSING_PKGS"
+        
+        # 计算缓存命中率
+        if [ $TOTAL_PKGS -gt 0 ]; then
+          HIT_RATE=$((EXISTING_PKGS * 100 / TOTAL_PKGS))
+          echo "缓存命中率: ${HIT_RATE}%"
+          echo "CACHE_HIT_RATE=${HIT_RATE}" >> $GITHUB_ENV
+        else
+          echo "未找到需要的包"
+          echo "CACHE_HIT_RATE=0" >> $GITHUB_ENV
+        fi
+
+    - name: 下载软件包
+      id: package
+      run: |
+        cd /workdir/openwrt
+        make defconfig
+        echo "开始下载软件包..."
+        make download -j8 || make download -j1 V=s
+        
+        # 备份下载的包到缓存目录
+        echo "备份下载的包到缓存目录..."
+        mkdir -p /workdir/dl_cache
+        cp -rf /workdir/openwrt/dl/* /workdir/dl_cache/ || true
+
+    - name: 配置CCACHE
+      run: |
+        cd /workdir/openwrt
+        echo "配置CCACHE参数"
+        mkdir -p ${{ env.CCACHE_DIR }}
+        ccache -o cache_dir=${{ env.CCACHE_DIR }}
+        ccache -o max_size=5G
+        ccache -z
+
+    - name: 检查构建环境和目录结构
+      run: |
+        cd /workdir/openwrt
+        
+        # 检查目录结构
+        echo "检查目录结构..."
+        find bin -type d | sort
+        find staging_dir -maxdepth 2 -type d | sort
+        find build_dir -maxdepth 2 -type d | sort
+        
+        # 检查工具链
+        if [ -d "staging_dir/toolchain-"* ]; then
+          echo "工具链已存在:"
+          ls -la staging_dir/toolchain-*/ | head -10
+        else
+          echo "工具链不存在，将在编译阶段创建"
+        fi
+        
+        # 检查已编译的包
+        if [ -d "bin/packages" ]; then
+          echo "已编译的包数量:"
+          find bin/packages -name "*.ipk" | wc -l
+          echo "包示例:"
+          find bin/packages -name "*.ipk" | head -5
+        else
+          echo "没有找到已编译的包"
+        fi
+
+    - name: 智能增量编译固件
+      id: compile
+      run: |
+        cd /workdir/openwrt
+        
+        # 设置CCACHE环境变量
+        export CCACHE_DIR=${{ env.CCACHE_DIR }}
+        export PATH="/usr/lib/ccache:$PATH"
+        
+        # 如果是强制完全重新编译
+        if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
+          echo "进行完全重新编译..."
+          make -j$(nproc) || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+          
+          # 清空旧的哈希文件
+          rm -f /workdir/package_info/package_hashes.json
+          mkdir -p /workdir/package_info
+          
+          # 更新包哈希
+          ./scripts/update_package_hashes.sh
+          
+          exit 0
+        fi
+        
+        # 提取当前配置的所有包
+        mkdir -p /workdir/package_list
+        grep "^CONFIG_PACKAGE" .config | sort > /workdir/package_list/current_packages.txt
+        
+        # 创建包哈希管理脚本
+        mkdir -p /workdir/package_info
+        
+        # 创建包哈希更新脚本
+        cat << 'EOF' > ./scripts/update_package_hashes.sh
+        #!/bin/bash
+        
+        # 创建新的哈希文件
+        echo "{" > /workdir/package_info/new_hashes.json
+        
+        # 处理所有包
+        for PKG in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+          PKG_DIR=$(find package feeds -type d -name "$PKG" | head -n 1)
+          if [ -n "$PKG_DIR" ]; then
+            # 计算当前源码哈希
+            CUR_HASH=$(find "$PKG_DIR" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+            echo "  \"$PKG\": \"$CUR_HASH\"," >> /workdir/package_info/new_hashes.json
+          fi
+        done
+        
+        # 完成新哈希文件
+        sed -i '$ s/,$//' /workdir/package_info/new_hashes.json
+        echo "}" >> /workdir/package_info/new_hashes.json
+        
+        # 更新哈希文件
+        mv /workdir/package_info/new_hashes.json /workdir/package_info/package_hashes.json
+        EOF
+        
+        chmod +x ./scripts/update_package_hashes.sh
+        
+        # 加载和更新包哈希
+        NEED_FULL_BUILD=0
+        
+        if [ ! -f "/workdir/package_info/package_hashes.json" ]; then
+          echo "首次运行，创建包哈希文件..."
+          echo "{}" > /workdir/package_info/package_hashes.json
+          NEED_FULL_BUILD=1
+        fi
+        
+        # 提取哈希到临时文件以便更容易处理
+        if [ -f "/workdir/package_info/package_hashes.json" ]; then
+          # 将JSON转换为key:value格式便于处理
+          cat /workdir/package_info/package_hashes.json | grep '"' | sed 's/[",]//g' | sed 's/^ *//g' | tr ':' ' ' > /workdir/package_info/hash_list.txt || true
+        fi
+        
+        # 检查是否存在编译状态
+        if [ -f "/workdir/build_state/compiled_config.md5" ]; then
+          CURRENT_CONFIG_MD5=$(md5sum .config | awk '{print $1}')
+          PREVIOUS_CONFIG_MD5=$(cat /workdir/build_state/compiled_config.md5)
+          
+          if [ "$CURRENT_CONFIG_MD5" != "$PREVIOUS_CONFIG_MD5" ]; then
+            echo "配置文件已更改，记录差异..."
+            # 如果配置差异较大，可能需要完整构建
+            CONFIG_DIFF_COUNT=$(diff -y --suppress-common-lines <(grep "^CONFIG_" .config | sort) <(grep "^CONFIG_" /workdir/build_state/previous_config | sort 2>/dev/null || echo "") | wc -l)
+            echo "配置差异项: $CONFIG_DIFF_COUNT"
+            
+            if [ $CONFIG_DIFF_COUNT -gt 50 ]; then
+              echo "配置变化较大，建议完整构建"
+              NEED_FULL_BUILD=1
+            fi
+          else
+            echo "配置文件未更改"
+          fi
+        else
+          echo "未找到先前的编译状态，将进行完整构建"
+          NEED_FULL_BUILD=1
+        fi
+        
+        if [ "$NEED_FULL_BUILD" = "1" ] || [ ! -f "/workdir/package_list/previous_packages.txt" ]; then
+          echo "首次运行或需要完整构建..."
+          make -j$(nproc) || make -j1 V=s
+          
+          # 更新包哈希
+          ./scripts/update_package_hashes.sh
+          
+          # 保存当前包列表和配置
+          cp /workdir/package_list/current_packages.txt /workdir/package_list/previous_packages.txt
+          mkdir -p /workdir/build_state
+          cp .config /workdir/build_state/previous_config
+          md5sum .config | awk '{print $1}' > /workdir/build_state/compiled_config.md5
+        else
+          echo "检测增量编译..."
+          
+          # 比较包列表差异
+          comm -13 /workdir/package_list/previous_packages.txt /workdir/package_list/current_packages.txt > /workdir/package_list/added_packages.txt
+          comm -23 /workdir/package_list/previous_packages.txt /workdir/package_list/current_packages.txt > /workdir/package_list/removed_packages.txt
+          
+          # 生成编译列表
+          > /workdir/package_list/to_compile.txt
+          
+          # 添加新增的包
+          if [ -s "/workdir/package_list/added_packages.txt" ]; then
+            cat /workdir/package_list/added_packages.txt >> /workdir/package_list/to_compile.txt
+            echo "检测到新增的包，将进行编译。"
+          fi
+          
+          # 检查已有包中源码变化的包
+          echo "检查源码变化..."
+          for PKG in $(grep "^CONFIG_PACKAGE" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/'); do
+            # 跳过已添加的包
+            if grep -q "CONFIG_PACKAGE_${PKG}=y" /workdir/package_list/added_packages.txt 2>/dev/null; then
+              continue
+            fi
+            
+            PKG_DIR=$(find package feeds -type d -name "$PKG" | head -n 1)
+            if [ -n "$PKG_DIR" ]; then
+              # 计算当前源码哈希
+              CUR_HASH=$(find "$PKG_DIR" -type f -not -path "*/.git/*" -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+              
+              # 检查历史哈希
+              if grep -q "^\"$PKG\" " /workdir/package_info/hash_list.txt 2>/dev/null; then
+                PREV_HASH=$(grep "^\"$PKG\" " /workdir/package_info/hash_list.txt | awk '{print $2}')
+                
+                if [ "$CUR_HASH" != "$PREV_HASH" ]; then
+                  echo "CONFIG_PACKAGE_${PKG}=y" >> /workdir/package_list/to_compile.txt
+                  echo "包 $PKG 源码有变化，将重新编译"
+                else
+                  echo "包 $PKG 源码无变化，跳过编译"
+                fi
+              else
+                echo "CONFIG_PACKAGE_${PKG}=y" >> /workdir/package_list/to_compile.txt
+                echo "包 $PKG 没有历史哈希，将进行编译"
+              fi
+            fi
+          done
+          
+          # 判断是否有循环依赖问题需要修复
+          if grep -q "recursive dependency" .config 2>/dev/null; then
+            echo "检测到配置中存在循环依赖问题，尝试修复..."
+            # 自动禁用可能引起循环依赖的包
+            if grep -q "CONFIG_PACKAGE_baresip-mod-avcodec=y" .config; then
+              echo "禁用 baresip-mod-avcodec 以解决循环依赖..."
+              sed -i 's/CONFIG_PACKAGE_baresip-mod-avcodec=y/CONFIG_PACKAGE_baresip-mod-avcodec=n/' .config
+            fi
+            if grep -q "CONFIG_PACKAGE_baresip-mod-avformat=y" .config; then
+              echo "禁用 baresip-mod-avformat 以解决循环依赖..."
+              sed -i 's/CONFIG_PACKAGE_baresip-mod-avformat=y/CONFIG_PACKAGE_baresip-mod-avformat=n/' .config
+            fi
+            # 重新生成配置
+            make defconfig
+          fi
+          
+          # 添加缺失的包到编译列表
+          if [ -f "/workdir/build_state/missing_packages.txt" ]; then
+            if [ -s "/workdir/build_state/missing_packages.txt" ]; then
+              echo "添加缺失的包到编译列表..."
+              while read PKG; do
+                echo "CONFIG_PACKAGE_${PKG}=y" >> /workdir/package_list/to_compile.txt
+              done < /workdir/build_state/missing_packages.txt
+            fi
+          fi
+          
+          # 去除重复项
+          sort -u /workdir/package_list/to_compile.txt -o /workdir/package_list/to_compile.txt
+          
+          # 判断是否需要完整构建
+          if [ $(cat /workdir/package_list/to_compile.txt | wc -l) -gt $(grep "^CONFIG_PACKAGE" .config | wc -l | awk '{print int($1/3)}') ]; then
+            echo "需要重新编译的包超过三分之一，将进行完整构建..."
+            make -j$(nproc) || make -j1 V=s
+          else
+            # 进行增量编译
+            echo "执行增量编译..."
+            
+            # 确保工具链可用
+            if [ ! -d "staging_dir/toolchain-"* ]; then
+              echo "工具链不存在，编译工具链..."
+              make -j$(nproc) tools/install || make -j1 V=s tools/install
+              make -j$(nproc) toolchain/install || make -j1 V=s toolchain/install
+            fi
+            
+            # 智能处理已删除的包
+            if [ -s "/workdir/package_list/removed_packages.txt" ]; then
+              echo "清理已删除的包..."
+              while read -r PKG; do
+                PKG_NAME=$(echo "$PKG" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+                echo "清理包: $PKG_NAME"
+                make package/${PKG_NAME}/clean || echo "警告: 清理 $PKG_NAME 失败"
+              done < /workdir/package_list/removed_packages.txt
+            fi
+            
+            # 智能编译需要更新的包
+            if [ -s "/workdir/package_list/to_compile.txt" ]; then
+              echo "开始编译需要更新的包..."
+              
+# 分批编译，避免依赖问题
+TOTAL_PKGS=$(cat /workdir/package_list/to_compile.txt | wc -l)
+if [ $TOTAL_PKGS -le 5 ]; then
+  # 少量包单独编译
+  while read -r PKG; do
+    PKG_NAME=$(echo "$PKG" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+    echo "编译单个包: $PKG_NAME"
+    make package/${PKG_NAME}/{clean,compile} V=s || {
+      echo "警告: 包 $PKG_NAME 编译失败，尝试依赖方式编译"
+      make package/${PKG_NAME}/compile V=s || echo "警告: 包 $PKG_NAME 再次编译失败"
+    }
+  done < /workdir/package_list/to_compile.txt
+else
+  # 批量包一次编译
+  echo "批量编译多个包..."
+  make -j$(nproc) || make -j1 V=s
+fi
+            else
+              echo "没有包需要更新，跳过编译步骤"
+            fi
+            
+            # 最后确保所有内容正确生成
+            echo "最终构建固件..."
+            make -j$(nproc) || make -j1 V=s
+          fi
+          
+          # 更新包哈希
+          ./scripts/update_package_hashes.sh
+          
+          # 保存当前包列表和配置
+          cp /workdir/package_list/current_packages.txt /workdir/package_list/previous_packages.txt
+          mkdir -p /workdir/build_state
+          cp .config /workdir/build_state/previous_config
+          md5sum .config | awk '{print $1}' > /workdir/build_state/compiled_config.md5
+        fi
+        
+        # 显示哈希文件状态
+        echo "哈希文件状态:"
+        ls -la /workdir/package_info/
+        
+        if [ -f "/workdir/package_info/package_hashes.json" ]; then
+          echo "哈希文件内容统计:"
+          grep -c ":" /workdir/package_info/package_hashes.json
+        fi
+        
+        # 检查编译结果
+        echo "编译结果统计:"
+        find bin/packages -name "*.ipk" | wc -l
+        
+        echo "状态：成功"
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        
+        # 显示CCACHE统计信息
+        ccache -s
+
+    - name: 检查编译后目录大小
+      run: |
+        echo "编译后目录大小统计:"
+        du -sh /workdir/openwrt/staging_dir/toolchain-* || echo "工具链目录不存在"
+        du -sh /workdir/openwrt/staging_dir/target-* || echo "目标目录不存在"
+        du -sh /workdir/openwrt/build_dir/target-* || echo "构建目录不存在"
+        du -sh /workdir/openwrt/bin || echo "bin目录不存在"
+        
+        # 检查是否有过大的文件，可能导致缓存问题
+        echo "查找大文件："
+        find /workdir/openwrt/staging_dir /workdir/openwrt/build_dir -type f -size +100M | head -10
+
+    - name: 整理文件
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd /workdir/openwrt/bin/targets/*/*
+        rm -rf packages
+        mkdir -p firmware
+        find . -maxdepth 1 -name "*combined*" -or -name "*sysupgrade*" | xargs -i cp {} ./firmware/
+        cp /workdir/openwrt/.config ./firmware/config.txt
+        zip -r firmware.zip firmware
+        echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
+        echo "FIRMWARE_ZIP=$PWD/firmware.zip" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件目录
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: 生成发布标签
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "## OpenWrt固件构建完成 📦" > release.txt
+        echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
+        echo "📂 固件下载" >> release.txt
+        echo "⚠️ 请在刷机前先做好备份！" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件到Releases
+      uses: softprops/action-gh-release@v2
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: 删除旧的工作流运行记录
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
+
+    - name: 删除旧的Releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
