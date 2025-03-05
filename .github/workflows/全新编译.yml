@@ -28,7 +28,7 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  CCACHE_DIR: ${{ github.workspace }}/ccache
+  CCACHE_DIR: /workdir/ccache
 
 jobs:
   build:
@@ -51,6 +51,7 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
+        build-mount-path: '/workdir'  # 直接挂载到/workdir
 
     - name: 清理Docker资源
       run: |
@@ -61,6 +62,8 @@ jobs:
       run: |
         echo "优化后磁盘空间情况："
         df -hT
+        echo "工作目录空间情况："
+        df -hT /workdir
 
     - name: 检出代码
       uses: actions/checkout@main
@@ -81,8 +84,8 @@ jobs:
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
+        # 确认工作目录状态
+        ls -la /workdir || echo "工作目录不存在，将被自动创建"
         echo "WORKDIR=/workdir" >> $GITHUB_ENV
 
     - name: 克隆源代码
@@ -140,12 +143,15 @@ jobs:
         restore-keys: |
           ccache-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-
 
-    # 创建符号链接
-    - name: 创建符号链接
+    - name: 检查缓存目录
       run: |
-        sudo mkdir -p -m 777 /mnt/openwrt/dl /mnt/openwrt/staging_dir
+        echo "检查缓存目录状态..."
+        mkdir -p -m 777 ${{ env.CCACHE_DIR }}
+        mkdir -p /workdir/package_hashes
         [ -d /workdir/openwrt/dl ] || mkdir -p /workdir/openwrt/dl
         [ -d /workdir/openwrt/staging_dir ] || mkdir -p /workdir/openwrt/staging_dir
+        ls -la ${{ env.CCACHE_DIR }}
+        df -hT /workdir
 
     - name: 加载自定义feeds
       run: |
@@ -205,6 +211,15 @@ jobs:
           echo "第 $i 次重试下载失败的软件包..."
           sleep 2
         done
+
+    - name: 检查编译前磁盘空间
+      run: |
+        echo "编译前磁盘空间情况："
+        df -hT
+        echo "工作目录空间情况："
+        df -hT /workdir
+        echo "CCACHE目录："
+        du -sh ${{ env.CCACHE_DIR }} || echo "CCACHE目录尚未创建"
 
     - name: 配置CCACHE
       run: |
@@ -293,6 +308,9 @@ jobs:
             done < /workdir/removed_packages.txt
           fi
           
+          # 定期检查磁盘空间
+          df -hT /workdir
+          
           # 编译新增或更新的软件包
           if [ -s /workdir/compile_list.txt ]; then
             echo "编译新增或更新的软件包..."
@@ -321,6 +339,9 @@ jobs:
                     sleep 2
                   fi
                 done
+                
+                # 定期检查磁盘空间
+                df -hT /workdir
               done < /workdir/compile_list.txt
               
               # 最后执行一次整体编译确保所有依赖都正确处理
@@ -343,6 +364,8 @@ jobs:
           
           # 构建目标文件系统
           echo "构建目标文件系统..."
+          # 再次检查空间
+          df -hT /workdir
           make -j$(nproc) || make -j1 V=s
           cp /workdir/current_packages.txt /workdir/previous_packages.txt
         fi
