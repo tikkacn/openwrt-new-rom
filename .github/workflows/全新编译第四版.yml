@@ -60,6 +60,26 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         mkdir -p /workdir/package_cache /workdir/build_state ${{ env.CCACHE_DIR }}
         chmod -R 777 /workdir
+        
+        # 创建DIY脚本
+        echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
+        echo '# 自定义feeds源' >> $GITHUB_WORKSPACE/diy-part1.sh
+        echo 'echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall" >> feeds.conf.default' >> $GITHUB_WORKSPACE/diy-part1.sh
+        chmod +x $GITHUB_WORKSPACE/diy-part1.sh
+        
+        echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
+        echo '# 自定义配置' >> $GITHUB_WORKSPACE/diy-part2.sh
+        echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
+        chmod +x $GITHUB_WORKSPACE/diy-part2.sh
+        
+        # 创建默认配置文件(如果不存在)
+        if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+          echo "# 创建默认的最小化配置文件" > $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_TARGET_x86=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_TARGET_x86_64=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+        fi
 
     - name: 克隆源代码
       working-directory: /workdir
@@ -68,52 +88,6 @@ jobs:
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
         cd openwrt
         find . -type f -name "*.sh" -exec chmod +x {} \;
-
-    # 清理旧缓存
-    - name: 清理旧缓存
-      uses: actions/github-script@v6
-      if: inputs.clean_build != 'true'
-      with:
-        script: |
-          const caches = await github.rest.actions.getActionsCacheList({
-            owner: context.repo.owner,
-            repo: context.repo.repo
-          });
-          
-          // 为每种缓存类型保留最新的一个
-          const latestCaches = {};
-          
-          for (const cache of caches.data.actions_caches) {
-            // 从缓存键中提取缓存类型
-            let cacheType = '';
-            if (cache.key.startsWith('packages-')) cacheType = 'packages';
-            else if (cache.key.startsWith('toolchain-')) cacheType = 'toolchain';
-            else if (cache.key.startsWith('ccache-')) cacheType = 'ccache';
-            else if (cache.key.startsWith('state-')) cacheType = 'state';
-            else continue; // 跳过其他类型的缓存
-            
-            if (!latestCaches[cacheType] || new Date(cache.created_at) > new Date(latestCaches[cacheType].created_at)) {
-              latestCaches[cacheType] = cache;
-            }
-          }
-          
-          // 删除非最新的缓存
-          for (const cache of caches.data.actions_caches) {
-            const cacheType = Object.values(latestCaches).find(c => c.id === cache.id);
-            if (!cacheType && (
-                cache.key.startsWith('packages-') || 
-                cache.key.startsWith('toolchain-') || 
-                cache.key.startsWith('ccache-') || 
-                cache.key.startsWith('state-')
-              )) {
-              console.log(`删除旧缓存: ${cache.key}`);
-              await github.rest.actions.deleteActionsCacheById({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                cache_id: cache.id
-              });
-            }
-          }
 
     # 恢复编译包缓存 - 最高优先级缓存
     - name: 恢复编译包缓存
@@ -199,10 +173,9 @@ jobs:
     # 配置编译环境
     - name: 配置编译环境
       run: |
-        # 加载自定义feeds
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF /workdir/openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
         cd /workdir/openwrt
+        
+        # 加载自定义feeds
         $GITHUB_WORKSPACE/$DIY_P1_SH
         
         # 更新feeds
@@ -210,14 +183,8 @@ jobs:
         ./scripts/feeds install -a
         
         # 加载自定义配置
-        [ -e files ] && mv files /workdir/openwrt/files
-        if [ ! -e "$CONFIG_FILE" ]; then
-          echo "错误: 找不到配置文件 $CONFIG_FILE" >&2
-          exit 1
-        fi
-        mv $CONFIG_FILE /workdir/openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd /workdir/openwrt
+        [ -e $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./files
+        cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
         $GITHUB_WORKSPACE/$DIY_P2_SH
         
         # 禁用自动重建和自动移除
@@ -340,17 +307,52 @@ jobs:
         
         # 显示CCACHE统计信息
         ccache -s
+        
+        # 检查固件编译结果
+        if [ -d "bin/targets" ]; then
+          echo "固件编译成功，目录存在"
+          ls -la bin/targets/
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "固件目录不存在，可能编译失败"
+          echo "status=failed" >> $GITHUB_OUTPUT
+        fi
 
     # 整理文件
     - name: 整理文件
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
+        # 首先验证目录存在
+        if [ ! -d "/workdir/openwrt/bin/targets" ]; then
+          echo "错误：固件目录不存在"
+          exit 1
+        fi
+        
         cd /workdir/openwrt/bin/targets/*/*
-        rm -rf packages
+        rm -rf packages || true
         mkdir -p firmware
-        find . -maxdepth 1 -name "*combined*" -or -name "*sysupgrade*" | xargs -i cp {} ./firmware/
+        
+        # 查找固件文件
+        FIRMWARE_FILES=$(find . -maxdepth 1 -name "*combined*" -or -name "*sysupgrade*")
+        if [ -z "$FIRMWARE_FILES" ]; then
+          echo "警告：未找到固件文件，使用所有bin文件"
+          FIRMWARE_FILES=$(find . -maxdepth 1 -name "*.bin")
+        fi
+        
+        # 复制找到的文件
+        if [ -n "$FIRMWARE_FILES" ]; then
+          echo "$FIRMWARE_FILES" | xargs -i cp {} ./firmware/
+        else
+          echo "错误：未找到任何固件文件"
+          # 复制所有文件作为备选
+          cp -r * ./firmware/
+        fi
+        
+        # 复制配置文件
         cp /workdir/openwrt/.config ./firmware/config.txt
+        
+        # 创建zip文件
         zip -r firmware.zip firmware
         echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
         echo "FIRMWARE_ZIP=$PWD/firmware.zip" >> $GITHUB_ENV
@@ -367,7 +369,7 @@ jobs:
     # 生成发布标签
     - name: 生成发布标签
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         echo "## OpenWrt固件构建完成 📦" > release.txt
