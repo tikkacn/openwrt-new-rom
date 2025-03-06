@@ -38,11 +38,24 @@ jobs:
     - name: 优化磁盘空间
       uses: easimon/maximize-build-space@master
       with:
-        root-reserve-mb: 2048
+        root-reserve-mb: 1024  # 降低保留空间
         swap-size-mb: 1
         remove-dotnet: 'true'
         remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
         build-mount-path: '/workdir'
+
+    - name: 额外清理磁盘空间
+      run: |
+        echo "清理额外磁盘空间..."
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+        sudo rm -rf /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL
+        docker image prune -a -f || true
+        sudo apt-get clean
+        sudo apt-get autoremove -y
+        df -h  # 显示当前磁盘使用情况
 
     - name: 初始化环境
       env:
@@ -57,6 +70,7 @@ jobs:
         mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
         libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
         vim wget xmlto xxd zlib1g-dev python3-setuptools jq
+        sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         mkdir -p /workdir/package_cache /workdir/build_state ${{ env.CCACHE_DIR }}
         chmod -R 777 /workdir
@@ -80,6 +94,9 @@ jobs:
           echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
           echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
         fi
+        
+        # 显示磁盘使用情况
+        df -h
 
     - name: 克隆源代码
       working-directory: /workdir
@@ -88,6 +105,9 @@ jobs:
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
         cd openwrt
         find . -type f -name "*.sh" -exec chmod +x {} \;
+        
+        # 清理不必要的内容
+        rm -rf .git
 
     # 恢复编译包缓存 - 最高优先级缓存
     - name: 恢复编译包缓存
@@ -169,6 +189,9 @@ jobs:
           mkdir -p /workdir/openwrt/staging_dir/target-*/packages
           cp -r /workdir/package_cache/* /workdir/openwrt/ || true
         fi
+        
+        # 显示磁盘使用情况
+        df -h
 
     # 配置编译环境
     - name: 配置编译环境
@@ -202,6 +225,10 @@ jobs:
         else
           echo "首次编译，创建包列表"
         fi
+        
+        # 清理临时文件
+        rm -rf /tmp/* || true
+        df -h
 
     - name: 开启SSH调试
       uses: mxschmitt/action-tmate@v3
@@ -216,8 +243,12 @@ jobs:
         # 配置CCACHE
         mkdir -p ${{ env.CCACHE_DIR }}
         ccache -o cache_dir=${{ env.CCACHE_DIR }}
-        ccache -o max_size=5G
+        ccache -o max_size=2G  # 限制CCACHE大小为2GB
         ccache -z
+        
+        # 清理下载缓存以节省空间
+        rm -rf dl || true
+        df -h
 
     # 智能编译固件
     - name: 智能编译固件
@@ -227,9 +258,29 @@ jobs:
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
         export PATH="/usr/lib/ccache:$PATH"
         
+        # 中间清理函数
+        cleanup_temp_files() {
+          echo "清理临时文件以释放空间..."
+          find build_dir -name "*.o" -delete || true
+          find build_dir -name "*.a" -delete || true
+          find build_dir -type f -size +50M | grep -v "\.ipk$" | xargs rm -f || true
+          rm -rf /tmp/* || true
+          df -h  # 显示磁盘使用情况
+        }
+        
         # 定义编译函数
         compile_firmware() {
+          echo "编译工具链..."
+          make -j$(nproc) tools/compile || make -j1 V=s tools/compile
+          cleanup_temp_files
+          
+          echo "编译工具链库..."
+          make -j$(nproc) toolchain/compile || make -j1 V=s toolchain/compile
+          cleanup_temp_files
+          
+          echo "编译主固件..."
           make -j$(nproc) || make -j1 V=s
+          
           if [ $? -eq 0 ]; then
             echo "编译成功"
             # 保存编译后的包到缓存目录
@@ -291,7 +342,9 @@ jobs:
           if [ ! -d "staging_dir/toolchain-"* ]; then
             echo "编译工具链..."
             make -j$(nproc) tools/install
+            cleanup_temp_files
             make -j$(nproc) toolchain/install
+            cleanup_temp_files
           fi
           
           compile_firmware
@@ -301,6 +354,11 @@ jobs:
         echo "清理大型中间文件以减少缓存大小..."
         find build_dir -name "*.o" -delete || true
         find build_dir -name "*.a" -delete || true
+        find build_dir -type f -size +20M | grep -v "\.ipk$" | xargs rm -f || true
+        # 清理编译目录，只保留必要文件
+        rm -rf build_dir/target-*/linux-*/linux-*/vmlinux* || true
+        rm -rf build_dir/target-*/root* || true
+        rm -rf build_dir/toolchain-* || true
         
         echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
@@ -317,6 +375,9 @@ jobs:
           echo "固件目录不存在，可能编译失败"
           echo "status=failed" >> $GITHUB_OUTPUT
         fi
+        
+        # 显示磁盘使用情况
+        df -h
 
     # 整理文件
     - name: 整理文件
@@ -398,3 +459,13 @@ jobs:
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    # 清理工作目录以节省空间
+    - name: 清理工作目录
+      if: always()
+      run: |
+        echo "清理工作目录以释放空间..."
+        rm -rf /workdir/openwrt/build_dir || true
+        rm -rf /workdir/openwrt/staging_dir || true
+        rm -rf /workdir/openwrt/tmp || true
+        df -h
