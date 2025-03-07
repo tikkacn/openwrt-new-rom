@@ -352,18 +352,19 @@ jobs:
           find build_dir -name "*.a" -delete || true
           find build_dir -type f -size +50M | grep -v "\.ipk$" | xargs rm -f || true
           find /workdir -name "*.log" -type f -delete || true
-          rm -rf /tmp/* || true
+          rm -rf /tmp/* 2>/dev/null || true
           df -h  # 显示磁盘使用情况
         }
         
         # 工具链缓存函数
         save_toolchain() {
           echo "保存工具链到缓存..."
-          mkdir -p /workdir/toolchain_cache
+          sudo mkdir -p /workdir/toolchain_cache
+          sudo chmod -R 777 /workdir/toolchain_cache
           if [ -d "staging_dir/toolchain-"* ]; then
             echo "复制工具链到缓存目录..."
-            cp -r staging_dir/toolchain-* /workdir/toolchain_cache/ || true
-            cp -r staging_dir/host /workdir/toolchain_cache/ || true
+            sudo cp -r staging_dir/toolchain-* /workdir/toolchain_cache/ || true
+            sudo cp -r staging_dir/host /workdir/toolchain_cache/ || true
             echo "工具链缓存大小:"
             du -sh /workdir/toolchain_cache
             echo "TOOLCHAIN_CACHED=true" >> $GITHUB_ENV
@@ -403,20 +404,26 @@ jobs:
           
           if [ $? -eq 0 ]; then
             echo "编译成功"
-            # 保存编译后的包到缓存目录
-            mkdir -p /workdir/package_cache
+            # 保存编译后的包到缓存目录 - 修复权限问题
+            sudo mkdir -p /workdir/package_cache
+            sudo chmod -R 777 /workdir/package_cache
+            
             if [ -d "bin/packages" ]; then
               echo "备份编译包到缓存..."
-              cp -r bin/packages /workdir/package_cache/
+              sudo mkdir -p /workdir/package_cache/bin
+              sudo cp -r bin/packages /workdir/package_cache/ || true
             fi
+            
             if [ -d "bin/targets" ]; then
-              mkdir -p /workdir/package_cache/bin
-              cp -r bin/targets /workdir/package_cache/bin/
+              sudo mkdir -p /workdir/package_cache/bin
+              sudo cp -r bin/targets /workdir/package_cache/bin/ || true
             fi
+            
             if [ -d "staging_dir/target-"* ]; then
-              mkdir -p /workdir/package_cache/staging_dir
-              cp -r staging_dir/target-* /workdir/package_cache/staging_dir/
+              sudo mkdir -p /workdir/package_cache/staging_dir
+              sudo cp -r staging_dir/target-* /workdir/package_cache/staging_dir/ || true
             fi
+            
             # 保存当前包配置
             cp /workdir/build_state/current_packages.txt /workdir/build_state/previous_packages.txt
             # 保存配置文件，保留注释和排序
@@ -714,7 +721,7 @@ jobs:
       if: always()
       run: |
         echo "清理工作目录以释放空间..."
-        rm -rf /workdir/openwrt/build_dir || true
-        rm -rf /workdir/openwrt/staging_dir || true
-        rm -rf /workdir/openwrt/tmp || true
+        sudo rm -rf /workdir/openwrt/build_dir || true
+        sudo rm -rf /workdir/openwrt/staging_dir || true
+        sudo rm -rf /workdir/openwrt/tmp || true
         df -h
