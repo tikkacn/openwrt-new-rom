@@ -1,4 +1,4 @@
-name: 全新编译第五版
+name: 全新编译第六版
 
 on:
   workflow_dispatch:
