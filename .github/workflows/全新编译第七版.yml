@@ -168,10 +168,11 @@ jobs:
     # 检查缓存恢复状态 - 修复逻辑
     - name: 检查缓存恢复状态
       run: |
-        echo "编译包缓存恢复状态: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
-        echo "工具链缓存恢复状态: ${{ steps.cache-toolchain.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
-        echo "CCACHE缓存恢复状态: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
-        echo "构建状态缓存恢复状态: ${{ steps.cache-state.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        # 使用实际目录检查缓存状态
+        echo "编译包缓存恢复状态: $([ -d '/workdir/package_cache' ] && [ "$(ls -A /workdir/package_cache 2>/dev/null)" ] && echo '成功' || echo '未找到缓存')"
+        echo "工具链缓存恢复状态: $([ -d '/workdir/toolchain_cache' ] && [ "$(ls -A /workdir/toolchain_cache 2>/dev/null)" ] && echo '成功' || echo '未找到缓存')"
+        echo "CCACHE缓存恢复状态: $([ -d '${{ env.CCACHE_DIR }}' ] && [ "$(ls -A ${{ env.CCACHE_DIR }} 2>/dev/null)" ] && echo '成功' || echo '未找到缓存')"
+        echo "构建状态恢复状态: $([ -f '/workdir/build_state/config.md5' ] && echo '成功' || echo '未找到缓存')"
         
         # 验证构建状态缓存内容
         if [ -d "/workdir/build_state" ]; then
@@ -191,7 +192,7 @@ jobs:
         fi
         
         # 检查工具链缓存
-        if [ -d "/workdir/toolchain_cache" ] && [ "$(ls -A /workdir/toolchain_cache)" ]; then
+        if [ -d "/workdir/toolchain_cache" ] && [ "$(ls -A /workdir/toolchain_cache 2>/dev/null)" ]; then
           echo "工具链缓存找到，准备恢复..."
           mkdir -p /workdir/openwrt/staging_dir/
           
@@ -226,7 +227,7 @@ jobs:
         fi
         
         # 恢复已缓存的包到对应位置，修复目录结构问题
-        if [ -d "/workdir/package_cache" ] && [ "$(ls -A /workdir/package_cache)" ]; then
+        if [ -d "/workdir/package_cache" ] && [ "$(ls -A /workdir/package_cache 2>/dev/null)" ]; then
           echo "从缓存恢复编译包..."
           
           # 创建必要的目录结构
@@ -297,6 +298,9 @@ jobs:
         else
           echo "首次编译，创建包列表"
         fi
+        
+        # 将当前配置保存为比较基准，确保文件存在
+        cp .config /workdir/build_state/config.txt.current
         
         # 清理临时文件
         rm -rf /tmp/* || true
@@ -472,6 +476,12 @@ jobs:
           PREVIOUS_MD5=$(cat /workdir/build_state/config.md5)
           echo "当前配置MD5: $CURRENT_MD5"
           echo "之前配置MD5: $PREVIOUS_MD5"
+          
+          # 准备配置文件用于比较
+          if [ ! -f "/workdir/build_state/config.txt" ] && [ -f "/workdir/build_state/config.txt.current" ]; then
+            echo "使用当前保存的配置作为比较基准"
+            cp /workdir/build_state/config.txt.current /workdir/build_state/config.txt
+          fi
           
           if [ "$CURRENT_MD5" != "$PREVIOUS_MD5" ]; then
             echo "配置已更改，分析变更..."
