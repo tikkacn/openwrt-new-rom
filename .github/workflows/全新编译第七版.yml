@@ -1,4 +1,30 @@
-name: 全新编译第七版
+# 特别添加的预编译修复步骤 - 解决gnulib-tool权限问题
+    - name: 额外的预编译修复
+      run: |
+        echo "执行预编译修复..."
+        
+        # 直接解决gnulib-tool权限问题
+        if [ -f "/workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool" ]; then
+          echo "修复gnulib-tool权限..."
+          sudo chmod +x /workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool
+          sudo find /workdir/openwrt/staging_dir/host/share/gnulib -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/openwrt/staging_dir/host/share/gnulib -name "*.pl" -exec chmod +x {} \; 2>/dev/null || true
+          ls -la /workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool
+        fi
+        
+        # 确保主机目录中的所有bin文件可执行
+        echo "确保主机目录中的所有可执行文件权限正确..."
+        sudo find /workdir/openwrt/staging_dir/host/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+        
+        # 修复hostpkg目录权限
+        if [ -d "/workdir/openwrt/build_dir/hostpkg" ]; then
+          echo "修复hostpkg目录权限..."
+          sudo chown -R $(id -u):$(id -g) /workdir/openwrt/build_dir/hostpkg
+          sudo find /workdir/openwrt/build_dir/hostpkg -type d -exec chmod 755 {} \;
+          sudo find /workdir/openwrt/build_dir/hostpkg -type f -exec chmod 644 {} \;
+          sudo find /workdir/openwrt/build_dir/hostpkg -type f -name "*.sh" -exec chmod +x {} \;
+          sudo find /workdir/openwrt/build_dir/hostpkg -path "*/bin/*" -type f -exec chmod +x {} \; 2>/dev/null || true
+        finame: 全新编译第七版
 
 on:
   workflow_dispatch:
@@ -197,9 +223,13 @@ jobs:
           sudo chown -R $(id -u):$(id -g) /workdir/openwrt/staging_dir
           sudo find /workdir/openwrt/staging_dir -type d -exec chmod 755 {} \;
           sudo find /workdir/openwrt/staging_dir -type f -exec chmod 644 {} \;
+          
           # 特别处理可执行文件，确保有执行权限
+          echo "确保脚本和二进制文件有执行权限..."
           sudo find /workdir/openwrt/staging_dir -type f -name "*.sh" -exec chmod +x {} \;
           sudo find /workdir/openwrt/staging_dir/host/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/openwrt/staging_dir/host/share -type f -name "gnulib-tool" -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/openwrt/staging_dir/host/share/gnulib -type f -exec chmod +x {} \; 2>/dev/null || true
           sudo find /workdir/openwrt/staging_dir/toolchain-*/bin -type f -exec chmod +x {} \; 2>/dev/null || true
           sudo find /workdir/openwrt/staging_dir/toolchain-*/libexec -type f -exec chmod +x {} \; 2>/dev/null || true
         fi
@@ -210,8 +240,12 @@ jobs:
           sudo chown -R $(id -u):$(id -g) /workdir/toolchain_cache
           sudo find /workdir/toolchain_cache -type d -exec chmod 755 {} \;
           sudo find /workdir/toolchain_cache -type f -exec chmod 644 {} \;
+          
+          echo "确保工具链脚本和二进制文件有执行权限..."
           sudo find /workdir/toolchain_cache -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
           sudo find /workdir/toolchain_cache/host/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/toolchain_cache/host/share -type f -name "gnulib-tool" -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/toolchain_cache/host/share/gnulib -type f -exec chmod +x {} \; 2>/dev/null || true
           sudo find /workdir/toolchain_cache -path "*/bin/*" -type f -exec chmod +x {} \; 2>/dev/null || true
           sudo find /workdir/toolchain_cache -path "*/libexec/*" -type f -exec chmod +x {} \; 2>/dev/null || true
         fi
@@ -223,6 +257,14 @@ jobs:
           sudo find /workdir/openwrt/build_dir -type d -exec chmod 755 {} \;
           sudo find /workdir/openwrt/build_dir -type f -exec chmod 644 {} \;
           sudo find /workdir/openwrt/build_dir -type f -name "*.sh" -exec chmod +x {} \;
+          sudo find /workdir/openwrt/build_dir -path "*/bin/*" -type f -exec chmod +x {} \; 2>/dev/null || true
+        fi
+        
+        # 特别针对gettext-full编译失败进行修复
+        if [ -d "/workdir/openwrt/staging_dir/host/share/gnulib" ]; then
+          echo "特别修复gnulib-tool权限问题..."
+          sudo chmod +x /workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool
+          ls -la /workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool
         fi
         
         # 确保工作目录所有者正确
@@ -356,10 +398,15 @@ jobs:
           # 只删除超大文件，保留大部分中间文件以加速增量编译
           find build_dir -type f -size +100M | grep -v "\.ipk$" | xargs rm -f || true
           find /workdir -name "*.log" -type f -delete || true
-          rm -rf /tmp/* 2>/dev/null || true
+          
+          # 安全地清理临时目录，跳过没有权限的文件
           if [ -d "/workdir/tmp" ]; then
-            find /workdir/tmp -type f -delete || true
+            find /workdir/tmp -type f -delete 2>/dev/null || true
           fi
+          
+          # 清理临时文件时忽略权限错误
+          rm -rf /tmp/* 2>/dev/null || true
+          
           df -h  # 显示磁盘使用情况
         }
         
