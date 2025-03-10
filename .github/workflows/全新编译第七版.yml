@@ -1,30 +1,4 @@
-# 特别添加的预编译修复步骤 - 解决gnulib-tool权限问题
-    - name: 额外的预编译修复
-      run: |
-        echo "执行预编译修复..."
-        
-        # 直接解决gnulib-tool权限问题
-        if [ -f "/workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool" ]; then
-          echo "修复gnulib-tool权限..."
-          sudo chmod +x /workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool
-          sudo find /workdir/openwrt/staging_dir/host/share/gnulib -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
-          sudo find /workdir/openwrt/staging_dir/host/share/gnulib -name "*.pl" -exec chmod +x {} \; 2>/dev/null || true
-          ls -la /workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool
-        fi
-        
-        # 确保主机目录中的所有bin文件可执行
-        echo "确保主机目录中的所有可执行文件权限正确..."
-        sudo find /workdir/openwrt/staging_dir/host/bin -type f -exec chmod +x {} \; 2>/dev/null || true
-        
-        # 修复hostpkg目录权限
-        if [ -d "/workdir/openwrt/build_dir/hostpkg" ]; then
-          echo "修复hostpkg目录权限..."
-          sudo chown -R $(id -u):$(id -g) /workdir/openwrt/build_dir/hostpkg
-          sudo find /workdir/openwrt/build_dir/hostpkg -type d -exec chmod 755 {} \;
-          sudo find /workdir/openwrt/build_dir/hostpkg -type f -exec chmod 644 {} \;
-          sudo find /workdir/openwrt/build_dir/hostpkg -type f -name "*.sh" -exec chmod +x {} \;
-          sudo find /workdir/openwrt/build_dir/hostpkg -path "*/bin/*" -type f -exec chmod +x {} \; 2>/dev/null || true
-        finame: 全新编译第七版
+name: 全新编译第七版
 
 on:
   workflow_dispatch:
@@ -270,6 +244,34 @@ jobs:
         # 确保工作目录所有者正确
         sudo chown -R $(id -u):$(id -g) /workdir
 
+    # 特别添加的预编译修复步骤 - 解决gnulib-tool权限问题
+    - name: 额外的预编译修复
+      run: |
+        echo "执行预编译修复..."
+        
+        # 直接解决gnulib-tool权限问题
+        if [ -f "/workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool" ]; then
+          echo "修复gnulib-tool权限..."
+          sudo chmod +x /workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool
+          sudo find /workdir/openwrt/staging_dir/host/share/gnulib -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/openwrt/staging_dir/host/share/gnulib -name "*.pl" -exec chmod +x {} \; 2>/dev/null || true
+          ls -la /workdir/openwrt/staging_dir/host/share/gnulib/gnulib-tool
+        fi
+        
+        # 确保主机目录中的所有bin文件可执行
+        echo "确保主机目录中的所有可执行文件权限正确..."
+        sudo find /workdir/openwrt/staging_dir/host/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+        
+        # 修复hostpkg目录权限
+        if [ -d "/workdir/openwrt/build_dir/hostpkg" ]; then
+          echo "修复hostpkg目录权限..."
+          sudo chown -R $(id -u):$(id -g) /workdir/openwrt/build_dir/hostpkg
+          sudo find /workdir/openwrt/build_dir/hostpkg -type d -exec chmod 755 {} \;
+          sudo find /workdir/openwrt/build_dir/hostpkg -type f -exec chmod 644 {} \;
+          sudo find /workdir/openwrt/build_dir/hostpkg -type f -name "*.sh" -exec chmod +x {} \;
+          sudo find /workdir/openwrt/build_dir/hostpkg -path "*/bin/*" -type f -exec chmod +x {} \; 2>/dev/null || true
+        fi
+
     # 检查工具链恢复并复制
     - name: 检查和准备工具链
       run: |
@@ -312,6 +314,11 @@ jobs:
       run: |
         cd /workdir/openwrt
         
+        # 保留原始配置备份
+        if [ -f ".config" ]; then
+          cp .config .config.original
+        fi
+        
         # 加载自定义feeds
         $GITHUB_WORKSPACE/$DIY_P1_SH
         
@@ -325,9 +332,10 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_P2_SH
         
         # 禁用自动重建和自动移除 - 这对增量编译至关重要
-        echo "CONFIG_AUTOREMOVE=n" >> .config
-        echo "CONFIG_AUTOREBUILD=n" >> .config
-        echo "CONFIG_CCACHE=y" >> .config
+        # 确保这些配置不会被覆盖 - 使用强制追加和数据库合并方式
+        grep -q "^CONFIG_AUTOREMOVE=n" .config || echo "CONFIG_AUTOREMOVE=n" >> .config
+        grep -q "^CONFIG_AUTOREBUILD=n" .config || echo "CONFIG_AUTOREBUILD=n" >> .config
+        grep -q "^CONFIG_CCACHE=y" .config || echo "CONFIG_CCACHE=y" >> .config
         
         # 应用配置前后比较变化
         echo "应用defconfig前后配置差异:"
@@ -350,8 +358,8 @@ jobs:
         # 将当前配置保存为比较基准，确保文件存在
         cp .config /workdir/build_state/config.txt.current
         
-        # 清理临时文件
-        rm -rf /tmp/* || true
+        # 清理临时文件 - 使用安全的方式
+        find /tmp -maxdepth 1 -not -path "/tmp" -not -path "/tmp/systemd-*" -not -path "/tmp/snap-*" -not -path "/tmp/dotnet-*" -not -path "/tmp/clr-*" -exec rm -rf {} \; 2>/dev/null || true
         df -h
 
     - name: 开启SSH调试
@@ -523,7 +531,7 @@ jobs:
               # 修复文件权限
               sudo find bin/targets -type d -exec chmod 755 {} \;
               sudo find bin/targets -type f -exec chmod 644 {} \;
-              
+                 
               sudo mkdir -p /workdir/package_cache/bin
               sudo cp -r bin/targets /workdir/package_cache/bin/ || true
             fi
@@ -681,55 +689,28 @@ jobs:
         # 执行编译
         compile_firmware
         
-        # 检查编译结果
-        if [ -d "bin/targets" ]; then
-          echo "编译成功，备份编译缓存..."
-          
-          # 保存工具链到缓存
-          if [ -d "staging_dir/toolchain-"* ]; then
-            echo "保存工具链到缓存..."
-            mkdir -p /workdir/toolchain_cache
-            cp -r staging_dir/toolchain-* /workdir/toolchain_cache/ || true
-            cp -r staging_dir/host /workdir/toolchain_cache/ || true
-          fi
-          
-          # 保存编译包到缓存
-          if [ -d "bin/packages" ]; then
-            echo "保存编译包到缓存..."
-            mkdir -p /workdir/package_cache/bin
-            cp -r bin/packages /workdir/package_cache/bin/ || true
-          fi
-          
-          if [ -d "bin/targets" ]; then
-            mkdir -p /workdir/package_cache/bin
-            cp -r bin/targets /workdir/package_cache/bin/ || true
-          fi
-          
-          # 保存当前包配置
-          cp /workdir/build_state/current_packages.txt /workdir/build_state/previous_packages.txt
-          # 保存配置文件
-          cp .config /workdir/build_state/config.txt
-          # 保存配置MD5
-          grep -v "^#" .config | sort | md5sum | awk '{print $1}' > /workdir/build_state/config.md5
-          # 保存源代码版本信息
-          if [ -f "/workdir/build_state/current_git_commit" ]; then
-            cp /workdir/build_state/current_git_commit /workdir/build_state/previous_git_commit
-          fi
-          if [ -f "/workdir/build_state/current_git_info" ]; then
-            cp /workdir/build_state/current_git_info /workdir/build_state/previous_git_info
-          fi
-          
-          echo "固件编译完成"
-          echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
-          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-          echo "status=success" >> $GITHUB_OUTPUT
-        else
-          echo "固件编译失败"
-          echo "status=failed" >> $GITHUB_OUTPUT
-        fi
+        # 显示磁盘使用情况
+        df -h
+        
+        # 清理大文件，减少缓存体积 - 仅删除部分文件以保留增量编译能力
+        echo "清理大型中间文件以减少缓存大小..."
+        find build_dir -type f -size +50M | grep -v "\.ipk$" | xargs rm -f || true
+        
+        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
         
         # 显示CCACHE统计信息
         ccache -s
+        
+        # 检查固件编译结果
+        if [ -d "bin/targets" ]; then
+          echo "固件编译成功，目录存在"
+          ls -la bin/targets/
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "固件目录不存在，可能编译失败"
+          echo "status=failed" >> $GITHUB_OUTPUT
+        fi
         
         # 显示磁盘使用情况
         df -h
@@ -814,3 +795,24 @@ jobs:
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    # 清理工作目录以节省空间
+    - name: 清理工作目录
+      if: always()
+      run: |
+        echo "清理工作目录以释放空间..."
+        # 清理可能有权限问题的目录
+        sudo rm -rf /workdir/openwrt/staging_dir/target-*/root* || true
+        sudo rm -rf /workdir/openwrt/tmp || true
+        sudo rm -rf /workdir/tmp/* || true
+        
+        # 修复缓存文件权限
+        sudo find /workdir/openwrt/bin -type d -exec chmod 755 {} \; 2>/dev/null || true
+        sudo find /workdir/openwrt/bin -type f -exec chmod 644 {} \; 2>/dev/null || true
+        sudo find /workdir/toolchain_cache -type d -exec chmod 755 {} \; 2>/dev/null || true
+        sudo find /workdir/toolchain_cache -type f -exec chmod 644 {} \; 2>/dev/null || true
+        sudo find /workdir/package_cache -type d -exec chmod 755 {} \; 2>/dev/null || true
+        sudo find /workdir/package_cache -type f -exec chmod 644 {} \; 2>/dev/null || true
+        sudo find /workdir/build_state -type f -exec chmod 644 {} \; 2>/dev/null || true
+        
+        df -h
