@@ -153,7 +153,7 @@ jobs:
         restore-keys: |
           packages-
 
-    # 恢复工具链缓存 - 次要优先级 - 修改路径
+    # 恢复工具链缓存 - 次要优先级
     - name: 恢复工具链缓存
       uses: actions/cache@v3
       id: cache-toolchain
@@ -186,115 +186,89 @@ jobs:
         restore-keys: |
           state-
 
-    # 检查缓存恢复状态 - 修复逻辑
-    - name: 检查缓存恢复状态
+    # === 关键修复部分：解决权限问题 ===
+    - name: 修复文件权限
       run: |
-        # 使用实际目录检查缓存状态
-        echo "构建目录缓存恢复状态: $([ -d '/workdir/openwrt/build_dir' ] && [ "$(ls -A /workdir/openwrt/build_dir 2>/dev/null)" ] && echo '成功' || echo '未找到缓存')"
-        echo "编译包缓存恢复状态: $([ -d '/workdir/package_cache' ] && [ "$(ls -A /workdir/package_cache 2>/dev/null)" ] && echo '成功' || echo '未找到缓存')"
-        echo "工具链缓存恢复状态: $([ -d '/workdir/toolchain_cache' ] && [ "$(ls -A /workdir/toolchain_cache 2>/dev/null)" ] && echo '成功' || echo '未找到缓存')"
-        echo "CCACHE缓存恢复状态: $([ -d '${{ env.CCACHE_DIR }}' ] && [ "$(ls -A ${{ env.CCACHE_DIR }} 2>/dev/null)" ] && echo '成功' || echo '未找到缓存')"
-        echo "构建状态恢复状态: $([ -f '/workdir/build_state/config.md5' ] && echo '成功' || echo '未找到缓存')"
+        echo "修复缓存文件权限..."
         
-        # 验证构建状态缓存内容
-        if [ -d "/workdir/build_state" ]; then
-          echo "构建状态目录内容:"
-          ls -la /workdir/build_state/
-          if [ -f "/workdir/build_state/config.md5" ]; then
-            echo "找到配置MD5: $(cat /workdir/build_state/config.md5)"
-          else
-            echo "未找到配置MD5文件"
-          fi
-          if [ -f "/workdir/build_state/previous_git_commit" ]; then
-            echo "上次源码版本: $(cat /workdir/build_state/previous_git_info || echo '信息不可用')"
-          fi
-        else
-          echo "构建状态目录不存在或为空"
-          mkdir -p /workdir/build_state
+        # 修复staging_dir目录权限
+        if [ -d "/workdir/openwrt/staging_dir" ]; then
+          echo "修复staging_dir权限..."
+          sudo chown -R $(id -u):$(id -g) /workdir/openwrt/staging_dir
+          sudo find /workdir/openwrt/staging_dir -type d -exec chmod 755 {} \;
+          sudo find /workdir/openwrt/staging_dir -type f -exec chmod 644 {} \;
+          # 特别处理可执行文件，确保有执行权限
+          sudo find /workdir/openwrt/staging_dir -type f -name "*.sh" -exec chmod +x {} \;
+          sudo find /workdir/openwrt/staging_dir/host/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/openwrt/staging_dir/toolchain-*/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/openwrt/staging_dir/toolchain-*/libexec -type f -exec chmod +x {} \; 2>/dev/null || true
         fi
         
-        # 检查工具链缓存
+        # 修复工具链缓存权限
+        if [ -d "/workdir/toolchain_cache" ]; then
+          echo "修复工具链缓存权限..."
+          sudo chown -R $(id -u):$(id -g) /workdir/toolchain_cache
+          sudo find /workdir/toolchain_cache -type d -exec chmod 755 {} \;
+          sudo find /workdir/toolchain_cache -type f -exec chmod 644 {} \;
+          sudo find /workdir/toolchain_cache -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/toolchain_cache/host/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/toolchain_cache -path "*/bin/*" -type f -exec chmod +x {} \; 2>/dev/null || true
+          sudo find /workdir/toolchain_cache -path "*/libexec/*" -type f -exec chmod +x {} \; 2>/dev/null || true
+        fi
+        
+        # 修复build_dir目录权限
+        if [ -d "/workdir/openwrt/build_dir" ]; then
+          echo "修复build_dir权限..."
+          sudo chown -R $(id -u):$(id -g) /workdir/openwrt/build_dir
+          sudo find /workdir/openwrt/build_dir -type d -exec chmod 755 {} \;
+          sudo find /workdir/openwrt/build_dir -type f -exec chmod 644 {} \;
+          sudo find /workdir/openwrt/build_dir -type f -name "*.sh" -exec chmod +x {} \;
+        fi
+        
+        # 确保工作目录所有者正确
+        sudo chown -R $(id -u):$(id -g) /workdir
+
+    # 检查工具链恢复并复制
+    - name: 检查和准备工具链
+      run: |
         if [ -d "/workdir/toolchain_cache" ] && [ "$(ls -A /workdir/toolchain_cache 2>/dev/null)" ]; then
           echo "工具链缓存找到，准备恢复..."
+          # 确保目标目录存在
           mkdir -p /workdir/openwrt/staging_dir/
           
-          # 先检查目录结构并创建必要的目录
-          for dir in $(find /workdir/toolchain_cache -maxdepth 1 -type d | grep -v "^/workdir/toolchain_cache$"); do
-            dirname=$(basename "$dir")
-            mkdir -p "/workdir/openwrt/staging_dir/$dirname"
-          done
-          
-          # 然后复制文件
+          echo "复制工具链文件..."
           cp -r /workdir/toolchain_cache/* /workdir/openwrt/staging_dir/ || true
-          echo "工具链缓存恢复完成"
-          echo "工具链目录内容:"
-          ls -la /workdir/openwrt/staging_dir/
+          
+          # 重要：确保所有二进制文件有执行权限
+          echo "设置可执行权限..."
+          find /workdir/openwrt/staging_dir -path "*/bin/*" -type f -exec chmod +x {} \; 2>/dev/null || true
+          find /workdir/openwrt/staging_dir -path "*/libexec/*" -type f -exec chmod +x {} \; 2>/dev/null || true
+          find /workdir/openwrt/staging_dir/host/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+          
+          echo "工具链恢复完成，验证关键可执行文件..."
+          if [ -f "/workdir/openwrt/staging_dir/host/bin/mkhash" ]; then
+            ls -la /workdir/openwrt/staging_dir/host/bin/mkhash
+          else
+            echo "mkhash文件不存在，可能需要全量编译"
+          fi
         else
-          echo "工具链缓存目录为空或不存在"
+          echo "工具链缓存目录为空或不存在，将进行全量编译"
         fi
         
-        # 检查目录大小
-        if [ -d "/workdir/openwrt/staging_dir/toolchain-"* ]; then
-          echo "工具链缓存大小:"
-          du -sh /workdir/openwrt/staging_dir/toolchain-*
-        else
-          echo "工具链目录不存在"
-        fi
-        
-        if [ -d "/workdir/openwrt/bin/packages" ]; then
-          echo "编译包缓存大小:"
-          du -sh /workdir/openwrt/bin/packages
-        else
-          echo "编译包目录不存在"
-        fi
-        
-        # 恢复已缓存的包到对应位置，修复目录结构问题
+        # 恢复包缓存
         if [ -d "/workdir/package_cache" ] && [ "$(ls -A /workdir/package_cache 2>/dev/null)" ]; then
           echo "从缓存恢复编译包..."
-          
-          # 创建必要的目录结构
-          mkdir -p /workdir/openwrt/bin/packages
-          
-          # 检查并创建目标目录
-          if [ -d "/workdir/package_cache/staging_dir" ]; then
-            mkdir -p /workdir/openwrt/staging_dir
-            for dir in $(find /workdir/package_cache/staging_dir -maxdepth 1 -type d | grep -v "^/workdir/package_cache/staging_dir$"); do
-              dirname=$(basename "$dir")
-              mkdir -p "/workdir/openwrt/staging_dir/$dirname"
-            done
+          mkdir -p /workdir/openwrt/bin/
+          if [ -d "/workdir/package_cache/bin" ]; then
+            cp -r /workdir/package_cache/bin/* /workdir/openwrt/bin/ || true
           fi
-          
-          # 检查并创建targets目录
-          if [ -d "/workdir/package_cache/bin/targets" ]; then
-            mkdir -p /workdir/openwrt/bin/targets
-          fi
-          
-          # 然后复制文件
-          cp -r /workdir/package_cache/* /workdir/openwrt/ || true
           echo "从缓存恢复编译包完成"
         fi
-        
-        # 检查是否有构建目录缓存
-        if [ -d "/workdir/openwrt/build_dir" ] && [ "$(ls -A /workdir/openwrt/build_dir 2>/dev/null)" ]; then
-          echo "构建目录缓存存在，这将大大加速增量编译"
-          echo "构建目录大小:"
-          du -sh /workdir/openwrt/build_dir
-        else
-          echo "构建目录缓存不存在，增量编译可能不会显著加速"
-        fi
-        
-        # 显示磁盘使用情况
-        df -h
 
     # 配置编译环境 - 修改以保留原始配置
     - name: 配置编译环境
       run: |
         cd /workdir/openwrt
-        
-        # 保留原始配置备份
-        if [ -f ".config" ]; then
-          cp .config .config.original
-        fi
         
         # 加载自定义feeds
         $GITHUB_WORKSPACE/$DIY_P1_SH
@@ -365,18 +339,7 @@ jobs:
         rm -rf dl || true
         df -h
 
-    # 诊断缓存状态
-    - name: 诊断缓存状态
-      run: |
-        echo "诊断缓存前的工作目录状态："
-        ls -la /workdir/
-        echo "OpenWrt目录结构："
-        ls -la /workdir/openwrt/
-        echo "工具链目录是否存在："
-        ls -la /workdir/openwrt/staging_dir/ || echo "staging_dir不存在"
-        df -h
-
-    # 智能编译固件 - 优化配置检查和源代码变更逻辑
+    # 智能增量编译，保留包变更评估逻辑
     - name: 智能编译固件
       id: compile
       run: |
@@ -413,6 +376,10 @@ jobs:
             sudo find staging_dir/toolchain-* -type f -exec chmod 644 {} \;
             sudo find staging_dir/host -type d -exec chmod 755 {} \;
             sudo find staging_dir/host -type f -exec chmod 644 {} \;
+            # 确保二进制文件可执行
+            sudo find staging_dir/host/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+            sudo find staging_dir/toolchain-*/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+            sudo find staging_dir/toolchain-*/libexec -type f -exec chmod +x {} \; 2>/dev/null || true
             
             # 复制到缓存
             sudo cp -r staging_dir/toolchain-* /workdir/toolchain_cache/ || true
@@ -429,6 +396,14 @@ jobs:
         
         # 优化的编译函数 - 使用不同的命令处理增量和全量编译
         compile_firmware() {
+          # 首先检查工具链文件权限
+          if [ -f "staging_dir/host/bin/mkhash" ] && [ ! -x "staging_dir/host/bin/mkhash" ]; then
+            echo "修复mkhash和其他工具链文件权限..."
+            find staging_dir/host/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+            find staging_dir/toolchain-*/bin -type f -exec chmod +x {} \; 2>/dev/null || true
+            find staging_dir/toolchain-*/libexec -type f -exec chmod +x {} \; 2>/dev/null || true
+          fi
+          
           # 只在全量编译或工具链不存在时构建工具链
           if [ $DO_FULL_BUILD -eq 1 ] || [ ! -d "staging_dir/toolchain-"* ]; then
             echo "编译工具链..."
@@ -494,7 +469,7 @@ jobs:
               sudo find bin/packages -type f -exec chmod 644 {} \;
               
               sudo mkdir -p /workdir/package_cache/bin
-              sudo cp -r bin/packages /workdir/package_cache/ || true
+              sudo cp -r bin/packages /workdir/package_cache/bin/ || true
             fi
             
             if [ -d "bin/targets" ]; then
@@ -620,13 +595,23 @@ jobs:
           fi
         fi
         
-        # 检查工具链是否可用
+        # 检查工具链是否可用，如果不可用则强制全量编译
         if [ ! -d "staging_dir/toolchain-"* ]; then
           echo "工具链不存在，需要重新编译"
           DO_FULL_BUILD=1
         else
           echo "检测到现有工具链，检查是否完整..."
-          ls -la staging_dir/toolchain-*
+          if [ ! -f "staging_dir/host/bin/mkhash" ]; then
+            echo "关键工具链文件缺失，需要重新编译"
+            DO_FULL_BUILD=1
+          else
+            # 检查可执行权限
+            if [ ! -x "staging_dir/host/bin/mkhash" ]; then
+              echo "mkhash没有执行权限，修复权限..."
+              chmod +x staging_dir/host/bin/mkhash
+            fi
+            ls -la staging_dir/toolchain-*
+          fi
         fi
         
         # 如果配置有变化且源代码更新，强制编译新增的包
@@ -649,62 +634,58 @@ jobs:
         # 执行编译
         compile_firmware
         
-        # 显示磁盘使用情况
-        df -h
-        
-        # 清理大文件，减少缓存体积 - 仅删除部分文件以保留增量编译能力
-        echo "清理大型中间文件以减少缓存大小..."
-        find build_dir -type f -size +50M | grep -v "\.ipk$" | xargs rm -f || true
-        
-        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        # 检查编译结果
+        if [ -d "bin/targets" ]; then
+          echo "编译成功，备份编译缓存..."
+          
+          # 保存工具链到缓存
+          if [ -d "staging_dir/toolchain-"* ]; then
+            echo "保存工具链到缓存..."
+            mkdir -p /workdir/toolchain_cache
+            cp -r staging_dir/toolchain-* /workdir/toolchain_cache/ || true
+            cp -r staging_dir/host /workdir/toolchain_cache/ || true
+          fi
+          
+          # 保存编译包到缓存
+          if [ -d "bin/packages" ]; then
+            echo "保存编译包到缓存..."
+            mkdir -p /workdir/package_cache/bin
+            cp -r bin/packages /workdir/package_cache/bin/ || true
+          fi
+          
+          if [ -d "bin/targets" ]; then
+            mkdir -p /workdir/package_cache/bin
+            cp -r bin/targets /workdir/package_cache/bin/ || true
+          fi
+          
+          # 保存当前包配置
+          cp /workdir/build_state/current_packages.txt /workdir/build_state/previous_packages.txt
+          # 保存配置文件
+          cp .config /workdir/build_state/config.txt
+          # 保存配置MD5
+          grep -v "^#" .config | sort | md5sum | awk '{print $1}' > /workdir/build_state/config.md5
+          # 保存源代码版本信息
+          if [ -f "/workdir/build_state/current_git_commit" ]; then
+            cp /workdir/build_state/current_git_commit /workdir/build_state/previous_git_commit
+          fi
+          if [ -f "/workdir/build_state/current_git_info" ]; then
+            cp /workdir/build_state/current_git_info /workdir/build_state/previous_git_info
+          fi
+          
+          echo "固件编译完成"
+          echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "固件编译失败"
+          echo "status=failed" >> $GITHUB_OUTPUT
+        fi
         
         # 显示CCACHE统计信息
         ccache -s
         
-        # 检查固件编译结果
-        if [ -d "bin/targets" ]; then
-          echo "固件编译成功，目录存在"
-          ls -la bin/targets/
-          echo "status=success" >> $GITHUB_OUTPUT
-        else
-          echo "固件目录不存在，可能编译失败"
-          echo "status=failed" >> $GITHUB_OUTPUT
-        fi
-        
         # 显示磁盘使用情况
         df -h
-
-    # 检查工具链缓存状态
-    - name: 检查工具链缓存状态
-      run: |
-        echo "编译后工具链缓存状态:"
-        if [ -d "/workdir/toolchain_cache" ]; then
-          echo "工具链缓存目录存在"
-          ls -la /workdir/toolchain_cache/
-          du -sh /workdir/toolchain_cache/
-        else
-          echo "工具链缓存目录不存在"
-        fi
-        
-        echo "OpenWrt staging_dir状态:"
-        if [ -d "/workdir/openwrt/staging_dir" ]; then
-          ls -la /workdir/openwrt/staging_dir/
-          if [ -d "/workdir/openwrt/staging_dir/toolchain-"* ]; then
-            du -sh /workdir/openwrt/staging_dir/toolchain-*
-          fi
-        else
-          echo "staging_dir不存在"
-        fi
-        
-        echo "构建目录状态:"
-        if [ -d "/workdir/openwrt/build_dir" ]; then
-          du -sh /workdir/openwrt/build_dir
-          echo "顶级构建子目录:"
-          ls -la /workdir/openwrt/build_dir/
-        else
-          echo "build_dir不存在"
-        fi
 
     # 整理文件
     - name: 整理文件
@@ -786,24 +767,3 @@ jobs:
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        
-    # 清理工作目录以节省空间
-    - name: 清理工作目录
-      if: always()
-      run: |
-        echo "清理工作目录以释放空间..."
-        # 清理可能有权限问题的目录
-        sudo rm -rf /workdir/openwrt/staging_dir/target-*/root* || true
-        sudo rm -rf /workdir/openwrt/tmp || true
-        sudo rm -rf /workdir/tmp/* || true
-        
-        # 修复缓存文件权限
-        sudo find /workdir/openwrt/bin -type d -exec chmod 755 {} \;
-        sudo find /workdir/openwrt/bin -type f -exec chmod 644 {} \;
-        sudo find /workdir/toolchain_cache -type d -exec chmod 755 {} \; 2>/dev/null || true
-        sudo find /workdir/toolchain_cache -type f -exec chmod 644 {} \; 2>/dev/null || true
-        sudo find /workdir/package_cache -type d -exec chmod 755 {} \; 2>/dev/null || true
-        sudo find /workdir/package_cache -type f -exec chmod 644 {} \; 2>/dev/null || true
-        sudo find /workdir/build_state -type f -exec chmod 644 {} \; 2>/dev/null || true
-        
-        df -h
