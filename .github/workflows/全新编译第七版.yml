@@ -448,7 +448,11 @@ jobs:
           find /workdir/openwrt/build_dir/hostpkg -type f -exec file {} \; | grep -i "shell script" | cut -d ':' -f 1 | xargs -r chmod +x 2>/dev/null || true
         fi
 
+    - name: 开启SSH调试
+      uses: mxschmitt/action-tmate@v3
+      if: github.event.inputs.ssh == 'true'
     # 智能增量编译，保留包变更评估逻辑
+    
     - name: 智能编译固件
       id: compile
       run: |
