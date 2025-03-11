@@ -91,6 +91,7 @@ jobs:
         chmod +x $GITHUB_WORKSPACE/diy-part2.sh
         
         if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+          echo "警告：配置文件 $CONFIG_FILE 不存在，创建默认配置文件"
           echo "# 创建默认的最小化配置文件" > $GITHUB_WORKSPACE/$CONFIG_FILE
           echo "CONFIG_TARGET_x86=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
           echo "CONFIG_TARGET_x86_64=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
@@ -127,7 +128,7 @@ jobs:
       id: cache-toolchain
       if: inputs.clean_build != 'true'
       with:
-        path: /workdir/toolchain_cache
+        path: /workdir/toolchain_cache/staging_dir
         key: toolchain-${{ env.REPO_BRANCH }}-${{ hashFiles(github.event.inputs.config_file || '增量缓存优化.config') }}
         restore-keys: |
           toolchain-${{ env.REPO_BRANCH }}-
@@ -151,31 +152,50 @@ jobs:
         restore-keys: |
           state-${{ env.REPO_BRANCH }}-
 
+    - name: 恢复Feeds缓存
+      uses: actions/cache@v3
+      id: cache-feeds
+      if: inputs.clean_build != 'true'
+      with:
+        path: /workdir/openwrt/feeds
+        key: feeds-${{ env.REPO_BRANCH }}-${{ hashFiles(github.event.inputs.config_file || '增量缓存优化.config') }}
+        restore-keys: |
+          feeds-${{ env.REPO_BRANCH }}-
+
     - name: 检查缓存恢复状态
       run: |
         echo "编译包缓存恢复状态: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "工具链缓存恢复状态: ${{ steps.cache-toolchain.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "CCACHE缓存恢复状态: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "构建状态缓存恢复状态: ${{ steps.cache-state.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "Feeds缓存恢复状态: ${{ steps.cache-feeds.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         
         ls -la /workdir/build_state/ || echo "构建状态目录为空"
         if [ -f "/workdir/build_state/config.md5" ]; then
           echo "之前MD5: $(cat /workdir/build_state/config.md5)"
+        fi
+        if [ -f "/workdir/toolchain_cache/staging_dir/host/bin/libdeflate-gzip" ]; then
+          echo "工具链包含 libdeflate-gzip，缓存正常"
+        else
+          echo "警告：工具链缓存缺少 libdeflate-gzip"
         fi
         df -h
 
     - name: 配置编译环境
       run: |
         cd /workdir/openwrt
+        if [ -d "/workdir/toolchain_cache/staging_dir" ]; then
+          ln -sf /workdir/toolchain_cache/staging_dir .
+        fi
         if [ -f ".config" ]; then
           cp .config .config.original
         fi
         $GITHUB_WORKSPACE/$DIY_P1_SH
-        if [ ! -d "feeds/packages" ]; then
+        if [ -d "feeds" ]; then
+          echo "Feeds 已存在，跳过更新"
+        else
           echo "Feeds 不存在，执行更新..."
           ./scripts/feeds update -a
-        else
-          echo "Feeds 已存在，跳过更新"
         fi
         ./scripts/feeds install -a
         [ -e $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./files
@@ -247,14 +267,13 @@ jobs:
         save_toolchain() {
           echo "保存工具链到缓存..."
           mkdir -p /workdir/toolchain_cache
-          if [ -d "staging_dir/toolchain-"* ]; then
-            cp -r staging_dir/toolchain-* /workdir/toolchain_cache/
-            cp -r staging_dir/host /workdir/toolchain_cache/ || true
+          if [ -d "staging_dir" ]; then
+            cp -r staging_dir/* /workdir/toolchain_cache/
             TOOLCHAIN_SIZE=$(du -sh /workdir/toolchain_cache | awk '{print $1}')
             TOOLCHAIN_FILES=$(find /workdir/toolchain_cache -type f | wc -l)
             echo "工具链缓存大小: $TOOLCHAIN_SIZE"
             echo "工具链文件数: $TOOLCHAIN_FILES"
-            echo "保存路径: /workdir/toolchain_cache"
+            ls -la /workdir/toolchain_cache/host/bin || echo "host/bin 目录为空"
             echo "### 工具链缓存保存" >> $GITHUB_STEP_SUMMARY
             echo "- 大小: $TOOLCHAIN_SIZE" >> $GITHUB_STEP_SUMMARY
             echo "- 文件数: $TOOLCHAIN_FILES" >> $GITHUB_STEP_SUMMARY
@@ -316,7 +335,6 @@ jobs:
             echo "$TOOLCHAIN_MD5" > /workdir/build_state/toolchain.md5
             echo "$PACKAGE_MD5" > /workdir/build_state/package.md5
             echo "保存构建状态完成"
-            # 添加调试输出以确认缓存内容
             echo "检查缓存内容："
             ls -la /workdir/package_cache || echo "编译包缓存目录为空"
             ls -la /workdir/toolchain_cache || echo "工具链缓存目录为空"
@@ -338,8 +356,8 @@ jobs:
         DO_FULL_BUILD=0
         DO_PACKAGE_BUILD=0
 
-        if [ -z "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
-          echo "工具链配置变化或首次编译，需要全量编译"
+        if [ -z "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "${{ github.event.inputs.clean_build }}" = "true" ] || [ ! -d "feeds" ]; then
+          echo "工具链配置变化、首次编译或 feeds 缺失，需要全量编译"
           DO_FULL_BUILD=1
         elif [ -z "$PREVIOUS_PACKAGE_MD5" ] || [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
           echo "软件包配置变化，需要编译软件包"
