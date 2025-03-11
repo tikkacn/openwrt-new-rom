@@ -27,6 +27,10 @@ env:
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
   CCACHE_DIR: /workdir/ccache
+  # 新增缓存目录环境变量
+  TOOLCHAIN_DIR: /workdir/openwrt/staging_dir
+  PACKAGES_DIR: /workdir/openwrt/bin/targets
+  BUILD_STATE_DIR: /workdir/build_state
 
 jobs:
   build:
@@ -79,7 +83,7 @@ jobs:
         vim wget xmlto xxd zlib1g-dev python3-setuptools jq bc lm-sensors pciutils
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
-        mkdir -p /workdir/build_state ${{ env.CCACHE_DIR }}
+        mkdir -p ${{ env.BUILD_STATE_DIR }} ${{ env.CCACHE_DIR }}
         chmod -R 777 /workdir
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
         echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
@@ -108,14 +112,16 @@ jobs:
         cat feeds.conf.default
         rm -rf .git
 
+    # 修改缓存恢复逻辑，确保键的唯一性和一致性
     - name: 恢复编译包缓存
       uses: actions/cache@v3
       id: cache-packages
       if: inputs.clean_build != 'true'
       with:
-        path: /workdir/openwrt/bin/targets
-        key: packages-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        path: ${{ env.PACKAGES_DIR }}
+        key: packages-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-${{ github.run_id }}
         restore-keys: |
+          packages-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-
           packages-${{ env.REPO_BRANCH }}-
 
     - name: 恢复工具链缓存
@@ -123,9 +129,10 @@ jobs:
       id: cache-toolchain
       if: inputs.clean_build != 'true'
       with:
-        path: /workdir/openwrt/staging_dir
-        key: toolchain-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        path: ${{ env.TOOLCHAIN_DIR }}
+        key: toolchain-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-${{ github.run_id }}
         restore-keys: |
+          toolchain-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-
           toolchain-${{ env.REPO_BRANCH }}-
 
     - name: 恢复CCACHE缓存
@@ -133,8 +140,9 @@ jobs:
       id: cache-ccache
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        key: ccache-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-${{ github.run_id }}
         restore-keys: |
+          ccache-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-
           ccache-${{ env.REPO_BRANCH }}-
 
     - name: 恢复构建状态缓存
@@ -142,24 +150,26 @@ jobs:
       id: cache-state
       if: inputs.clean_build != 'true'
       with:
-        path: /workdir/build_state
-        key: state-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        path: ${{ env.BUILD_STATE_DIR }}
+        key: state-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-${{ github.run_id }}
         restore-keys: |
+          state-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-
           state-${{ env.REPO_BRANCH }}-
 
     - name: 检查缓存恢复状态
       run: |
         echo "CONFIG_FILE: ${{ env.CONFIG_FILE }}"
-        echo "Cache Key: packages-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}"
+        echo "Cache Key: packages-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}"
         echo "编译包缓存恢复状态: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "工具链缓存恢复状态: ${{ steps.cache-toolchain.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "CCACHE缓存恢复状态: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "构建状态缓存恢复状态: ${{ steps.cache-state.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
-        ls -la /workdir/build_state/ || echo "构建状态目录为空"
-        if [ -f "/workdir/build_state/config.md5" ]; then
-          echo "之前MD5: $(cat /workdir/build_state/config.md5)"
+        ls -la ${{ env.BUILD_STATE_DIR }}/ || echo "构建状态目录为空"
+        if [ -f "${{ env.BUILD_STATE_DIR }}/config.md5" ]; then
+          echo "之前MD5: $(cat ${{ env.BUILD_STATE_DIR }}/config.md5)"
         fi
-        if [ -f "/workdir/openwrt/staging_dir/host/bin/libdeflate-gzip" ]; then
+        mkdir -p ${{ env.PACKAGES_DIR }} ${{ env.TOOLCHAIN_DIR }}
+        if [ -d "${{ env.TOOLCHAIN_DIR }}/host/bin" ] && [ -f "${{ env.TOOLCHAIN_DIR }}/host/bin/libdeflate-gzip" ]; then
           echo "工具链包含 libdeflate-gzip，缓存正常"
         else
           echo "警告：工具链缓存缺少 libdeflate-gzip"
@@ -207,9 +217,10 @@ jobs:
       id: check-feeds
       run: |
         cd /workdir/openwrt
-        find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > /workdir/build_state/feeds.sha256
-        CURRENT_FEEDS_HASH=$(cat /workdir/build_state/feeds.sha256 | awk '{print $1}')
-        PREVIOUS_FEEDS_HASH=$(cat /workdir/build_state/previous_feeds.sha256 || echo "")
+        mkdir -p ${{ env.BUILD_STATE_DIR }}
+        find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > ${{ env.BUILD_STATE_DIR }}/feeds.sha256
+        CURRENT_FEEDS_HASH=$(cat ${{ env.BUILD_STATE_DIR }}/feeds.sha256 | awk '{print $1}')
+        PREVIOUS_FEEDS_HASH=$(cat ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256 2>/dev/null || echo "")
         if [ "$CURRENT_FEEDS_HASH" != "$PREVIOUS_FEEDS_HASH" ]; then
           echo "feeds_changed=true" >> $GITHUB_ENV
         else
@@ -217,18 +228,18 @@ jobs:
         fi
         echo "当前 feeds 哈希: $CURRENT_FEEDS_HASH"
         echo "之前 feeds 哈希: $PREVIOUS_FEEDS_HASH"
-        cp /workdir/build_state/feeds.sha256 /workdir/build_state/previous_feeds.sha256
+        cp ${{ env.BUILD_STATE_DIR }}/feeds.sha256 ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256
 
     - name: 恢复已编译软件包
       if: steps.cache-packages.outputs.cache-hit == 'true'
       run: |
         cd /workdir/openwrt
-        mkdir -p bin
+        mkdir -p bin/targets
         if [ "${{ env.feeds_changed }}" = "true" ]; then
           echo "feeds 已更新，跳过恢复旧的编译包缓存"
         else
           echo "已恢复缓存中的软件包"
-          ls -la bin/targets/
+          find ${{ env.PACKAGES_DIR }} -type f | wc -l
         fi
 
     - name: 开启SSH调试
@@ -241,9 +252,8 @@ jobs:
         make download -j8 || make download -j1 V=s
         mkdir -p ${{ env.CCACHE_DIR }}
         ccache -o cache_dir=${{ env.CCACHE_DIR }}
-        ccache -o max_size=1G
+        ccache -o max_size=4G  # 增加CCACHE大小
         ccache -z
-        rm -rf dl || true
         df -h
 
     - name: 智能编译固件
@@ -259,35 +269,20 @@ jobs:
           df -h
         }
 
-        check_toolchain() {
-          echo "检查工具链缓存..."
-          if [ -d "staging_dir" ]; then
-            TOOLCHAIN_SIZE=$(du -sh staging_dir | awk '{print $1}')
-            echo "工具链缓存大小: $TOOLCHAIN_SIZE"
-            ls -la staging_dir/host/bin || echo "host/bin 目录为空"
-          else
-            echo "错误：无工具链目录可保存"
-            exit 1
-          fi
-        }
-
-        check_packages() {
-          echo "检查编译包缓存..."
-          if [ -d "bin/targets" ]; then
-            PACKAGE_SIZE=$(du -sh bin/targets | awk '{print $1}')
-            echo "编译包缓存大小: $PACKAGE_SIZE"
-            ls -la bin/targets || echo "targets 目录为空"
-          else
-            echo "错误：无编译包可保存"
-            exit 1
-          fi
+        save_cache_info() {
+          echo "保存缓存状态信息..."
+          mkdir -p ${{ env.BUILD_STATE_DIR }}
+          cp .config ${{ env.BUILD_STATE_DIR }}/config.txt
+          echo "$TOOLCHAIN_MD5" > ${{ env.BUILD_STATE_DIR }}/toolchain.md5
+          echo "$PACKAGE_MD5" > ${{ env.BUILD_STATE_DIR }}/package.md5
+          echo "保存构建状态完成"
         }
 
         compile_firmware() {
           if [ $DO_FULL_BUILD -eq 1 ]; then
             echo "下载依赖..."
             make download -j8 V=s || make download -j1 V=s
-            if [ ! -d "staging_dir/toolchain-"* ]; then
+            if [ ! -d "${{ env.TOOLCHAIN_DIR }}/toolchain-"* ]; then
               echo "编译工具链..."
               make -j$(nproc) tools/compile V=s || make -j1 V=s tools/compile
               make -j$(nproc) toolchain/compile V=s || make -j1 V=s toolchain/compile
@@ -302,6 +297,7 @@ jobs:
             make -j$(nproc) package/clean V=s || make -j1 V=s package/clean
             make -j$(nproc) package/compile V=s || make -j1 V=s package/compile
             make -j$(nproc) package/index V=s || make -j1 V=s package/index
+            make -j$(nproc) target/install V=s || make -j1 V=s target/install  # 确保生成固件
           else
             echo "增量编译，强制编译所有包..."
             make -j$(nproc) package/clean V=s || make -j1 V=s package/clean
@@ -309,15 +305,8 @@ jobs:
             make -j$(nproc) V=s || make -j1 V=s
           fi
 
-          # 检查并保存缓存
-          echo "检查并准备缓存..."
-          check_toolchain
-          check_packages
-          mkdir -p /workdir/build_state
-          cp .config /workdir/build_state/config.txt
-          echo "$TOOLCHAIN_MD5" > /workdir/build_state/toolchain.md5
-          echo "$PACKAGE_MD5" > /workdir/build_state/package.md5
-          echo "保存构建状态完成"
+          # 保存缓存信息
+          save_cache_info
 
           if [ $? -eq 0 ]; then
             echo "编译成功"
@@ -329,10 +318,10 @@ jobs:
 
         TOOLCHAIN_CONFIG=$(grep "^CONFIG_TARGET" .config | sort)
         TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG" | md5sum | awk '{print $1}')
-        PREVIOUS_TOOLCHAIN_MD5=$(cat /workdir/build_state/toolchain.md5 || echo "")
+        PREVIOUS_TOOLCHAIN_MD5=$(cat ${{ env.BUILD_STATE_DIR }}/toolchain.md5 2>/dev/null || echo "")
         PACKAGE_CONFIG=$(grep "^CONFIG_PACKAGE" .config | sort)
         PACKAGE_MD5=$(echo "$PACKAGE_CONFIG" | md5sum | awk '{print $1}')
-        PREVIOUS_PACKAGE_MD5=$(cat /workdir/build_state/package.md5 || echo "")
+        PREVIOUS_PACKAGE_MD5=$(cat ${{ env.BUILD_STATE_DIR }}/package.md5 2>/dev/null || echo "")
         DO_FULL_BUILD=0
         DO_PACKAGE_BUILD=0
 
@@ -376,6 +365,11 @@ jobs:
         echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
         echo "FIRMWARE_ZIP=$PWD/firmware.zip" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
+        
+        # 验证编译成果和缓存状态
+        echo "验证编译结果和缓存状态..."
+        ls -la ${{ env.TOOLCHAIN_DIR }}/host/bin/ || echo "工具链目录为空"
+        find ${{ env.PACKAGES_DIR }} -type f | head -10
 
     - name: 上传固件目录
       uses: actions/upload-artifact@main
@@ -414,10 +408,15 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: 清理工作目录
+    # 重要的修改：不再删除工具链缓存
+    - name: 保存缓存状态
       if: always()
       run: |
-        echo "清理工作目录以释放空间（保留 build_dir）..."
-        rm -rf /workdir/openwrt/staging_dir || true
-        rm -rf /workdir/openwrt/tmp || true
+        echo "保存所有缓存状态，确保下次构建可使用..."
+        mkdir -p ${{ env.BUILD_STATE_DIR }}
+        echo "缓存状态保存于 $(date)" > ${{ env.BUILD_STATE_DIR }}/cache_saved_time.txt
+        echo "工具链目录大小: $(du -sh ${{ env.TOOLCHAIN_DIR }} | cut -f1)"
+        echo "CCACHE 目录大小: $(du -sh ${{ env.CCACHE_DIR }} | cut -f1)"
+        echo "编译包目录大小: $(du -sh ${{ env.PACKAGES_DIR }} | cut -f1)"
+        echo "构建状态目录大小: $(du -sh ${{ env.BUILD_STATE_DIR }} | cut -f1)"
         df -h
