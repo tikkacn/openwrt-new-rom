@@ -57,7 +57,6 @@ jobs:
         sudo apt-get clean
         sudo apt-get autoremove -y
 
-        # 只检查根分区空间
         ROOT_AVAIL=$(df -m /dev/root | tail -1 | awk '{print $4}')
         echo "根分区可用空间: ${ROOT_AVAIL}MB"
         if [ "$ROOT_AVAIL" -lt 20480 ]; then
@@ -83,18 +82,14 @@ jobs:
         mkdir -p /workdir/package_cache /workdir/build_state /workdir/toolchain_cache ${{ env.CCACHE_DIR }}
         chmod -R 777 /workdir
         
-        # 创建DIY脚本
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
-        echo '# 自定义feeds源' >> $GITHUB_WORKSPACE/diy-part1.sh
         echo 'echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall" >> feeds.conf.default' >> $GITHUB_WORKSPACE/diy-part1.sh
         chmod +x $GITHUB_WORKSPACE/diy-part1.sh
         
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
-        echo '# 自定义配置' >> $GITHUB_WORKSPACE/diy-part2.sh
         echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
         chmod +x $GITHUB_WORKSPACE/diy-part2.sh
         
-        # 创建默认配置文件(如果不存在)
         if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
           echo "# 创建默认的最小化配置文件" > $GITHUB_WORKSPACE/$CONFIG_FILE
           echo "CONFIG_TARGET_x86=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
@@ -176,7 +171,12 @@ jobs:
           cp .config .config.original
         fi
         $GITHUB_WORKSPACE/$DIY_P1_SH
-        ./scripts/feeds update -a
+        if [ ! -d "feeds/packages" ]; then
+          echo "Feeds 不存在，执行更新..."
+          ./scripts/feeds update -a
+        else
+          echo "Feeds 已存在，跳过更新"
+        fi
         ./scripts/feeds install -a
         [ -e $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./files
         cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
@@ -255,7 +255,6 @@ jobs:
             echo "工具链缓存大小: $TOOLCHAIN_SIZE"
             echo "工具链文件数: $TOOLCHAIN_FILES"
             echo "保存路径: /workdir/toolchain_cache"
-            # 写入 Summary
             echo "### 工具链缓存保存" >> $GITHUB_STEP_SUMMARY
             echo "- 大小: $TOOLCHAIN_SIZE" >> $GITHUB_STEP_SUMMARY
             echo "- 文件数: $TOOLCHAIN_FILES" >> $GITHUB_STEP_SUMMARY
@@ -276,7 +275,6 @@ jobs:
             echo "编译包缓存大小: $PACKAGE_SIZE"
             echo "编译包文件数: $PACKAGE_FILES"
             echo "保存路径: /workdir/package_cache"
-            # 写入 Summary
             echo "### 编译包缓存保存" >> $GITHUB_STEP_SUMMARY
             echo "- 大小: $PACKAGE_SIZE" >> $GITHUB_STEP_SUMMARY
             echo "- 文件数: $PACKAGE_FILES" >> $GITHUB_STEP_SUMMARY
@@ -318,6 +316,11 @@ jobs:
             echo "$TOOLCHAIN_MD5" > /workdir/build_state/toolchain.md5
             echo "$PACKAGE_MD5" > /workdir/build_state/package.md5
             echo "保存构建状态完成"
+            # 添加调试输出以确认缓存内容
+            echo "检查缓存内容："
+            ls -la /workdir/package_cache || echo "编译包缓存目录为空"
+            ls -la /workdir/toolchain_cache || echo "工具链缓存目录为空"
+            ls -la /workdir/build_state || echo "构建状态缓存目录为空"
           else
             echo "编译失败"
             exit 1
