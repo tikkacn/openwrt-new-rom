@@ -19,6 +19,7 @@ on:
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
+  FEEDS_CONF_URL: https://github.com/tikkacn/openwrt-new-rom/raw/main/feeds.conf.default
   CONFIG_FILE: ${{ github.event.inputs.config_file || '增量缓存优化.config' }}
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
@@ -38,8 +39,8 @@ jobs:
     - name: 优化磁盘空间
       uses: easimon/maximize-build-space@master
       with:
-        root-reserve-mb: 20480  # 为 /dev/root 预留 20GB
-        swap-size-mb: 5120      # 交换空间 5GB
+        root-reserve-mb: 20480
+        swap-size-mb: 5120
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
@@ -82,8 +83,9 @@ jobs:
         mkdir -p /workdir/package_cache /workdir/build_state /workdir/toolchain_cache ${{ env.CCACHE_DIR }}
         chmod -R 777 /workdir
         
+        # 生成默认 diy-part1.sh（仅作为占位符，feeds 已在克隆步骤中覆盖）
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
-        echo 'echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall" >> feeds.conf.default' >> $GITHUB_WORKSPACE/diy-part1.sh
+        echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
         chmod +x $GITHUB_WORKSPACE/diy-part1.sh
         
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
@@ -101,13 +103,16 @@ jobs:
         
         df -h
 
-    - name: 克隆源代码
+    - name: 克隆源代码并配置 Feeds
       working-directory: /workdir
       run: |
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
         cd openwrt
         find . -type f -name "*.sh" -exec chmod +x {} \;
+        # 下载并覆盖默认 feeds.conf.default
+        curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "警告：无法下载 feeds.conf.default，使用仓库默认配置"
+        cat feeds.conf.default
         rm -rf .git
 
     - name: 恢复编译包缓存
@@ -200,13 +205,33 @@ jobs:
         ./scripts/feeds install -a
         [ -e $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./files
         cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
+        cp .config .config.input
         $GITHUB_WORKSPACE/$DIY_P2_SH
         echo "CONFIG_AUTOREMOVE=n" >> .config
         echo "CONFIG_AUTOREBUILD=n" >> .config
         make defconfig
+        # 检查并恢复所有 CONFIG_PACKAGE_*=y
+        grep "^CONFIG_PACKAGE_.*=y" .config.input > packages_input.txt || true
+        grep "^CONFIG_PACKAGE_.*=y" .config > packages_defconfig.txt || true
+        comm -23 packages_input.txt packages_defconfig.txt > missing_packages.txt
+        if [ -s missing_packages.txt ]; then
+          echo "警告：以下包在 defconfig 后缺失，将尝试恢复："
+          cat missing_packages.txt
+          cat missing_packages.txt >> .config
+          while read -r line; do
+            pkg=$(echo "$line" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+            echo "安装包: $pkg"
+            ./scripts/feeds install "$pkg" || echo "警告：无法安装 $pkg，可能不在 feeds 中"
+          done < missing_packages.txt
+          make defconfig
+        else
+          echo "所有配置项均保留，无缺失"
+        fi
+        diff .config.input .config > config_diff.txt || echo "配置无差异"
+        cat config_diff.txt
         df -h
 
-    - name: 检查源码变化
+ reassuringly   - name: 检查源码变化
       id: check-feeds
       run: |
         cd /workdir/openwrt
@@ -274,10 +299,6 @@ jobs:
             echo "工具链缓存大小: $TOOLCHAIN_SIZE"
             echo "工具链文件数: $TOOLCHAIN_FILES"
             ls -la /workdir/toolchain_cache/host/bin || echo "host/bin 目录为空"
-            echo "### 工具链缓存保存" >> $GITHUB_STEP_SUMMARY
-            echo "- 大小: $TOOLCHAIN_SIZE" >> $GITHUB_STEP_SUMMARY
-            echo "- 文件数: $TOOLCHAIN_FILES" >> $GITHUB_STEP_SUMMARY
-            echo "- 路径: /workdir/toolchain_cache" >> $GITHUB_STEP_SUMMARY
           else
             echo "无工具链目录可保存"
           fi
@@ -293,11 +314,6 @@ jobs:
             PACKAGE_FILES=$(find /workdir/package_cache -type f | wc -l)
             echo "编译包缓存大小: $PACKAGE_SIZE"
             echo "编译包文件数: $PACKAGE_FILES"
-            echo "保存路径: /workdir/package_cache"
-            echo "### 编译包缓存保存" >> $GITHUB_STEP_SUMMARY
-            echo "- 大小: $PACKAGE_SIZE" >> $GITHUB_STEP_SUMMARY
-            echo "- 文件数: $PACKAGE_FILES" >> $GITHUB_STEP_SUMMARY
-            echo "- 路径: /workdir/package_cache" >> $GITHUB_STEP_SUMMARY
           else
             echo "无编译包可保存"
           fi
@@ -322,7 +338,9 @@ jobs:
             make -j$(nproc) package/compile || make -j1 V=s package/compile
             make -j$(nproc) package/index || make -j1 V=s package/index
           else
-            echo "最小化增量编译..."
+            echo "增量编译，强制编译所有包..."
+            make -j$(nproc) package/clean || make -j1 V=s package/clean
+            make -j$(nproc) package/compile || make -j1 V=s package/compile
             make -j$(nproc) || make -j1 V=s
           fi
 
@@ -335,10 +353,26 @@ jobs:
             echo "$TOOLCHAIN_MD5" > /workdir/build_state/toolchain.md5
             echo "$PACKAGE_MD5" > /workdir/build_state/package.md5
             echo "保存构建状态完成"
-            echo "检查缓存内容："
-            ls -la /workdir/package_cache || echo "编译包缓存目录为空"
-            ls -la /workdir/toolchain_cache || echo "工具链缓存目录为空"
-            ls -la /workdir/build_state || echo "构建状态缓存目录为空"
+            # 验证所有包是否生成
+            grep "^CONFIG_PACKAGE_.*=y" .config > packages_config.txt || true
+            MISSING_PACKAGES=0
+            while read -r line; do
+              pkg=$(echo "$line" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+              if ! find bin/packages -name "$pkg_*" >/dev/null 2>&1; then
+                echo "警告：包 $pkg 未在 bin/packages 中找到"
+                MISSING_PACKAGES=$((MISSING_PACKAGES + 1))
+              fi
+            done < packages_config.txt
+            if [ $MISSING_PACKAGES -gt 0 ]; then
+              echo "错误：有 $MISSING_PACKAGES 个包未生成，将重新编译"
+              make -j$(nproc) package/clean || make -j1 V=s package/clean
+              make -j$(nproc) package/compile || make -j1 V=s package/compile
+              make -j$(nproc) || make -j1 V=s
+              if [ $? -ne 0 ]; then
+                echo "重新编译失败，请检查日志"
+                exit 1
+              fi
+            fi
           else
             echo "编译失败"
             exit 1
