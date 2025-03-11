@@ -76,7 +76,7 @@ jobs:
         libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
         mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
         libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-        vim wget xmlto xxd zlib1g-dev python3-setuptools jq
+        vim wget xmlto xxd zlib1g-dev python3-setuptools jq bc lm-sensors pciutils
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         mkdir -p /workdir/package_cache /workdir/build_state /workdir/toolchain_cache ${{ env.CCACHE_DIR }}
@@ -113,11 +113,8 @@ jobs:
       id: cache-packages
       if: inputs.clean_build != 'true'
       with:
-        path: |
-          /workdir/package_cache
-          /workdir/openwrt/bin/packages
-          /workdir/openwrt/bin/targets/*/packages
-        key: packages-${{ env.REPO_BRANCH }}-${{ hashFiles(github.event.inputs.config_file || '增量缓存优化.config') }}
+        path: /workdir/package_cache
+        key: packages-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
         restore-keys: |
           packages-${{ env.REPO_BRANCH }}-
 
@@ -126,8 +123,8 @@ jobs:
       id: cache-toolchain
       if: inputs.clean_build != 'true'
       with:
-        path: /workdir/toolchain_cache/staging_dir
-        key: toolchain-${{ env.REPO_BRANCH }}-${{ hashFiles(github.event.inputs.config_file || '增量缓存优化.config') }}
+        path: /workdir/toolchain_cache
+        key: toolchain-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
         restore-keys: |
           toolchain-${{ env.REPO_BRANCH }}-
 
@@ -136,37 +133,28 @@ jobs:
       id: cache-ccache
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_BRANCH }}-${{ hashFiles(github.event.inputs.config_file || '增量缓存优化.config') }}
+        key: ccache-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
         restore-keys: |
           ccache-${{ env.REPO_BRANCH }}-
 
-    - name: 恢复构建状态
+    - name: 恢复构建状态缓存
       uses: actions/cache@v3
       id: cache-state
       if: inputs.clean_build != 'true'
       with:
         path: /workdir/build_state
-        key: state-${{ env.REPO_BRANCH }}-${{ hashFiles(github.event.inputs.config_file || '增量缓存优化.config') }}
+        key: state-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
         restore-keys: |
           state-${{ env.REPO_BRANCH }}-
 
-    - name: 恢复Feeds缓存
-      uses: actions/cache@v3
-      id: cache-feeds
-      if: inputs.clean_build != 'true'
-      with:
-        path: /workdir/openwrt/feeds
-        key: feeds-${{ env.REPO_BRANCH }}-${{ hashFiles(github.event.inputs.config_file || '增量缓存优化.config') }}
-        restore-keys: |
-          feeds-${{ env.REPO_BRANCH }}-
-
     - name: 检查缓存恢复状态
       run: |
+        echo "CONFIG_FILE: ${{ env.CONFIG_FILE }}"
+        echo "Cache Key: packages-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}"
         echo "编译包缓存恢复状态: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "工具链缓存恢复状态: ${{ steps.cache-toolchain.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "CCACHE缓存恢复状态: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "构建状态缓存恢复状态: ${{ steps.cache-state.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
-        echo "Feeds缓存恢复状态: ${{ steps.cache-feeds.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         ls -la /workdir/build_state/ || echo "构建状态目录为空"
         if [ -f "/workdir/build_state/config.md5" ]; then
           echo "之前MD5: $(cat /workdir/build_state/config.md5)"
@@ -188,12 +176,8 @@ jobs:
           cp .config .config.original
         fi
         $GITHUB_WORKSPACE/$DIY_P1_SH
-        if [ -d "feeds" ]; then
-          echo "Feeds 已存在，跳过更新"
-        else
-          echo "Feeds 不存在，执行更新..."
-          ./scripts/feeds update -a
-        fi
+        echo "更新并安装 Feeds..."
+        ./scripts/feeds update -a
         ./scripts/feeds install -a
         [ -e $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./files
         cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
@@ -242,14 +226,13 @@ jobs:
       if: steps.cache-packages.outputs.cache-hit == 'true'
       run: |
         cd /workdir/openwrt
-        mkdir -p bin/packages bin/targets
+        mkdir -p bin
         if [ "${{ env.feeds_changed }}" = "true" ]; then
           echo "feeds 已更新，跳过恢复旧的编译包缓存"
         else
-          cp -r /workdir/package_cache/bin/packages/* bin/packages/ || true
-          cp -r /workdir/package_cache/bin/targets/* bin/targets/ || true
+          cp -r /workdir/package_cache/* bin/ || true
           echo "已恢复缓存中的软件包"
-          ls -la bin/packages/
+          ls -la bin/
         fi
 
     - name: 开启SSH调试
@@ -262,7 +245,7 @@ jobs:
         make download -j8 || make download -j1 V=s
         mkdir -p ${{ env.CCACHE_DIR }}
         ccache -o cache_dir=${{ env.CCACHE_DIR }}
-        ccache -o max_size=5G
+        ccache -o max_size=1G  # 限制为 1GB
         ccache -z
         rm -rf dl || true
         df -h
@@ -284,55 +267,55 @@ jobs:
           echo "保存工具链到缓存..."
           mkdir -p /workdir/toolchain_cache
           if [ -d "staging_dir" ]; then
-            cp -r staging_dir/* /workdir/toolchain_cache/
-            TOOLCHAIN_SIZE=$(du -sh /workdir/toolchain_cache | awk '{print $1}')
-            TOOLCHAIN_FILES=$(find /workdir/toolchain_cache -type f | wc -l)
+            cp -r staging_dir /workdir/toolchain_cache/
+            TOOLCHAIN_SIZE=$(du -sh /workdir/toolchain_cache/staging_dir | awk '{print $1}')
             echo "工具链缓存大小: $TOOLCHAIN_SIZE"
-            echo "工具链文件数: $TOOLCHAIN_FILES"
-            ls -la /workdir/toolchain_cache/host/bin || echo "host/bin 目录为空"
+            ls -la /workdir/toolchain_cache/staging_dir/host/bin || echo "host/bin 目录为空"
           else
-            echo "无工具链目录可保存"
+            echo "错误：无工具链目录可保存"
+            exit 1
           fi
         }
 
         save_packages() {
           echo "保存编译包到缓存..."
           mkdir -p /workdir/package_cache
-          if [ -d "bin/packages" ] || [ -d "bin/targets" ]; then
-            [ -d "bin/packages" ] && cp -r bin/packages /workdir/package_cache/
-            [ -d "bin/targets" ] && mkdir -p /workdir/package_cache/bin && cp -r bin/targets /workdir/package_cache/bin/
-            PACKAGE_SIZE=$(du -sh /workdir/package_cache | awk '{print $1}')
-            PACKAGE_FILES=$(find /workdir/package_cache -type f | wc -l)
+          if [ -d "bin/targets" ]; then
+            cp -r bin/targets /workdir/package_cache/
+            PACKAGE_SIZE=$(du -sh /workdir/package_cache/targets | awk '{print $1}')
             echo "编译包缓存大小: $PACKAGE_SIZE"
-            echo "编译包文件数: $PACKAGE_FILES"
+            ls -la /workdir/package_cache/targets || echo "targets 目录为空"
           else
-            echo "无编译包可保存"
+            echo "错误：无编译包可保存"
+            exit 1
           fi
         }
 
         compile_firmware() {
           if [ $DO_FULL_BUILD -eq 1 ]; then
+            echo "下载依赖..."
+            make download -j8 V=s || make download -j1 V=s
             if [ ! -d "staging_dir/toolchain-"* ]; then
               echo "编译工具链..."
-              make -j$(nproc) tools/compile || make -j1 V=s tools/compile
-              make -j$(nproc) toolchain/compile || make -j1 V=s toolchain/compile
+              make -j$(nproc) tools/compile V=s || make -j1 V=s tools/compile
+              make -j$(nproc) toolchain/compile V=s || make -j1 V=s toolchain/compile
               save_toolchain
             else
               echo "工具链已存在，跳过编译"
             fi
             cleanup_temp_files
             echo "编译完整固件..."
-            make -j$(nproc) || make -j1 V=s
+            make -j$(nproc) V=s || make -j1 V=s
           elif [ $DO_PACKAGE_BUILD -eq 1 ] || [ "${{ env.feeds_changed }}" = "true" ]; then
             echo "软件包配置变化或源码更新，编译软件包..."
-            make -j$(nproc) package/clean || make -j1 V=s package/clean
-            make -j$(nproc) package/compile || make -j1 V=s package/compile
-            make -j$(nproc) package/index || make -j1 V=s package/index
+            make -j$(nproc) package/clean V=s || make -j1 V=s package/clean
+            make -j$(nproc) package/compile V=s || make -j1 V=s package/compile
+            make -j$(nproc) package/index V=s || make -j1 V=s package/index
           else
             echo "增量编译，强制编译所有包..."
-            make -j$(nproc) package/clean || make -j1 V=s package/clean
-            make -j$(nproc) package/compile || make -j1 V=s package/compile
-            make -j$(nproc) || make -j1 V=s
+            make -j$(nproc) package/clean V=s || make -j1 V=s package/clean
+            make -j$(nproc) package/compile V=s || make -j1 V=s package/compile
+            make -j$(nproc) V=s || make -j1 V=s
           fi
 
           if [ $? -eq 0 ]; then
@@ -355,9 +338,9 @@ jobs:
             done < packages_config.txt
             if [ $MISSING_PACKAGES -gt 0 ]; then
               echo "错误：有 $MISSING_PACKAGES 个包未生成，将重新编译"
-              make -j$(nproc) package/clean || make -j1 V=s package/clean
-              make -j$(nproc) package/compile || make -j1 V=s package/compile
-              make -j$(nproc) || make -j1 V=s
+              make -j$(nproc) package/clean V=s || make -j1 V=s package/clean
+              make -j$(nproc) package/compile V=s || make -j1 V=s package/compile
+              make -j$(nproc) V=s || make -j1 V=s
               if [ $? -ne 0 ]; then
                 echo "重新编译失败，请检查日志"
                 exit 1
@@ -378,8 +361,8 @@ jobs:
         DO_FULL_BUILD=0
         DO_PACKAGE_BUILD=0
 
-        if [ -z "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "${{ github.event.inputs.clean_build }}" = "true" ] || [ ! -d "feeds" ]; then
-          echo "工具链配置变化、首次编译或 feeds 缺失，需要全量编译"
+        if [ -z "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
+          echo "工具链配置变化或首次编译，需要全量编译"
           DO_FULL_BUILD=1
         elif [ -z "$PREVIOUS_PACKAGE_MD5" ] || [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
           echo "软件包配置变化，需要编译软件包"
