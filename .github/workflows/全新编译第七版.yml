@@ -57,23 +57,12 @@ jobs:
         sudo apt-get clean
         sudo apt-get autoremove -y
 
-        # 检查并确保空间
+        # 只检查根分区空间
         ROOT_AVAIL=$(df -m /dev/root | tail -1 | awk '{print $4}')
-        MNT_AVAIL=$(df -m /mnt | tail -1 | awk '{print $4}')
         echo "根分区可用空间: ${ROOT_AVAIL}MB"
-        echo "/mnt 可用空间: ${MNT_AVAIL}MB"
         if [ "$ROOT_AVAIL" -lt 20480 ]; then
           echo "错误：/dev/root 可用空间不足 20GB"
           exit 1
-        fi
-        if [ "$MNT_AVAIL" -lt 5120 ]; then
-          echo "错误：/mnt 可用空间不足 5GB"
-          sudo rm -rf /mnt/some/large/files || true  # 可替换为实际清理路径
-          MNT_AVAIL=$(df -m /mnt | tail -1 | awk '{print $4}')
-          if [ "$MNT_AVAIL" -lt 5120 ]; then
-            echo "错误：/mnt 空间清理后仍不足 5GB"
-            exit 1
-          fi
         fi
         df -h
 
@@ -262,21 +251,40 @@ jobs:
           if [ -d "staging_dir/toolchain-"* ]; then
             cp -r staging_dir/toolchain-* /workdir/toolchain_cache/
             cp -r staging_dir/host /workdir/toolchain_cache/ || true
-            echo "工具链缓存大小: $(du -sh /workdir/toolchain_cache)"
+            TOOLCHAIN_SIZE=$(du -sh /workdir/toolchain_cache | awk '{print $1}')
+            TOOLCHAIN_FILES=$(find /workdir/toolchain_cache -type f | wc -l)
+            echo "工具链缓存大小: $TOOLCHAIN_SIZE"
+            echo "工具链文件数: $TOOLCHAIN_FILES"
+            echo "保存路径: /workdir/toolchain_cache"
+            # 写入 Summary
+            echo "### 工具链缓存保存" >> $GITHUB_STEP_SUMMARY
+            echo "- 大小: $TOOLCHAIN_SIZE" >> $GITHUB_STEP_SUMMARY
+            echo "- 文件数: $TOOLCHAIN_FILES" >> $GITHUB_STEP_SUMMARY
+            echo "- 路径: /workdir/toolchain_cache" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "无工具链目录可保存"
           fi
         }
 
         save_packages() {
           echo "保存编译包到缓存..."
           mkdir -p /workdir/package_cache
-          if [ -d "bin/packages" ]; then
-            cp -r bin/packages /workdir/package_cache/
+          if [ -d "bin/packages" ] || [ -d "bin/targets" ]; then
+            [ -d "bin/packages" ] && cp -r bin/packages /workdir/package_cache/
+            [ -d "bin/targets" ] && mkdir -p /workdir/package_cache/bin && cp -r bin/targets /workdir/package_cache/bin/
+            PACKAGE_SIZE=$(du -sh /workdir/package_cache | awk '{print $1}')
+            PACKAGE_FILES=$(find /workdir/package_cache -type f | wc -l)
+            echo "编译包缓存大小: $PACKAGE_SIZE"
+            echo "编译包文件数: $PACKAGE_FILES"
+            echo "保存路径: /workdir/package_cache"
+            # 写入 Summary
+            echo "### 编译包缓存保存" >> $GITHUB_STEP_SUMMARY
+            echo "- 大小: $PACKAGE_SIZE" >> $GITHUB_STEP_SUMMARY
+            echo "- 文件数: $PACKAGE_FILES" >> $GITHUB_STEP_SUMMARY
+            echo "- 路径: /workdir/package_cache" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "无编译包可保存"
           fi
-          if [ -d "bin/targets" ]; then
-            mkdir -p /workdir/package_cache/bin
-            cp -r bin/targets /workdir/package_cache/bin/
-          fi
-          echo "编译包缓存大小: $(du -sh /workdir/package_cache)"
         }
 
         compile_firmware() {
@@ -380,7 +388,7 @@ jobs:
       id: tag
       if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         echo "## OpenWrt固件构建完成 📦" > release.txt
         echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
         echo "📂 固件下载" >> release.txt
@@ -393,7 +401,7 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
+        tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
