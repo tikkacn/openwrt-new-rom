@@ -112,17 +112,14 @@ jobs:
         cat feeds.conf.default
         rm -rf .git
 
-    # 修改缓存恢复逻辑，确保键的唯一性和一致性
+    # 使用固定缓存键恢复缓存
     - name: 恢复编译包缓存
       uses: actions/cache@v3
       id: cache-packages
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.PACKAGES_DIR }}
-        key: packages-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-${{ github.run_id }}
-        restore-keys: |
-          packages-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-
-          packages-${{ env.REPO_BRANCH }}-
+        key: packages-${{ env.REPO_BRANCH }}-fixed-cache
 
     - name: 恢复工具链缓存
       uses: actions/cache@v3
@@ -130,20 +127,14 @@ jobs:
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.TOOLCHAIN_DIR }}
-        key: toolchain-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-${{ github.run_id }}
-        restore-keys: |
-          toolchain-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-
-          toolchain-${{ env.REPO_BRANCH }}-
+        key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache
 
     - name: 恢复CCACHE缓存
       uses: actions/cache@v3
       id: cache-ccache
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-${{ github.run_id }}
-        restore-keys: |
-          ccache-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-
-          ccache-${{ env.REPO_BRANCH }}-
+        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache
 
     - name: 恢复构建状态缓存
       uses: actions/cache@v3
@@ -151,15 +142,11 @@ jobs:
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.BUILD_STATE_DIR }}
-        key: state-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-${{ github.run_id }}
-        restore-keys: |
-          state-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}-
-          state-${{ env.REPO_BRANCH }}-
+        key: state-${{ env.REPO_BRANCH }}-fixed-cache
 
     - name: 检查缓存恢复状态
       run: |
         echo "CONFIG_FILE: ${{ env.CONFIG_FILE }}"
-        echo "Cache Key: packages-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE)) }}"
         echo "编译包缓存恢复状态: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "工具链缓存恢复状态: ${{ steps.cache-toolchain.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "CCACHE缓存恢复状态: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
@@ -252,7 +239,7 @@ jobs:
         make download -j8 || make download -j1 V=s
         mkdir -p ${{ env.CCACHE_DIR }}
         ccache -o cache_dir=${{ env.CCACHE_DIR }}
-        ccache -o max_size=4G  # 增加CCACHE大小
+        ccache -o max_size=8G  # 增加CCACHE大小
         ccache -z
         df -h
 
@@ -343,6 +330,25 @@ jobs:
         ccache -s
         df -h
 
+    - name: 检查缓存目录内容
+      run: |
+        echo "检查缓存目录大小和内容..."
+        echo "TOOLCHAIN_DIR (${{ env.TOOLCHAIN_DIR }}):"
+        du -sh ${{ env.TOOLCHAIN_DIR }} || echo "目录不存在"
+        ls -la ${{ env.TOOLCHAIN_DIR }} || echo "无法列出目录内容"
+        
+        echo "PACKAGES_DIR (${{ env.PACKAGES_DIR }}):"
+        du -sh ${{ env.PACKAGES_DIR }} || echo "目录不存在"
+        ls -la ${{ env.PACKAGES_DIR }} || echo "无法列出目录内容"
+        
+        echo "BUILD_STATE_DIR (${{ env.BUILD_STATE_DIR }}):"
+        du -sh ${{ env.BUILD_STATE_DIR }} || echo "目录不存在"
+        ls -la ${{ env.BUILD_STATE_DIR }} || echo "无法列出目录内容"
+        
+        echo "CCACHE_DIR (${{ env.CCACHE_DIR }}):"
+        du -sh ${{ env.CCACHE_DIR }} || echo "目录不存在"
+        ls -la ${{ env.CCACHE_DIR }} || echo "无法列出目录内容"
+
     - name: 整理文件
       id: organize
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
@@ -408,7 +414,7 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    # 重要的修改：不再删除工具链缓存
+    # 重要的修改：不再删除工具链缓存，使用固定缓存键保存
     - name: 保存缓存状态
       if: always()
       run: |
