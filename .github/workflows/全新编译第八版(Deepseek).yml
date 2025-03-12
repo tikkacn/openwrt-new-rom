@@ -1,0 +1,163 @@
+name: 全新编译第八版(Deepseek)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH调试'
+        required: false
+        default: 'false'
+      clean_build:
+        description: '强制全量编译'
+        required: false
+        default: 'false'
+      config_file:
+        description: '配置文件路径'
+        required: false
+        default: 'smart-build.config'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF_URL: https://github.com/tikkacn/openwrt-new-rom/raw/main/feeds.conf.default
+  CCACHE_DIR: /workdir/ccache
+  TOOLCHAIN_DIR: /workdir/openwrt/staging_dir
+  PACKAGES_DIR: /workdir/openwrt/bin/targets
+  BUILD_STATE_DIR: /workdir/build_state
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 磁盘空间优化
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 20480
+        swap-size-mb: 5120
+        remove-dotnet: 'true'
+        remove-android: 'true'
+
+    - name: 深度清理环境
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+        sudo rm -rf /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL
+        docker image prune -a -f || true
+        docker system prune -af || true
+        sudo apt-get clean
+        sudo apt-get autoremove -y
+        ROOT_AVAIL=$(df -m /dev/root | tail -1 | awk '{print $4}')
+        if [ "$ROOT_AVAIL" -lt 20480 ]; then
+          echo "错误：/dev/root 可用空间不足 20GB"
+          exit 1
+        fi
+        df -h
+
+    - name: 初始化编译环境
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+        vim wget xmlto xxd zlib1g-dev python3-setuptools jq bc lm-sensors pciutils
+        mkdir -p ${{ env.BUILD_STATE_DIR }} ${{ env.CCACHE_DIR }}
+        chmod -R 777 /workdir
+
+    - name: 克隆源码
+      working-directory: /workdir
+      run: |
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        cd openwrt
+        curl -L -o feeds.conf.default "$FEEDS_CONF_URL"
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        rm -rf .git
+
+    - name: 恢复分层缓存
+      uses: actions/cache@v3
+      with:
+        path: |
+          ${{ env.CCACHE_DIR }}
+          ${{ env.TOOLCHAIN_DIR }}
+          ${{ env.PACKAGES_DIR }}
+        key: ${{ runner.os }}-cache-${{ hashFiles('.config', 'feeds.conf.default', 'target/linux/**/Makefile') }}-v8
+
+    - name: 配置编译参数
+      run: |
+        cd /workdir/openwrt
+        cp $GITHUB_WORKSPACE/${{ inputs.config_file }} .config
+        make defconfig
+        ./scripts/diffconfig.sh > config.diff
+        [ -e $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./
+
+    - name: 智能编译
+      run: |
+        cd /workdir/openwrt
+        if [ "${{ inputs.clean_build }}" = "true" ]; then
+          make clean
+          make -j$(nproc) V=s
+        else
+          # 增量编译优化（网页3策略）
+          CHANGED_FILES=$(git diff --name-only HEAD^ HEAD)
+          if echo "$CHANGED_FILES" | grep -qE '\.config|target/linux/'; then
+            make -j$(nproc) V=s
+          elif echo "$CHANGED_FILES" | grep -q 'package/'; then
+            CHANGED_PKGS=$(echo "$CHANGED_FILES" | grep 'package/' | cut -d/ -f2 | sort -u)
+            for pkg in $CHANGED_PKGS; do
+              make package/$pkg/compile -j$(nproc) V=s
+            done
+            make package/index
+          else
+            make -j$(nproc) V=s
+          fi
+        fi
+
+    - name: 打包固件
+      run: |
+        cd /workdir/openwrt/bin/targets/*/*
+        DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' ../../../.config | sed -r 's/.*DEVICE_(.*)=y/\1/')
+        FIRMWARE_DATE=$(date +"%Y%m%d%H%M")
+        mkdir -p firmware
+        cp *sysupgrade* firmware/ || cp *combined* firmware/
+        cp ../../../.config firmware/config.txt
+        zip -r "openwrt_${DEVICE_NAME}_${FIRMWARE_DATE}.zip" firmware
+        echo "FIRMWARE_PATH=$(pwd)/openwrt_${DEVICE_NAME}_${FIRMWARE_DATE}.zip" >> $GITHUB_ENV
+
+    - name: 发布固件
+      uses: softprops/action-gh-release@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: "build-$(date +%s)"
+        files: ${{ env.FIRMWARE_PATH }}
+        body: |
+          ### 编译信息
+          - 设备型号: ${{ env.DEVICE_NAME }}
+          - 编译时间: $(date)
+          - 配置文件: [config.txt]()
+
+    - name: 保存缓存
+      if: always()
+      uses: actions/cache/save@v3
+      with:
+        path: |
+          ${{ env.CCACHE_DIR }}
+          ${{ env.TOOLCHAIN_DIR }}
+          ${{ env.PACKAGES_DIR }}
+        key: ${{ runner.os }}-cache-${{ hashFiles('.config', 'feeds.conf.default', 'target/linux/**/Makefile') }}-v8
+
+    - name: 最终清理
+      if: always()
+      run: |
+        find /tmp -type f -delete
+        docker system prune -af
+        ccache -c
+        df -h
