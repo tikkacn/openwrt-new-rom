@@ -298,9 +298,8 @@ jobs:
             make -j$(nproc) package/index V=s || make -j1 V=s package/index
             make -j$(nproc) target/install V=s || make -j1 V=s target/install  # 确保生成固件
           else
-            echo "增量编译，强制编译所有包..."
-            make -j$(nproc) package/clean V=s || make -j1 V=s package/clean
-            make -j$(nproc) package/compile V=s || make -j1 V=s package/compile
+            echo "配置和feeds都未变化，执行最小增量编译..."
+            # 直接使用缓存的软件包生成固件，不清理和重新编译
             make -j$(nproc) V=s || make -j1 V=s
           fi
 
