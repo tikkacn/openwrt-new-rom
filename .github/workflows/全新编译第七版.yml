@@ -1,4 +1,4 @@
-name: 全新编译第七版
+name: 全新编译第八版
 
 on:
   workflow_dispatch:
@@ -213,14 +213,20 @@ jobs:
         mkdir -p ${{ env.BUILD_STATE_DIR }}
         find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > ${{ env.BUILD_STATE_DIR }}/feeds.sha256
         CURRENT_FEEDS_HASH=$(cat ${{ env.BUILD_STATE_DIR }}/feeds.sha256 | awk '{print $1}')
-        PREVIOUS_FEEDS_HASH=$(cat ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256 2>/dev/null || echo "")
-        if [ "$CURRENT_FEEDS_HASH" != "$PREVIOUS_FEEDS_HASH" ]; then
-          echo "feeds_changed=true" >> $GITHUB_ENV
-        else
-          echo "feeds_changed=false" >> $GITHUB_ENV
-        fi
+        PREVIOUS_FEEDS_HASH=$(cat ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256 2>/dev/null | awk '{print $1}' || echo "")
+        
         echo "当前 feeds 哈希: $CURRENT_FEEDS_HASH"
         echo "之前 feeds 哈希: $PREVIOUS_FEEDS_HASH"
+        
+        if [ "$CURRENT_FEEDS_HASH" != "$PREVIOUS_FEEDS_HASH" ]; then
+          echo "feeds_changed=true" >> $GITHUB_ENV
+          echo "Feeds 已变更，需要重新编译"
+        else
+          echo "feeds_changed=false" >> $GITHUB_ENV
+          echo "Feeds 未变更，可以使用缓存包"
+        fi
+        
+        # 保存当前哈希值供下次比较
         cp ${{ env.BUILD_STATE_DIR }}/feeds.sha256 ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256
 
     - name: 恢复已编译软件包
@@ -231,7 +237,7 @@ jobs:
         if [ "${{ env.feeds_changed }}" = "true" ]; then
           echo "feeds 已更新，跳过恢复旧的编译包缓存"
         else
-          echo "已恢复缓存中的软件包"
+          echo "feeds 未变更，使用缓存编译包"
           find ${{ env.PACKAGES_DIR }} -type f | wc -l
         fi
 
