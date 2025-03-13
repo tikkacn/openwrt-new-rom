@@ -27,7 +27,7 @@ env:
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
   CCACHE_DIR: /workdir/ccache
-  # 新增缓存目录环境变量
+  # 缓存目录环境变量
   TOOLCHAIN_DIR: /workdir/openwrt/staging_dir
   PACKAGES_DIR: /workdir/openwrt/bin/targets
   BUILD_STATE_DIR: /workdir/build_state
@@ -111,8 +111,11 @@ jobs:
         curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "警告：无法下载 feeds.conf.default，使用仓库默认配置"
         cat feeds.conf.default
         rm -rf .git
+        # 创建必要的目录结构以确保缓存正常工作
+        mkdir -p ${{ env.PACKAGES_DIR }} ${{ env.TOOLCHAIN_DIR }} ${{ env.BUILD_STATE_DIR }}
 
-    # 使用固定缓存键恢复缓存
+    # 使用固定缓存键最大化命中率
+    # 恢复编译包缓存
     - name: 恢复编译包缓存
       uses: actions/cache@v3
       id: cache-packages
@@ -121,6 +124,7 @@ jobs:
         path: ${{ env.PACKAGES_DIR }}
         key: packages-${{ env.REPO_BRANCH }}-fixed-cache
 
+    # 恢复工具链缓存
     - name: 恢复工具链缓存
       uses: actions/cache@v3
       id: cache-toolchain
@@ -129,6 +133,7 @@ jobs:
         path: ${{ env.TOOLCHAIN_DIR }}
         key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache
 
+    # 恢复CCACHE缓存
     - name: 恢复CCACHE缓存
       uses: actions/cache@v3
       id: cache-ccache
@@ -136,6 +141,7 @@ jobs:
         path: ${{ env.CCACHE_DIR }}
         key: ccache-${{ env.REPO_BRANCH }}-fixed-cache
 
+    # 恢复构建状态缓存
     - name: 恢复构建状态缓存
       uses: actions/cache@v3
       id: cache-state
@@ -330,31 +336,74 @@ jobs:
         ccache -s
         df -h
 
-    - name: 检查缓存目录内容
+    # 首先保存缓存，然后再进行清理和打包步骤
+    - name: 备份编译缓存
+      if: "!cancelled()"
       run: |
-        echo "检查缓存目录大小和内容..."
-        echo "TOOLCHAIN_DIR (${{ env.TOOLCHAIN_DIR }}):"
-        du -sh ${{ env.TOOLCHAIN_DIR }} || echo "目录不存在"
-        ls -la ${{ env.TOOLCHAIN_DIR }} || echo "无法列出目录内容"
+        echo "编译完成，备份缓存数据..."
         
-        echo "PACKAGES_DIR (${{ env.PACKAGES_DIR }}):"
-        du -sh ${{ env.PACKAGES_DIR }} || echo "目录不存在"
-        ls -la ${{ env.PACKAGES_DIR }} || echo "无法列出目录内容"
+        # 在备份之前先确认缓存目录状态
+        echo "工具链目录大小: $(du -sh ${{ env.TOOLCHAIN_DIR }} | cut -f1)"
+        echo "CCACHE 目录大小: $(du -sh ${{ env.CCACHE_DIR }} | cut -f1)"
+        echo "编译包目录大小: $(du -sh ${{ env.PACKAGES_DIR }} | cut -f1)"
+        echo "构建状态目录大小: $(du -sh ${{ env.BUILD_STATE_DIR }} | cut -f1)"
         
-        echo "BUILD_STATE_DIR (${{ env.BUILD_STATE_DIR }}):"
-        du -sh ${{ env.BUILD_STATE_DIR }} || echo "目录不存在"
-        ls -la ${{ env.BUILD_STATE_DIR }} || echo "无法列出目录内容"
+        # 确保构建状态目录包含时间戳信息
+        mkdir -p ${{ env.BUILD_STATE_DIR }}
+        echo "缓存创建时间: $(date)" > ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
+        echo "运行ID: ${{ github.run_id }}" >> ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
+        echo "构建分支: ${{ env.REPO_BRANCH }}" >> ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
         
-        echo "CCACHE_DIR (${{ env.CCACHE_DIR }}):"
-        du -sh ${{ env.CCACHE_DIR }} || echo "目录不存在"
-        ls -la ${{ env.CCACHE_DIR }} || echo "无法列出目录内容"
+        # 将当前的缓存内容存档以确保不被后续步骤修改
+        echo "备份缓存目录完成"
 
+    # 分开保存各个缓存，使其在 Web 界面中独立显示
+    - name: 保存工具链缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.TOOLCHAIN_DIR }}
+        key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache
+    
+    - name: 保存编译包缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.PACKAGES_DIR }}
+        key: packages-${{ env.REPO_BRANCH }}-fixed-cache
+    
+    - name: 保存构建状态缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.BUILD_STATE_DIR }}
+        key: state-${{ env.REPO_BRANCH }}-fixed-cache
+    
+    - name: 保存CCACHE缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache
+
+    - name: 验证缓存已保存
+      if: "!cancelled()"
+      run: |
+        echo "已完成所有缓存保存，现在可以安全地进行后续文件整理和清理操作"
+        # 显示缓存时间戳
+        if [ -f "${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt" ]; then
+          echo "缓存时间戳内容:"
+          cat ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
+        fi
+        df -h
+
+    # 现在可以安全地进行文件整理和上传
     - name: 整理文件
       id: organize
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         cd /workdir/openwrt/bin/targets/*/*
-        rm -rf packages || true
+        # 注意：不要删除可能用于缓存的文件
         mkdir -p firmware
         FIRMWARE_FILES=$(find . -maxdepth 1 -name "*combined*" -or -name "*sysupgrade*")
         if [ -z "$FIRMWARE_FILES" ]; then
@@ -371,12 +420,8 @@ jobs:
         echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
         echo "FIRMWARE_ZIP=$PWD/firmware.zip" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
-        
-        # 验证编译成果和缓存状态
-        echo "验证编译结果和缓存状态..."
-        ls -la ${{ env.TOOLCHAIN_DIR }}/host/bin/ || echo "工具链目录为空"
-        find ${{ env.PACKAGES_DIR }} -type f | head -10
 
+    # 上传固件
     - name: 上传固件目录
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
@@ -413,16 +458,3 @@ jobs:
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    # 重要的修改：不再删除工具链缓存，使用固定缓存键保存
-    - name: 保存缓存状态
-      if: always()
-      run: |
-        echo "保存所有缓存状态，确保下次构建可使用..."
-        mkdir -p ${{ env.BUILD_STATE_DIR }}
-        echo "缓存状态保存于 $(date)" > ${{ env.BUILD_STATE_DIR }}/cache_saved_time.txt
-        echo "工具链目录大小: $(du -sh ${{ env.TOOLCHAIN_DIR }} | cut -f1)"
-        echo "CCACHE 目录大小: $(du -sh ${{ env.CCACHE_DIR }} | cut -f1)"
-        echo "编译包目录大小: $(du -sh ${{ env.PACKAGES_DIR }} | cut -f1)"
-        echo "构建状态目录大小: $(du -sh ${{ env.BUILD_STATE_DIR }} | cut -f1)"
-        df -h
