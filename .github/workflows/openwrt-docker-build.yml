@@ -80,7 +80,7 @@ jobs:
       id: cache-ccache
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(format('**/{}', env.CONFIG_FILE)) }}
+        key: ccache-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
         restore-keys: |
           ccache-docker-${{ env.REPO_BRANCH }}-
 
@@ -91,7 +91,7 @@ jobs:
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.BUILD_STATE_DIR }}
-        key: state-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(format('**/{}', env.CONFIG_FILE)) }}
+        key: state-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
         restore-keys: |
           state-docker-${{ env.REPO_BRANCH }}-
 
@@ -187,7 +187,7 @@ jobs:
           /workdir/openwrt/bin
           /workdir/openwrt/build_dir
           /workdir/openwrt/staging_dir
-        key: build-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(format('**/{}', env.CONFIG_FILE)) }}
+        key: build-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
         restore-keys: |
           build-docker-${{ env.REPO_BRANCH }}-
 
@@ -384,14 +384,14 @@ jobs:
       if: "!cancelled()"
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(format('**/{}', env.CONFIG_FILE)) }}
+        key: ccache-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
 
     - name: 保存构建状态缓存
       uses: actions/cache@v3
       if: "!cancelled()"
       with:
         path: ${{ env.BUILD_STATE_DIR }}
-        key: state-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(format('**/{}', env.CONFIG_FILE)) }}
+        key: state-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
 
     - name: 保存编译结果缓存
       uses: actions/cache@v3
@@ -401,7 +401,7 @@ jobs:
           /workdir/openwrt/bin
           /workdir/openwrt/build_dir
           /workdir/openwrt/staging_dir
-        key: build-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(format('**/{}', env.CONFIG_FILE)) }}
+        key: build-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
 
     # 整理固件
     - name: 整理文件
