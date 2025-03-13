@@ -1,5 +1,3 @@
-# 文件三：openwrt-docker-build.yml（主要构建工作流）
----
 name: 基于Docker的OpenWrt增量编译
 
 on:
@@ -39,14 +37,12 @@ env:
   # 缓存目录环境变量
   CCACHE_DIR: /workdir/ccache
   BUILD_STATE_DIR: /workdir/build_state
-  # Docker镜像
-  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest
 
 jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: ${{ env.DOCKER_IMAGE }}
+      image: ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest
       volumes:
         - /workdir:/workdir
       options: --privileged
