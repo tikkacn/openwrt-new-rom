@@ -1,4 +1,4 @@
-name: 全新编译第八版
+name: 全新编译第七版
 
 on:
   workflow_dispatch:
