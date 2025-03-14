@@ -59,11 +59,20 @@ init_env() {
   df -h
 }
 
-# 清理临时文件释放空间
+# 清理临时文件释放空间 - 修改版
 cleanup_temp_files() {
   log "清理临时文件以释放空间..."
-  find /tmp -type f -delete 2>/dev/null || true
-  find /workdir/openwrt/tmp -type f -delete 2>/dev/null || true
+  
+  # 安全清理 /tmp 目录中的一些特定类型文件，保留编译器需要的文件
+  find /tmp -type f -name "*.log" -o -name "*.tmp" -o -name "*.cache" -delete 2>/dev/null || true
+  
+  # 对 /workdir/openwrt/tmp 采取更保守的清理策略
+  # 不清理过新的文件(1分钟内)和编译器可能需要的关键文件(.s, .o等)
+  find /workdir/openwrt/tmp -type f -mmin +1 -not -name "*.s" -not -name "*.o" -not -name "cc*" -delete 2>/dev/null || true
+  
+  # 清理不再需要的可能占用大量空间的下载缓存
+  find /workdir/openwrt/dl -name "*.tar.gz" -mtime +5 -delete 2>/dev/null || true
+  
   log "当前磁盘空间使用情况:"
   df -h
 }
@@ -266,15 +275,20 @@ compile_firmware() {
   START_TIME=$(date +%s)
   log "开始编译时间: $(date)"
   
-  # 定期清理临时文件以释放空间
-  (while true; do sleep 300; cleanup_temp_files; done) &
-  CLEANUP_PID=$!
+  # 修改：不再使用后台定期清理，改为在适当的时机手动清理
+  # 创建一个函数用于在特定时间点安全清理
+  safe_cleanup() {
+    log "执行安全清理..."
+    # 在编译暂停时手动清理，不会干扰进行中的任务
+    cleanup_temp_files
+  }
   
   # 决定编译策略
   if [ "$CLEAN_BUILD" = "true" ]; then
     # 用户请求完全重新编译
     log_warning "用户请求完全重新编译"
     make clean
+    safe_cleanup  # 清理一次
     make -j$(nproc) V=s || make -j1 V=s
     BUILD_STATUS=$?
     
@@ -282,6 +296,7 @@ compile_firmware() {
     # Feeds变更或源码变更，需要重新编译所有包
     log_warning "Feeds或源码已变更，重新编译所有包"
     make package/clean
+    safe_cleanup  # 清理一次
     make -j$(nproc) V=s || make -j1 V=s
     BUILD_STATUS=$?
     
@@ -295,8 +310,8 @@ compile_firmware() {
       while read -r pkg; do
         log "编译包: $pkg"
         make package/$pkg/{clean,compile} -j$(nproc) V=s || make package/$pkg/{clean,compile} -j1 V=s
-        # 每编译一个包后清理临时文件
-        cleanup_temp_files
+        # 每完成一个包的编译后安全清理
+        safe_cleanup
       done < added_packages.txt
     fi
     
@@ -307,6 +322,7 @@ compile_firmware() {
         log "清理包: $pkg"
         make package/$pkg/clean V=s || true
       done < removed_packages.txt
+      safe_cleanup
     fi
     
     # 构建固件
@@ -320,12 +336,6 @@ compile_firmware() {
     make -j$(nproc) V=s || make -j1 V=s
     BUILD_STATUS=$?
   fi
-  
-  # 停止清理进程
-  kill $CLEANUP_PID 2>/dev/null || true
-  
-  # 最后清理一次临时文件
-  cleanup_temp_files
   
   # 结束时间记录
   END_TIME=$(date +%s)
