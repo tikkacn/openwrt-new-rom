@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
     python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools subversion \
     swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev \
     python3-setuptools jq bc lm-sensors pciutils \
-    clang llvm lld \
+    clang llvm lld zip \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -26,7 +26,7 @@ WORKDIR /workdir
 ENV FORCE_UNSAFE_CONFIGURE=1
 
 # 预创建必要的目录结构
-RUN mkdir -p /workdir/ccache /workdir/build_state
+RUN mkdir -p /workdir/ccache /workdir/build_state /workdir/firmware
 
 # 设置CCACHE
 RUN mkdir -p /workdir/ccache && \
@@ -36,15 +36,4 @@ RUN mkdir -p /workdir/ccache && \
 # 工作目录权限设置
 RUN chmod -R 777 /workdir
 
-# 简化entrypoint脚本，不使用exec
-RUN echo '#!/bin/bash\n\
-echo "OpenWrt构建环境已准备就绪"\n\
-echo "当前目录: $(pwd)"\n\
-echo "可用的命令:"\n\
-echo " - 执行编译: make -j\$(nproc)"\n\
-echo " - 清理编译: make clean"\n\
-$@' > /entrypoint.sh && \
-    chmod +x /entrypoint.sh
-
-# 简化启动方式，不使用ENTRYPOINT
 CMD ["/bin/bash"]
