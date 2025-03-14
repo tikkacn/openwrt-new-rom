@@ -58,10 +58,49 @@ jobs:
         remove-docker-images: 'true'
         build-mount-path: '/workdir'
 
+    # 恢复CCACHE缓存
+    - name: 恢复CCACHE缓存
+      uses: actions/cache@v3
+      id: cache-ccache
+      with:
+        path: /workdir/ccache
+        key: ccache-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        restore-keys: |
+          ccache-docker-${{ env.REPO_BRANCH }}-
+
+    # 恢复构建状态缓存
+    - name: 恢复构建状态缓存
+      uses: actions/cache@v3
+      id: cache-state
+      if: github.event.inputs.clean_build != 'true'
+      with:
+        path: /workdir/build_state
+        key: state-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        restore-keys: |
+          state-docker-${{ env.REPO_BRANCH }}-
+
+    # 恢复编译结果缓存
+    - name: 恢复编译结果缓存
+      uses: actions/cache@v3
+      id: cache-build
+      if: github.event.inputs.clean_build != 'true'
+      with:
+        path: |
+          /workdir/openwrt/bin
+          /workdir/openwrt/build_dir
+          /workdir/openwrt/staging_dir
+        key: build-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        restore-keys: |
+          build-docker-${{ env.REPO_BRANCH }}-
+
     - name: 拉取 Docker 镜像
       run: docker pull ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest
 
-    - name: 在Docker容器中运行构建任务
+    - name: 在Docker容器中运行构建和打包任务
+      env:
+        CLEAN_BUILD: ${{ github.event.inputs.clean_build }}
+        FORCE_UPDATE: ${{ github.event.inputs.force_update }}
+        SSH_DEBUG: ${{ github.event.inputs.ssh }}
       run: |
         docker run --rm -v ${{ github.workspace }}:/src -v /workdir:/workdir --privileged \
           -e REPO_URL="${REPO_URL}" \
@@ -78,10 +117,13 @@ jobs:
           -e GITHUB_WORKSPACE="/src" \
           -e GITHUB_ENV="/src/.env" \
           -e GITHUB_OUTPUT="/src/.output" \
+          -e CLEAN_BUILD="${CLEAN_BUILD}" \
+          -e FORCE_UPDATE="${FORCE_UPDATE}" \
+          -e SSH_DEBUG="${SSH_DEBUG}" \
           ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest \
           /bin/bash -c "cd /src && chmod +x build-openwrt.sh && ./build-openwrt.sh"
 
-    - name: 保存GITHUB_ENV和GITHUB_OUTPUT
+    - name: 保存环境变量
       run: |
         if [ -f .env ]; then
           cat .env >> $GITHUB_ENV
@@ -90,61 +132,49 @@ jobs:
           cat .output >> $GITHUB_OUTPUT
         fi
 
-    # 整理固件
-    - name: 整理文件
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-      run: |
-        cd /workdir/openwrt/bin/targets/*/*
-        # 注意：不要删除可能用于缓存的文件
-        mkdir -p firmware
-        FIRMWARE_FILES=$(find . -maxdepth 1 -name "*combined*" -or -name "*sysupgrade*")
-        if [ -z "$FIRMWARE_FILES" ]; then
-          echo "警告：未找到固件文件，使用所有bin文件"
-          FIRMWARE_FILES=$(find . -maxdepth 1 -name "*.bin")
-        fi
-        if [ -n "$FIRMWARE_FILES" ]; then
-          echo "$FIRMWARE_FILES" | xargs -i cp {} ./firmware/
-        else
-          cp -r * ./firmware/
-        fi
-        cp /workdir/openwrt/.config ./firmware/config.txt
-        zip -r firmware.zip firmware
-        echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
-        echo "FIRMWARE_ZIP=$PWD/firmware.zip" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+    # 保存各种缓存
+    - name: 保存CCACHE缓存
+      uses: actions/cache@v3
+      if: always() && !cancelled()
+      with:
+        path: /workdir/ccache
+        key: ccache-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+
+    - name: 保存构建状态缓存
+      uses: actions/cache@v3
+      if: always() && !cancelled()
+      with:
+        path: /workdir/build_state
+        key: state-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+
+    - name: 保存编译结果缓存
+      uses: actions/cache@v3
+      if: always() && !cancelled()
+      with:
+        path: |
+          /workdir/openwrt/bin
+          /workdir/openwrt/build_dir
+          /workdir/openwrt/staging_dir
+        key: build-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
 
     # 上传固件
     - name: 上传固件目录
       uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled() && env.BUILD_SUCCESS == 'true'
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
+        path: /workdir/firmware
 
     - name: 生成发布标签
       id: tag
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled() && env.BUILD_SUCCESS == 'true'
       run: |
         echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         echo "## OpenWrt固件构建完成 📦" > release.txt
         echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
         
-        # 添加更新内容信息
-        if [ "${{ env.feeds_changed }}" = "true" ] || [ "${{ env.source_changed }}" = "true" ]; then
-          echo "📢 此版本包含源码或feeds更新" >> release.txt
-        fi
-        
-        if [ "${{ env.config_changed }}" = "true" ]; then
-          echo "📢 此版本包含配置更改" >> release.txt
-          if [ -s added_packages.txt ]; then
-            echo "📦 新增软件包:" >> release.txt
-            cat added_packages.txt | sed 's/^/- /' >> release.txt
-          fi
-          if [ -s removed_packages.txt ]; then
-            echo "🗑️ 移除软件包:" >> release.txt
-            cat removed_packages.txt | sed 's/^/- /' >> release.txt
-          fi
+        if [ -f /workdir/build_info.txt ]; then
+          cat /workdir/build_info.txt >> release.txt
         fi
         
         echo "📂 固件下载" >> release.txt
@@ -153,10 +183,19 @@ jobs:
 
     - name: 上传固件到Releases
       uses: softprops/action-gh-release@v2
-      if: steps.tag.outputs.status == 'success' && !cancelled()
+      if: steps.tag.outputs.status == 'success' && env.BUILD_SUCCESS == 'true'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+        files: /workdir/firmware/*
+
+    - name: 删除旧的Releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled() && env.BUILD_SUCCESS == 'true'
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
