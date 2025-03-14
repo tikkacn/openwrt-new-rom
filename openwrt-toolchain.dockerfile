@@ -4,9 +4,9 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Shanghai
 
-# 安装必要的依赖包
+# 安装必要的依赖包（添加了sudo）
 RUN apt-get update && apt-get install -y \
-    ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+    sudo ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
     bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext \
     gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 \
     libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
