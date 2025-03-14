@@ -77,40 +77,52 @@ cleanup_temp_files() {
   df -h
 }
 
-# 克隆或更新OpenWrt源码
+# 克隆或更新OpenWrt源码 - 修改后的版本
 clone_or_update_source() {
   log "处理OpenWrt源码..."
   
-  # 检查OpenWrt文件夹是否存在
-  if [ -d "/workdir/openwrt" ]; then
+  # 检查OpenWrt文件夹是否存在并且是有效的git仓库
+  if [ -d "/workdir/openwrt" ] && [ -d "/workdir/openwrt/.git" ]; then
     log "OpenWrt源码目录已存在，检查更新..."
     cd /workdir/openwrt
     
-    # 保存当前HEAD提交哈希
-    CURRENT_COMMIT=$(git rev-parse HEAD)
-    log "当前提交: $CURRENT_COMMIT"
-    
-    # 重置并更新源码
-    git fetch --all
-    git reset --hard origin/$REPO_BRANCH
-    git clean -fd
-    
-    # 获取更新后的HEAD提交哈希
-    NEW_COMMIT=$(git rev-parse HEAD)
-    log "更新后提交: $NEW_COMMIT"
-    
-    # 检查是否有源码更新
-    if [ "$CURRENT_COMMIT" != "$NEW_COMMIT" ] || [ "$FORCE_UPDATE" = "true" ]; then
-      log_warning "源码已更新或强制更新被触发，需要重新编译"
+    # 检查是否是有效的git仓库
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      # 保存当前HEAD提交哈希
+      CURRENT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+      log "当前提交: $CURRENT_COMMIT"
+      
+      # 重置并更新源码
+      git fetch --all
+      git reset --hard origin/$REPO_BRANCH
+      git clean -fd
+      
+      # 获取更新后的HEAD提交哈希
+      NEW_COMMIT=$(git rev-parse HEAD)
+      log "更新后提交: $NEW_COMMIT"
+      
+      # 检查是否有源码更新
+      if [ "$CURRENT_COMMIT" != "$NEW_COMMIT" ] || [ "$FORCE_UPDATE" = "true" ]; then
+        log_warning "源码已更新或强制更新被触发，需要重新编译"
+        echo "source_changed=true" >> $GITHUB_ENV
+        SOURCE_CHANGED=true
+      else
+        log "源码未变更"
+        echo "source_changed=false" >> $GITHUB_ENV
+        SOURCE_CHANGED=false
+      fi
+    else
+      log_warning "现有目录不是有效的git仓库，重新克隆"
+      rm -rf /workdir/openwrt
+      git clone --depth 1 $REPO_URL -b $REPO_BRANCH /workdir/openwrt
+      cd /workdir/openwrt
+      log "重新克隆，需要完整编译"
       echo "source_changed=true" >> $GITHUB_ENV
       SOURCE_CHANGED=true
-    else
-      log "源码未变更"
-      echo "source_changed=false" >> $GITHUB_ENV
-      SOURCE_CHANGED=false
     fi
   else
     log "克隆新的OpenWrt源码..."
+    rm -rf /workdir/openwrt  # 确保目录干净
     git clone --depth 1 $REPO_URL -b $REPO_BRANCH /workdir/openwrt
     cd /workdir/openwrt
     log "首次克隆，需要完整编译"
