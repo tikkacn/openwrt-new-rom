@@ -41,11 +41,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest
-      volumes:
-        - /workdir:/workdir
-      options: --privileged
 
     steps:
     - name: 检出代码
@@ -63,39 +58,27 @@ jobs:
         remove-docker-images: 'true'
         build-mount-path: '/workdir'
 
-    - name: 额外清理磁盘空间并检查
-      run: |
-        echo "清理额外磁盘空间..."
-        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
-        sudo rm -rf /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL
-        sudo rm -rf /usr/local/lib/node_modules /opt/microsoft
-        sudo rm -rf /usr/local/share/chromium /usr/local/share/powershell
-        sudo apt-get clean
-        sudo apt-get autoremove -y
-        docker image prune -a -f || true
-        docker system prune -af || true
-        
-        # 释放/var目录空间
-        sudo find /var/log -type f -delete || true
-        sudo find /var/cache -type f -delete || true
-        
-        # 检查空间使用情况
-        ROOT_AVAIL=$(df -m /dev/root | tail -1 | awk '{print $4}')
-        WORKDIR_AVAIL=$(df -m /workdir | tail -1 | awk '{print $4}' || echo "未挂载")
-        echo "根分区可用空间: ${ROOT_AVAIL}MB"
-        echo "工作目录可用空间: ${WORKDIR_AVAIL}MB"
-        
-        # 显示大目录
-        echo "最大的目录:"
-        sudo du -h --max-depth=1 /usr | sort -rh | head -10
-        
-        df -h
+    - name: 设置Docker容器
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver-opts: image=ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest
 
     - name: 初始化环境
       run: |
         echo "当前工作目录: $(pwd)"
+        # 清理额外磁盘空间
+        rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+        rm -rf /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL || true
+        rm -rf /usr/local/lib/node_modules /opt/microsoft || true
+        rm -rf /usr/local/share/chromium /usr/local/share/powershell || true
+        
+        # 显示空间使用情况
+        df -h
+        
+        # 准备目录
         mkdir -p ${{ env.BUILD_STATE_DIR }} ${{ env.CCACHE_DIR }}
-        chmod -R 777 /workdir
+        chmod -R 777 /workdir || true
+        
         # 准备自定义脚本
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
         echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
@@ -103,6 +86,7 @@ jobs:
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
         echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
         chmod +x $GITHUB_WORKSPACE/diy-part2.sh
+        
         # 检查配置文件是否存在
         if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
           echo "警告：配置文件 $CONFIG_FILE 不存在，创建默认配置文件"
@@ -112,7 +96,6 @@ jobs:
           echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
           echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
         fi
-        df -h
 
     # 恢复CCACHE缓存
     - name: 恢复CCACHE缓存
@@ -411,7 +394,7 @@ jobs:
           fi
           
           # 停止清理进程
-          kill $CLEANUP_PID || true
+          kill $CLEANUP_PID 2>/dev/null || true
           
           # 最后清理一次临时文件
           cleanup_temp_files
@@ -426,17 +409,26 @@ jobs:
 
           if [ $? -eq 0 ]; then
             echo "编译成功"
+            return 0
           else
             echo "编译失败"
-            exit 1
+            return 1
           fi
         }
 
         compile_firmware
+        COMPILE_RESULT=$?
 
         echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+        
+        if [ $COMPILE_RESULT -eq 0 ]; then
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
         ccache -s
         df -h
 
