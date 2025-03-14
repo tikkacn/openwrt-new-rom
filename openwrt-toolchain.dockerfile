@@ -36,15 +36,15 @@ RUN mkdir -p /workdir/ccache && \
 # 工作目录权限设置
 RUN chmod -R 777 /workdir
 
-# 创建entrypoint脚本
+# 简化entrypoint脚本，不使用exec
 RUN echo '#!/bin/bash\n\
 echo "OpenWrt构建环境已准备就绪"\n\
 echo "当前目录: $(pwd)"\n\
 echo "可用的命令:"\n\
 echo " - 执行编译: make -j\$(nproc)"\n\
 echo " - 清理编译: make clean"\n\
-exec "$@"' > /entrypoint.sh && \
+$@' > /entrypoint.sh && \
     chmod +x /entrypoint.sh
 
-ENTRYPOINT ["/entrypoint.sh"]
+# 简化启动方式，不使用ENTRYPOINT
 CMD ["/bin/bash"]
