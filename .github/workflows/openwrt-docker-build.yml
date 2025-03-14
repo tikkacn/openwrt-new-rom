@@ -58,409 +58,42 @@ jobs:
         remove-docker-images: 'true'
         build-mount-path: '/workdir'
 
-    - name: 设置Docker容器
-      uses: docker/setup-buildx-action@v3
-      with:
-        driver-opts: image=ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest
+    - name: 拉取 Docker 镜像
+      run: docker pull ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest
 
-    - name: 初始化环境
+    - name: 在Docker容器中运行构建任务
       run: |
-        echo "当前工作目录: $(pwd)"
-        # 清理额外磁盘空间
-        rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
-        rm -rf /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL || true
-        rm -rf /usr/local/lib/node_modules /opt/microsoft || true
-        rm -rf /usr/local/share/chromium /usr/local/share/powershell || true
-        
-        # 显示空间使用情况
-        df -h
-        
-        # 准备目录
-        mkdir -p ${{ env.BUILD_STATE_DIR }} ${{ env.CCACHE_DIR }}
-        chmod -R 777 /workdir || true
-        
-        # 准备自定义脚本
-        echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
-        echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
-        chmod +x $GITHUB_WORKSPACE/diy-part1.sh
-        echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
-        echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
-        chmod +x $GITHUB_WORKSPACE/diy-part2.sh
-        
-        # 检查配置文件是否存在
-        if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
-          echo "警告：配置文件 $CONFIG_FILE 不存在，创建默认配置文件"
-          echo "# 创建默认的最小化配置文件" > $GITHUB_WORKSPACE/$CONFIG_FILE
-          echo "CONFIG_TARGET_x86=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
-          echo "CONFIG_TARGET_x86_64=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
-          echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
-          echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+        docker run --rm -v ${{ github.workspace }}:/src -v /workdir:/workdir --privileged \
+          -e REPO_URL="${REPO_URL}" \
+          -e REPO_BRANCH="${REPO_BRANCH}" \
+          -e FEEDS_CONF_URL="${FEEDS_CONF_URL}" \
+          -e CONFIG_FILE="${CONFIG_FILE}" \
+          -e DIY_P1_SH="${DIY_P1_SH}" \
+          -e DIY_P2_SH="${DIY_P2_SH}" \
+          -e UPLOAD_FIRMWARE="${UPLOAD_FIRMWARE}" \
+          -e UPLOAD_RELEASE="${UPLOAD_RELEASE}" \
+          -e TZ="${TZ}" \
+          -e CCACHE_DIR="${CCACHE_DIR}" \
+          -e BUILD_STATE_DIR="${BUILD_STATE_DIR}" \
+          -e GITHUB_WORKSPACE="/src" \
+          -e GITHUB_ENV="/src/.env" \
+          -e GITHUB_OUTPUT="/src/.output" \
+          ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest \
+          /bin/bash -c "cd /src && chmod +x build-openwrt.sh && ./build-openwrt.sh"
+
+    - name: 保存GITHUB_ENV和GITHUB_OUTPUT
+      run: |
+        if [ -f .env ]; then
+          cat .env >> $GITHUB_ENV
         fi
-
-    # 恢复CCACHE缓存
-    - name: 恢复CCACHE缓存
-      uses: actions/cache@v3
-      id: cache-ccache
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
-        restore-keys: |
-          ccache-docker-${{ env.REPO_BRANCH }}-
-
-    # 恢复构建状态缓存
-    - name: 恢复构建状态缓存
-      uses: actions/cache@v3
-      id: cache-state
-      if: inputs.clean_build != 'true'
-      with:
-        path: ${{ env.BUILD_STATE_DIR }}
-        key: state-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
-        restore-keys: |
-          state-docker-${{ env.REPO_BRANCH }}-
-
-    - name: 克隆或更新OpenWrt源码
-      id: source
-      run: |
-        # 检查OpenWrt文件夹是否存在
-        if [ -d "/workdir/openwrt" ]; then
-          echo "OpenWrt源码目录已存在，检查更新..."
-          cd /workdir/openwrt
-          
-          # 保存当前HEAD提交哈希
-          CURRENT_COMMIT=$(git rev-parse HEAD)
-          echo "当前提交: $CURRENT_COMMIT"
-          
-          # 重置并更新源码
-          git fetch --all
-          git reset --hard origin/$REPO_BRANCH
-          git clean -fd
-          
-          # 获取更新后的HEAD提交哈希
-          NEW_COMMIT=$(git rev-parse HEAD)
-          echo "更新后提交: $NEW_COMMIT"
-          
-          # 检查是否有源码更新
-          if [ "$CURRENT_COMMIT" != "$NEW_COMMIT" ] || [ "${{ github.event.inputs.force_update }}" = "true" ]; then
-            echo "源码已更新或强制更新被触发，需要重新编译"
-            echo "source_changed=true" >> $GITHUB_ENV
-          else
-            echo "源码未变更"
-            echo "source_changed=false" >> $GITHUB_ENV
-          fi
-        else
-          echo "克隆新的OpenWrt源码..."
-          git clone --depth 1 $REPO_URL -b $REPO_BRANCH /workdir/openwrt
-          cd /workdir/openwrt
-          echo "首次克隆，需要完整编译"
-          echo "source_changed=true" >> $GITHUB_ENV
+        if [ -f .output ]; then
+          cat .output >> $GITHUB_OUTPUT
         fi
-        
-        # 确保所有脚本可执行
-        find . -type f -name "*.sh" -exec chmod +x {} \;
-        
-        # 下载feeds配置
-        curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "警告：无法下载 feeds.conf.default，使用仓库默认配置"
-        cat feeds.conf.default
-        
-        # 创建必要的目录结构
-        mkdir -p bin/targets bin/packages build_dir staging_dir
-        
-        # 显示剩余空间
-        df -h
-
-    - name: 检查Feeds变化
-      id: check-feeds
-      run: |
-        cd /workdir/openwrt
-        mkdir -p ${{ env.BUILD_STATE_DIR }}
-        
-        # 更新feeds并获取最新状态
-        ./scripts/feeds update -a
-        
-        # 计算feeds哈希值
-        find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > ${{ env.BUILD_STATE_DIR }}/feeds.sha256
-        CURRENT_FEEDS_HASH=$(cat ${{ env.BUILD_STATE_DIR }}/feeds.sha256 | awk '{print $1}')
-        PREVIOUS_FEEDS_HASH=$(cat ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256 2>/dev/null | awk '{print $1}' || echo "")
-        
-        echo "当前 feeds 哈希: $CURRENT_FEEDS_HASH"
-        echo "之前 feeds 哈希: $PREVIOUS_FEEDS_HASH"
-        
-        if [ "$CURRENT_FEEDS_HASH" != "$PREVIOUS_FEEDS_HASH" ] || [ "${{ env.source_changed }}" = "true" ]; then
-          echo "feeds_changed=true" >> $GITHUB_ENV
-          echo "Feeds 已变更或源码已更新，需要编译所有包"
-          # 强制编译所有包的文件标记
-          touch ${{ env.BUILD_STATE_DIR }}/rebuild_all_packages
-        else
-          echo "feeds_changed=false" >> $GITHUB_ENV
-          echo "Feeds 未变更，可以使用缓存包"
-          # 移除强制编译所有包的文件标记
-          rm -f ${{ env.BUILD_STATE_DIR }}/rebuild_all_packages
-        fi
-        
-        # 安装feeds
-        ./scripts/feeds install -a
-        
-        # 保存当前哈希值供下次比较
-        cp ${{ env.BUILD_STATE_DIR }}/feeds.sha256 ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256
-        
-        # 显示剩余空间
-        df -h
-
-    # 恢复编译结果缓存（仅当feeds和源码没有变化时）
-    - name: 恢复编译结果缓存
-      uses: actions/cache@v3
-      id: cache-build
-      if: inputs.clean_build != 'true' && env.feeds_changed != 'true'
-      with:
-        path: |
-          /workdir/openwrt/bin
-          /workdir/openwrt/build_dir
-          /workdir/openwrt/staging_dir
-        key: build-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
-        restore-keys: |
-          build-docker-${{ env.REPO_BRANCH }}-
-
-    - name: 检查缓存恢复状态
-      run: |
-        echo "CONFIG_FILE: ${{ env.CONFIG_FILE }}"
-        echo "CCACHE缓存恢复状态: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
-        echo "构建状态缓存恢复状态: ${{ steps.cache-state.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
-        echo "编译结果缓存恢复状态: ${{ steps.cache-build.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
-        echo "源码变更状态: ${{ env.source_changed }}"
-        echo "Feeds变更状态: ${{ env.feeds_changed }}"
-        
-        # 检查目录大小
-        echo "CCACHE目录大小: $(du -sh ${{ env.CCACHE_DIR }} 2>/dev/null || echo '目录不存在或为空')"
-        echo "编译结果目录大小: $(du -sh /workdir/openwrt/bin 2>/dev/null || echo '目录不存在或为空')"
-        echo "构建目录大小: $(du -sh /workdir/openwrt/build_dir 2>/dev/null || echo '目录不存在或为空')"
-        echo "暂存目录大小: $(du -sh /workdir/openwrt/staging_dir 2>/dev/null || echo '目录不存在或为空')"
-        
-        ls -la ${{ env.BUILD_STATE_DIR }}/ || echo "构建状态目录为空"
-        
-        # 显示剩余空间
-        df -h
-
-    - name: 配置编译环境
-      run: |
-        cd /workdir/openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
-        [ -e $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./files
-        cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
-        cp .config .config.input
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-        echo "CONFIG_AUTOREMOVE=n" >> .config
-        echo "CONFIG_AUTOREBUILD=n" >> .config
-        make defconfig
-        
-        # 检查配置是否丢失软件包
-        grep "^CONFIG_PACKAGE_.*=y" .config.input > packages_input.txt || true
-        grep "^CONFIG_PACKAGE_.*=y" .config > packages_defconfig.txt || true
-        comm -23 packages_input.txt packages_defconfig.txt > missing_packages.txt
-        if [ -s missing_packages.txt ]; then
-          echo "警告：以下包在 defconfig 后缺失，将尝试恢复："
-          cat missing_packages.txt
-          cat missing_packages.txt >> .config
-          while read -r line; do
-            pkg=$(echo "$line" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-            echo "安装包: $pkg"
-            ./scripts/feeds install "$pkg" || echo "警告：无法安装 $pkg，可能不在 feeds 中"
-          done < missing_packages.txt
-          make defconfig
-        else
-          echo "所有配置项均保留，无缺失"
-        fi
-        
-        # 检查配置差异
-        diff .config.input .config > config_diff.txt || echo "配置有差异"
-        
-        # 如果配置有变化，需要重新编译
-        if [ -s config_diff.txt ]; then
-          echo "配置有变化，将只编译变化的包"
-          # 找出新增和移除的包
-          grep "^+CONFIG_PACKAGE_.*=y" config_diff.txt | sed 's/^+CONFIG_PACKAGE_\(.*\)=y/\1/' > added_packages.txt
-          grep "^-CONFIG_PACKAGE_.*=y" config_diff.txt | sed 's/^-CONFIG_PACKAGE_\(.*\)=y/\1/' > removed_packages.txt
-          
-          if [ -s added_packages.txt ]; then
-            echo "新增的包:"
-            cat added_packages.txt
-          fi
-          
-          if [ -s removed_packages.txt ]; then
-            echo "移除的包:"
-            cat removed_packages.txt
-          fi
-          
-          echo "config_changed=true" >> $GITHUB_ENV
-        else
-          echo "配置无变化"
-          echo "config_changed=false" >> $GITHUB_ENV
-        fi
-        
-        # 显示剩余空间
-        df -h
-
-    - name: 开启SSH调试
-      uses: mxschmitt/action-tmate@v3
-      if: github.event.inputs.ssh == 'true'
-
-    - name: 下载软件包
-      run: |
-        cd /workdir/openwrt
-        make download -j8 || make download -j1 V=s
-        # 配置CCACHE
-        mkdir -p ${{ env.CCACHE_DIR }}
-        ccache -o cache_dir=${{ env.CCACHE_DIR }}
-        ccache -o max_size=8G
-        ccache -z
-        # 显示剩余空间
-        df -h
-
-    - name: 智能编译固件
-      id: compile
-      run: |
-        cd /workdir/openwrt
-        export CCACHE_DIR=${{ env.CCACHE_DIR }}
-        export PATH="/usr/lib/ccache:$PATH"
-
-        cleanup_temp_files() {
-          echo "清理临时文件以释放空间..."
-          find /tmp -type f -delete || true
-          find /workdir/openwrt/tmp -type f -delete || true
-          df -h
-        }
-
-        save_cache_info() {
-          echo "保存缓存状态信息..."
-          mkdir -p ${{ env.BUILD_STATE_DIR }}
-          cp .config ${{ env.BUILD_STATE_DIR }}/config.txt
-          echo "$(date)" > ${{ env.BUILD_STATE_DIR }}/last_build_time.txt
-          echo "保存构建状态完成"
-        }
-
-        compile_firmware() {
-          # 开始时间记录
-          START_TIME=$(date +%s)
-          echo "开始编译时间: $(date)"
-          
-          # 定期清理临时文件以释放空间
-          (while true; do sleep 300; cleanup_temp_files; done) &
-          CLEANUP_PID=$!
-          
-          # 决定编译策略
-          if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
-            # 用户请求完全重新编译
-            echo "用户请求完全重新编译"
-            make clean
-            make -j$(nproc) V=s || make -j1 V=s
-            
-          elif [ "${{ env.feeds_changed }}" = "true" ] || [ -f "${{ env.BUILD_STATE_DIR }}/rebuild_all_packages" ]; then
-            # Feeds变更或源码变更，需要重新编译所有包
-            echo "Feeds或源码已变更，重新编译所有包"
-            make package/clean
-            make -j$(nproc) V=s || make -j1 V=s
-            
-          elif [ "${{ env.config_changed }}" = "true" ]; then
-            # 配置有变化，只编译变化的包
-            echo "配置有变化，进行智能增量编译"
-            
-            # 编译新增的包
-            if [ -s added_packages.txt ]; then
-              echo "编译新增的包..."
-              while read -r pkg; do
-                echo "编译包: $pkg"
-                make package/$pkg/{clean,compile} -j$(nproc) V=s || make package/$pkg/{clean,compile} -j1 V=s
-                # 每编译一个包后清理临时文件
-                cleanup_temp_files
-              done < added_packages.txt
-            fi
-            
-            # 移除已删除的包
-            if [ -s removed_packages.txt ]; then
-              echo "清理移除的包..."
-              while read -r pkg; do
-                echo "清理包: $pkg"
-                make package/$pkg/clean V=s || true
-              done < removed_packages.txt
-            fi
-            
-            # 构建固件
-            echo "生成最终固件..."
-            make -j$(nproc) V=s || make -j1 V=s
-            
-          else
-            # 无变化，仅重新生成固件
-            echo "配置和feeds都未变化，执行最小增量编译..."
-            make -j$(nproc) V=s || make -j1 V=s
-          fi
-          
-          # 停止清理进程
-          kill $CLEANUP_PID 2>/dev/null || true
-          
-          # 最后清理一次临时文件
-          cleanup_temp_files
-          
-          # 结束时间记录
-          END_TIME=$(date +%s)
-          echo "结束编译时间: $(date)"
-          echo "总编译用时: $((END_TIME - START_TIME)) 秒"
-          
-          # 保存缓存信息
-          save_cache_info
-
-          if [ $? -eq 0 ]; then
-            echo "编译成功"
-            return 0
-          else
-            echo "编译失败"
-            return 1
-          fi
-        }
-
-        compile_firmware
-        COMPILE_RESULT=$?
-
-        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-        
-        if [ $COMPILE_RESULT -eq 0 ]; then
-          echo "status=success" >> $GITHUB_OUTPUT
-        else
-          echo "status=failed" >> $GITHUB_OUTPUT
-          exit 1
-        fi
-        
-        ccache -s
-        df -h
-
-    # 保存各种缓存
-    - name: 保存CCACHE缓存
-      uses: actions/cache@v3
-      if: "!cancelled()"
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
-
-    - name: 保存构建状态缓存
-      uses: actions/cache@v3
-      if: "!cancelled()"
-      with:
-        path: ${{ env.BUILD_STATE_DIR }}
-        key: state-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
-
-    - name: 保存编译结果缓存
-      uses: actions/cache@v3
-      if: "!cancelled()"
-      with:
-        path: |
-          /workdir/openwrt/bin
-          /workdir/openwrt/build_dir
-          /workdir/openwrt/staging_dir
-        key: build-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
 
     # 整理固件
     - name: 整理文件
       id: organize
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         cd /workdir/openwrt/bin/targets/*/*
         # 注意：不要删除可能用于缓存的文件
@@ -527,12 +160,3 @@ jobs:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
-
-    - name: 删除旧的Releases
-      uses: dev-drprasad/delete-older-releases@master
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
