@@ -253,7 +253,7 @@ download_packages() {
   # 配置CCACHE
   mkdir -p $CCACHE_DIR
   ccache -o cache_dir=$CCACHE_DIR
-  ccache -o max_size=8G
+  ccache -o max_size=5G  # 限制CCACHE大小为5G，防止超出GitHub Actions缓存限制
   ccache -z
 }
 
@@ -426,6 +426,49 @@ organize_firmware() {
   log_success "固件整理完成，可以在 /workdir/firmware 目录找到编译好的固件"
 }
 
+# 准备缓存权限
+prepare_cache() {
+  log "准备缓存目录权限..."
+  
+  # 修复root-x86目录权限，这是缓存问题的主要来源
+  if [ -d "/workdir/openwrt/build_dir/target-x86_64_musl/root-x86" ]; then
+    chmod -R 755 /workdir/openwrt/build_dir/target-x86_64_musl/root-x86 2>/dev/null || true
+    find /workdir/openwrt/build_dir/target-x86_64_musl/root-x86 -type f -exec chmod 644 {} \; 2>/dev/null || true
+  fi
+  
+  # 修复所有构建目录的权限
+  find /workdir/openwrt/build_dir -type d -exec chmod 755 {} \; 2>/dev/null || true
+  
+  # 特别处理关键配置文件的权限 - 日志中显示这些是主要问题
+  find /workdir/openwrt/build_dir -name "*.conf" -o -name "*.txt" -o -name "*.so" -o -name "*.secrets" -o -name "shadow" -o -name "*.user" -exec chmod 644 {} \; 2>/dev/null || true
+  
+  # 处理thinlto-cache目录和其他特殊目录
+  find /workdir/openwrt/build_dir -path "*/thinlto-cache*" -exec chmod -R 755 {} \; 2>/dev/null || true
+  find /workdir/openwrt/build_dir -path "*/ipkg-*" -exec chmod -R 755 {} \; 2>/dev/null || true
+  find /workdir/openwrt/build_dir -path "*/.pkgdir*" -exec chmod -R 755 {} \; 2>/dev/null || true
+  
+  # 修正 /etc 目录权限，这是常见的权限问题区域
+  find /workdir/openwrt/build_dir -path "*/etc*" -type d -exec chmod 755 {} \; 2>/dev/null || true
+  find /workdir/openwrt/build_dir -path "*/etc*" -type f -exec chmod 644 {} \; 2>/dev/null || true
+  
+  # 优化缓存大小，移除不需要的大文件
+  log "优化缓存大小..."
+  
+  # 清理重复或旧的下载文件
+  find /workdir/openwrt/dl -type f -name "*.tar.*" -mtime +10 -delete 2>/dev/null || true
+  
+  # 清理不需要缓存的编译中间文件
+  find /workdir/openwrt/build_dir -name "*.o" -delete 2>/dev/null || true
+  find /workdir/openwrt/build_dir -name "*.so" -delete 2>/dev/null || true
+  find /workdir/openwrt/build_dir -name "*.a" -delete 2>/dev/null || true
+  
+  # 清理缓存目录中的临时文件
+  find /workdir/openwrt/build_dir -name "*.tmp" -delete 2>/dev/null || true
+  find /workdir/openwrt/build_dir -name "*.log" -delete 2>/dev/null || true
+  
+  log_success "缓存目录权限已修复并优化缓存大小"
+}
+
 # SSH调试函数
 start_ssh_debug() {
   if [ "$SSH_DEBUG" = "true" ]; then
@@ -477,6 +520,7 @@ main() {
   # 执行编译
   if compile_firmware; then
     organize_firmware
+    prepare_cache  # 添加这一行，在编译成功后修复缓存权限
   else
     log_error "编译失败，退出"
     echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
