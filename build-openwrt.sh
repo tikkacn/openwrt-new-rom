@@ -400,4 +400,81 @@ organize_firmware() {
   fi
   
   if [ "$CONFIG_CHANGED" = "true" ]; then
-    echo "📢 此版本包含配置更改
+    echo "📢 此版本包含配置更改" >> /workdir/build_info.txt
+    if [ -f /workdir/added_packages.txt ]; then
+      echo "📦 新增软件包:" >> /workdir/build_info.txt
+      cat /workdir/added_packages.txt | sed 's/^/- /' >> /workdir/build_info.txt
+    fi
+    if [ -f /workdir/removed_packages.txt ]; then
+      echo "🗑️ 移除软件包:" >> /workdir/build_info.txt
+      cat /workdir/removed_packages.txt | sed 's/^/- /' >> /workdir/build_info.txt
+    fi
+  fi
+  
+  echo "⏱️ 编译用时: $(date -d@$ELAPSED_TIME -u +%H:%M:%S)" >> /workdir/build_info.txt
+  
+  log_success "固件整理完成，可以在 /workdir/firmware 目录找到编译好的固件"
+}
+
+# SSH调试函数
+start_ssh_debug() {
+  if [ "$SSH_DEBUG" = "true" ]; then
+    log "启动SSH调试会话..."
+    apt-get update && apt-get install -y openssh-server
+    mkdir -p /run/sshd
+    echo 'root:password' | chpasswd
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+    /usr/sbin/sshd -D &
+    
+    # 显示IP地址
+    IP_ADDR=$(hostname -I | awk '{print $1}')
+    log_warning "SSH服务已启动，可通过以下信息连接:"
+    log_warning "主机: $IP_ADDR"
+    log_warning "用户: root"
+    log_warning "密码: password"
+    log_warning "按Ctrl+C终止调试会话"
+    
+    # 等待用户操作
+    sleep 3600
+  fi
+}
+
+# 主函数
+main() {
+  # 设置变量
+  SOURCE_CHANGED=false
+  FEEDS_CHANGED=false
+  CONFIG_CHANGED=false
+  ELAPSED_TIME=0
+  
+  log "开始OpenWrt增量编译工作流..."
+  
+  # 初始化环境
+  init_env
+  
+  # 处理SSH调试
+  if [ "$SSH_DEBUG" = "true" ]; then
+    start_ssh_debug
+    exit 0
+  fi
+  
+  # 执行构建步骤
+  clone_or_update_source
+  check_feeds
+  configure_build
+  download_packages
+  
+  # 执行编译
+  if compile_firmware; then
+    organize_firmware
+  else
+    log_error "编译失败，退出"
+    echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
+    exit 1
+  fi
+  
+  log_success "构建工作流完成!"
+}
+
+# 运行主函数
+main
