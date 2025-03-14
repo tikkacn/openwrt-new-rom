@@ -1,4 +1,3 @@
-# 文件一：Dockerfile（保存为openwrt-toolchain.dockerfile）
 FROM ubuntu:22.04
 
 # 设置非交互式安装
@@ -16,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools subversion \
     swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev \
     python3-setuptools jq bc lm-sensors pciutils \
+    clang llvm lld \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
