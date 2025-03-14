@@ -1,41 +1,85 @@
 #!/bin/bash
-# build-openwrt.sh - 用于在Docker容器中执行OpenWrt编译
+# build-openwrt.sh - 用于在Docker容器中执行OpenWrt增量编译
 
 set -e
 
+# 配置日志颜色
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+PLAIN='\033[0m'
+
+# 日志函数
+log() {
+  echo -e "${BLUE}[$(date "+%Y-%m-%d %H:%M:%S")] $1${PLAIN}"
+}
+
+log_error() {
+  echo -e "${RED}[$(date "+%Y-%m-%d %H:%M:%S")] ERROR: $1${PLAIN}"
+}
+
+log_success() {
+  echo -e "${GREEN}[$(date "+%Y-%m-%d %H:%M:%S")] SUCCESS: $1${PLAIN}"
+}
+
+log_warning() {
+  echo -e "${YELLOW}[$(date "+%Y-%m-%d %H:%M:%S")] WARNING: $1${PLAIN}"
+}
+
 # 初始化环境
-echo "当前工作目录: $(pwd)"
-mkdir -p $BUILD_STATE_DIR $CCACHE_DIR
-chmod -R 777 /workdir || true
+init_env() {
+  log "初始化环境..."
+  
+  # 确保目录存在
+  mkdir -p $BUILD_STATE_DIR $CCACHE_DIR /workdir/firmware
+  chmod -R 777 /workdir
 
-# 准备自定义脚本
-echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
-echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
-chmod +x $GITHUB_WORKSPACE/diy-part1.sh
-echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
-echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
-chmod +x $GITHUB_WORKSPACE/diy-part2.sh
+  # 准备自定义脚本
+  echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
+  echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
+  chmod +x $GITHUB_WORKSPACE/diy-part1.sh
+  
+  echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
+  echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
+  chmod +x $GITHUB_WORKSPACE/diy-part2.sh
 
-# 检查配置文件是否存在
-if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
-  echo "警告：配置文件 $CONFIG_FILE 不存在，创建默认配置文件"
-  echo "# 创建默认的最小化配置文件" > $GITHUB_WORKSPACE/$CONFIG_FILE
-  echo "CONFIG_TARGET_x86=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
-  echo "CONFIG_TARGET_x86_64=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
-  echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
-  echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
-fi
+  # 检查配置文件是否存在
+  if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+    log_warning "配置文件 $CONFIG_FILE 不存在，创建默认配置文件"
+    echo "# 创建默认的最小化配置文件" > $GITHUB_WORKSPACE/$CONFIG_FILE
+    echo "CONFIG_TARGET_x86=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+    echo "CONFIG_TARGET_x86_64=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+    echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+    echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+  fi
+
+  # 显示空间使用情况
+  log "当前磁盘空间使用情况:"
+  df -h
+}
+
+# 清理临时文件释放空间
+cleanup_temp_files() {
+  log "清理临时文件以释放空间..."
+  find /tmp -type f -delete 2>/dev/null || true
+  find /workdir/openwrt/tmp -type f -delete 2>/dev/null || true
+  log "当前磁盘空间使用情况:"
+  df -h
+}
 
 # 克隆或更新OpenWrt源码
 clone_or_update_source() {
+  log "处理OpenWrt源码..."
+  
   # 检查OpenWrt文件夹是否存在
   if [ -d "/workdir/openwrt" ]; then
-    echo "OpenWrt源码目录已存在，检查更新..."
+    log "OpenWrt源码目录已存在，检查更新..."
     cd /workdir/openwrt
     
     # 保存当前HEAD提交哈希
     CURRENT_COMMIT=$(git rev-parse HEAD)
-    echo "当前提交: $CURRENT_COMMIT"
+    log "当前提交: $CURRENT_COMMIT"
     
     # 重置并更新源码
     git fetch --all
@@ -44,29 +88,32 @@ clone_or_update_source() {
     
     # 获取更新后的HEAD提交哈希
     NEW_COMMIT=$(git rev-parse HEAD)
-    echo "更新后提交: $NEW_COMMIT"
+    log "更新后提交: $NEW_COMMIT"
     
     # 检查是否有源码更新
     if [ "$CURRENT_COMMIT" != "$NEW_COMMIT" ] || [ "$FORCE_UPDATE" = "true" ]; then
-      echo "源码已更新或强制更新被触发，需要重新编译"
+      log_warning "源码已更新或强制更新被触发，需要重新编译"
       echo "source_changed=true" >> $GITHUB_ENV
+      SOURCE_CHANGED=true
     else
-      echo "源码未变更"
+      log "源码未变更"
       echo "source_changed=false" >> $GITHUB_ENV
+      SOURCE_CHANGED=false
     fi
   else
-    echo "克隆新的OpenWrt源码..."
+    log "克隆新的OpenWrt源码..."
     git clone --depth 1 $REPO_URL -b $REPO_BRANCH /workdir/openwrt
     cd /workdir/openwrt
-    echo "首次克隆，需要完整编译"
+    log "首次克隆，需要完整编译"
     echo "source_changed=true" >> $GITHUB_ENV
+    SOURCE_CHANGED=true
   fi
   
   # 确保所有脚本可执行
   find . -type f -name "*.sh" -exec chmod +x {} \;
   
   # 下载feeds配置
-  curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "警告：无法下载 feeds.conf.default，使用仓库默认配置"
+  curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || log_warning "无法下载 feeds.conf.default，使用仓库默认配置"
   cat feeds.conf.default
   
   # 创建必要的目录结构
@@ -75,6 +122,7 @@ clone_or_update_source() {
 
 # 检查Feeds变化
 check_feeds() {
+  log "检查Feeds变化..."
   cd /workdir/openwrt
   mkdir -p $BUILD_STATE_DIR
   
@@ -86,17 +134,19 @@ check_feeds() {
   CURRENT_FEEDS_HASH=$(cat $BUILD_STATE_DIR/feeds.sha256 | awk '{print $1}')
   PREVIOUS_FEEDS_HASH=$(cat $BUILD_STATE_DIR/previous_feeds.sha256 2>/dev/null | awk '{print $1}' || echo "")
   
-  echo "当前 feeds 哈希: $CURRENT_FEEDS_HASH"
-  echo "之前 feeds 哈希: $PREVIOUS_FEEDS_HASH"
+  log "当前 feeds 哈希: $CURRENT_FEEDS_HASH"
+  log "之前 feeds 哈希: $PREVIOUS_FEEDS_HASH"
   
-  if [ "$CURRENT_FEEDS_HASH" != "$PREVIOUS_FEEDS_HASH" ] || [ "$source_changed" = "true" ]; then
+  if [ "$CURRENT_FEEDS_HASH" != "$PREVIOUS_FEEDS_HASH" ] || [ "$SOURCE_CHANGED" = "true" ]; then
+    log_warning "Feeds 已变更或源码已更新，需要编译所有包"
     echo "feeds_changed=true" >> $GITHUB_ENV
-    echo "Feeds 已变更或源码已更新，需要编译所有包"
+    FEEDS_CHANGED=true
     # 强制编译所有包的文件标记
     touch $BUILD_STATE_DIR/rebuild_all_packages
   else
+    log "Feeds 未变更，可以使用缓存包"
     echo "feeds_changed=false" >> $GITHUB_ENV
-    echo "Feeds 未变更，可以使用缓存包"
+    FEEDS_CHANGED=false
     # 移除强制编译所有包的文件标记
     rm -f $BUILD_STATE_DIR/rebuild_all_packages
   fi
@@ -110,32 +160,48 @@ check_feeds() {
 
 # 配置编译环境
 configure_build() {
+  log "配置编译环境..."
   cd /workdir/openwrt
+  
+  # 执行自定义脚本
   $GITHUB_WORKSPACE/$DIY_P1_SH
+  
+  # 复制自定义文件
   [ -e $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./files
+  
+  # 复制配置文件
   cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
   cp .config .config.input
+  
+  # 执行第二个自定义脚本
   $GITHUB_WORKSPACE/$DIY_P2_SH
+  
+  # 添加自动配置
   echo "CONFIG_AUTOREMOVE=n" >> .config
   echo "CONFIG_AUTOREBUILD=n" >> .config
+  
+  # 生成最终配置
   make defconfig
   
   # 检查配置是否丢失软件包
   grep "^CONFIG_PACKAGE_.*=y" .config.input > packages_input.txt || true
   grep "^CONFIG_PACKAGE_.*=y" .config > packages_defconfig.txt || true
   comm -23 packages_input.txt packages_defconfig.txt > missing_packages.txt
+  
   if [ -s missing_packages.txt ]; then
-    echo "警告：以下包在 defconfig 后缺失，将尝试恢复："
+    log_warning "以下包在 defconfig 后缺失，将尝试恢复："
     cat missing_packages.txt
     cat missing_packages.txt >> .config
+    
     while read -r line; do
       pkg=$(echo "$line" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-      echo "安装包: $pkg"
-      ./scripts/feeds install "$pkg" || echo "警告：无法安装 $pkg，可能不在 feeds 中"
+      log "安装包: $pkg"
+      ./scripts/feeds install "$pkg" || log_warning "无法安装 $pkg，可能不在 feeds 中"
     done < missing_packages.txt
+    
     make defconfig
   else
-    echo "所有配置项均保留，无缺失"
+    log "所有配置项均保留，无缺失"
   fi
   
   # 检查配置差异
@@ -143,32 +209,38 @@ configure_build() {
   
   # 如果配置有变化，需要重新编译
   if [ -s config_diff.txt ]; then
-    echo "配置有变化，将只编译变化的包"
+    log "配置有变化，将只编译变化的包"
     # 找出新增和移除的包
     grep "^+CONFIG_PACKAGE_.*=y" config_diff.txt | sed 's/^+CONFIG_PACKAGE_\(.*\)=y/\1/' > added_packages.txt
     grep "^-CONFIG_PACKAGE_.*=y" config_diff.txt | sed 's/^-CONFIG_PACKAGE_\(.*\)=y/\1/' > removed_packages.txt
     
     if [ -s added_packages.txt ]; then
-      echo "新增的包:"
+      log_warning "新增的包:"
       cat added_packages.txt
+      cp added_packages.txt /workdir/added_packages.txt
     fi
     
     if [ -s removed_packages.txt ]; then
-      echo "移除的包:"
+      log_warning "移除的包:"
       cat removed_packages.txt
+      cp removed_packages.txt /workdir/removed_packages.txt
     fi
     
     echo "config_changed=true" >> $GITHUB_ENV
+    CONFIG_CHANGED=true
   else
-    echo "配置无变化"
+    log "配置无变化"
     echo "config_changed=false" >> $GITHUB_ENV
+    CONFIG_CHANGED=false
   fi
 }
 
 # 下载软件包
 download_packages() {
+  log "下载软件包..."
   cd /workdir/openwrt
   make download -j8 || make download -j1 V=s
+  
   # 配置CCACHE
   mkdir -p $CCACHE_DIR
   ccache -o cache_dir=$CCACHE_DIR
@@ -182,15 +254,8 @@ compile_firmware() {
   export CCACHE_DIR=$CCACHE_DIR
   export PATH="/usr/lib/ccache:$PATH"
 
-  cleanup_temp_files() {
-    echo "清理临时文件以释放空间..."
-    find /tmp -type f -delete || true
-    find /workdir/openwrt/tmp -type f -delete || true
-    df -h
-  }
-
   save_cache_info() {
-    echo "保存缓存状态信息..."
+    log "保存缓存状态信息..."
     mkdir -p $BUILD_STATE_DIR
     cp .config $BUILD_STATE_DIR/config.txt
     echo "$(date)" > $BUILD_STATE_DIR/last_build_time.txt
@@ -199,7 +264,7 @@ compile_firmware() {
 
   # 开始时间记录
   START_TIME=$(date +%s)
-  echo "开始编译时间: $(date)"
+  log "开始编译时间: $(date)"
   
   # 定期清理临时文件以释放空间
   (while true; do sleep 300; cleanup_temp_files; done) &
@@ -208,25 +273,27 @@ compile_firmware() {
   # 决定编译策略
   if [ "$CLEAN_BUILD" = "true" ]; then
     # 用户请求完全重新编译
-    echo "用户请求完全重新编译"
+    log_warning "用户请求完全重新编译"
     make clean
     make -j$(nproc) V=s || make -j1 V=s
+    BUILD_STATUS=$?
     
-  elif [ "$feeds_changed" = "true" ] || [ -f "$BUILD_STATE_DIR/rebuild_all_packages" ]; then
+  elif [ "$FEEDS_CHANGED" = "true" ] || [ -f "$BUILD_STATE_DIR/rebuild_all_packages" ]; then
     # Feeds变更或源码变更，需要重新编译所有包
-    echo "Feeds或源码已变更，重新编译所有包"
+    log_warning "Feeds或源码已变更，重新编译所有包"
     make package/clean
     make -j$(nproc) V=s || make -j1 V=s
+    BUILD_STATUS=$?
     
-  elif [ "$config_changed" = "true" ]; then
+  elif [ "$CONFIG_CHANGED" = "true" ]; then
     # 配置有变化，只编译变化的包
-    echo "配置有变化，进行智能增量编译"
+    log_warning "配置有变化，进行智能增量编译"
     
     # 编译新增的包
     if [ -s added_packages.txt ]; then
-      echo "编译新增的包..."
+      log "编译新增的包..."
       while read -r pkg; do
-        echo "编译包: $pkg"
+        log "编译包: $pkg"
         make package/$pkg/{clean,compile} -j$(nproc) V=s || make package/$pkg/{clean,compile} -j1 V=s
         # 每编译一个包后清理临时文件
         cleanup_temp_files
@@ -235,21 +302,23 @@ compile_firmware() {
     
     # 移除已删除的包
     if [ -s removed_packages.txt ]; then
-      echo "清理移除的包..."
+      log "清理移除的包..."
       while read -r pkg; do
-        echo "清理包: $pkg"
+        log "清理包: $pkg"
         make package/$pkg/clean V=s || true
       done < removed_packages.txt
     fi
     
     # 构建固件
-    echo "生成最终固件..."
+    log "生成最终固件..."
     make -j$(nproc) V=s || make -j1 V=s
+    BUILD_STATUS=$?
     
   else
     # 无变化，仅重新生成固件
-    echo "配置和feeds都未变化，执行最小增量编译..."
+    log "配置和feeds都未变化，执行最小增量编译..."
     make -j$(nproc) V=s || make -j1 V=s
+    BUILD_STATUS=$?
   fi
   
   # 停止清理进程
@@ -260,50 +329,75 @@ compile_firmware() {
   
   # 结束时间记录
   END_TIME=$(date +%s)
-  echo "结束编译时间: $(date)"
-  echo "总编译用时: $((END_TIME - START_TIME)) 秒"
+  ELAPSED_TIME=$((END_TIME - START_TIME))
+  
+  log "结束编译时间: $(date)"
+  log "总编译用时: $ELAPSED_TIME 秒 ($(date -d@$ELAPSED_TIME -u +%H:%M:%S))"
   
   # 保存缓存信息
   save_cache_info
 
-  if [ $? -eq 0 ]; then
-    echo "编译成功"
+  if [ $BUILD_STATUS -eq 0 ]; then
+    log_success "编译成功"
     return 0
   else
-    echo "编译失败"
+    log_error "编译失败"
     return 1
   fi
 }
 
-# 设置环境变量
-set_env_vars() {
-  device_name="_$(grep '^CONFIG_TARGET.*DEVICE.*=y' /workdir/openwrt/.config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')"
-  file_date="_$(date +"%Y%m%d%H%M")"
+# 整理固件文件
+organize_firmware() {
+  log "整理固件文件..."
   
-  echo "DEVICE_NAME=$device_name" >> $GITHUB_ENV
-  echo "FILE_DATE=$file_date" >> $GITHUB_ENV
-  echo "FIRMWARE=/workdir/openwrt/bin/targets/*/*/firmware" >> $GITHUB_ENV
+  # 进入targets目录
+  cd /workdir/openwrt/bin/targets/*/*
   
+  # 清理旧的固件目录
+  rm -rf firmware
+  
+  # 创建新的固件目录
+  mkdir -p firmware
+  
+  # 查找固件文件
+  FIRMWARE_FILES=$(find . -maxdepth 1 -name "*combined*" -or -name "*sysupgrade*")
+  
+  if [ -z "$FIRMWARE_FILES" ]; then
+    log_warning "未找到固件文件，使用所有bin文件"
+    FIRMWARE_FILES=$(find . -maxdepth 1 -name "*.bin")
+  fi
+  
+  # 复制固件文件
+  if [ -n "$FIRMWARE_FILES" ]; then
+    echo "$FIRMWARE_FILES" | xargs -i cp {} ./firmware/
+    log_success "成功复制固件文件"
+  else
+    log_warning "未找到任何固件文件，复制所有文件"
+    cp -r * ./firmware/
+  fi
+  
+  # 复制配置文件
+  cp /workdir/openwrt/.config ./firmware/config.txt
+  
+  # 创建固件包
+  zip -r firmware.zip firmware
+  
+  # 复制到输出目录
+  rm -rf /workdir/firmware/*
+  cp -r firmware/* /workdir/firmware/
+  
+  # 保存路径信息给GitHub Actions
+  echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' /workdir/openwrt/.config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
+  echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+  echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
   echo "status=success" >> $GITHUB_OUTPUT
-}
-
-# 主函数
-main() {
-  # 设置变量
-  CLEAN_BUILD="${CLEAN_BUILD:-false}"
-  FORCE_UPDATE="${FORCE_UPDATE:-false}"
   
-  # 执行构建步骤
-  clone_or_update_source
-  check_feeds
-  configure_build
-  download_packages
-  compile_firmware
-  set_env_vars
+  # 创建版本信息
+  echo "## 编译详情" > /workdir/build_info.txt
   
-  # 完成
-  echo "编译工作流完成"
-}
-
-# 运行主函数
-main
+  if [ "$FEEDS_CHANGED" = "true" ] || [ "$SOURCE_CHANGED" = "true" ]; then
+    echo "📢 此版本包含源码或feeds更新" >> /workdir/build_info.txt
+  fi
+  
+  if [ "$CONFIG_CHANGED" = "true" ]; then
+    echo "📢 此版本包含配置更改
