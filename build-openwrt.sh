@@ -502,6 +502,45 @@ fix_all_permissions() {
   log_success "所有文件权限已修复"
 }
 
+# 压缩缓存文件以节省存储空间
+compress_cache_for_storage() {
+  log "压缩缓存文件以节省存储空间..."
+  
+  mkdir -p /workdir/cached_archives
+  
+  # 压缩bin目录
+  log "压缩bin目录..."
+  tar -czf /workdir/cached_archives/bin.tar.gz -C /workdir/openwrt bin || true
+  
+  # 压缩staging_dir目录
+  log "压缩staging_dir目录..."
+  tar -czf /workdir/cached_archives/staging_dir.tar.gz -C /workdir/openwrt staging_dir || true
+  
+  # 分段压缩build_dir目录(分成多个较小的文件)
+  log "分段压缩build_dir目录..."
+  
+  # 将build_dir分成几个主要部分
+  if [ -d "/workdir/openwrt/build_dir/target-x86_64_musl" ]; then
+    log "压缩目标平台编译缓存..."
+    tar -czf /workdir/cached_archives/build_dir_target.tar.gz -C /workdir/openwrt build_dir/target-* || true
+  fi
+  
+  if [ -d "/workdir/openwrt/build_dir/host" ]; then
+    log "压缩主机工具编译缓存..."
+    tar -czf /workdir/cached_archives/build_dir_host.tar.gz -C /workdir/openwrt build_dir/host || true
+  fi
+  
+  if [ -d "/workdir/openwrt/build_dir/toolchain" ]; then
+    log "压缩工具链编译缓存..."
+    tar -czf /workdir/cached_archives/build_dir_toolchain.tar.gz -C /workdir/openwrt build_dir/toolchain* || true
+  fi
+  
+  # 确保归档文件对所有用户可读
+  chmod -R 777 /workdir/cached_archives
+  
+  log "缓存压缩完成，存储在 /workdir/cached_archives/"
+}
+
 # SSH调试函数
 start_ssh_debug() {
   if [ "$SSH_DEBUG" = "true" ]; then
@@ -554,7 +593,8 @@ main() {
   if compile_firmware; then
     organize_firmware
     prepare_cache
-    fix_all_permissions  # 添加这一行，强力修复所有文件权限
+    fix_all_permissions
+    compress_cache_for_storage  # 添加压缩缓存步骤
   else
     log_error "编译失败，退出"
     echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
