@@ -113,6 +113,12 @@ jobs:
         FORCE_UPDATE: ${{ github.event.inputs.force_update }}
         SSH_DEBUG: ${{ github.event.inputs.ssh }}
       run: |
+        # 获取当前用户ID
+        echo "当前用户ID: $(id -u):$(id -g)"
+        
+        # 设置权限
+        chmod 777 -R /workdir
+        
         docker run --rm -v ${{ github.workspace }}:/src -v /workdir:/workdir --privileged \
           -e REPO_URL="${REPO_URL}" \
           -e REPO_BRANCH="${REPO_BRANCH}" \
@@ -132,7 +138,7 @@ jobs:
           -e FORCE_UPDATE="${FORCE_UPDATE}" \
           -e SSH_DEBUG="${SSH_DEBUG}" \
           ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest \
-          /bin/bash -c "cd /src && chmod +x build-openwrt.sh && ./build-openwrt.sh"
+          /bin/bash -c "cd /src && chmod +x build-openwrt.sh && sudo -E ./build-openwrt.sh"
 
     - name: 保存环境变量
       run: |
