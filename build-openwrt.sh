@@ -481,6 +481,27 @@ prepare_cache() {
   log_success "缓存目录权限已修复并优化缓存大小"
 }
 
+# 修复所有缓存文件的权限问题
+fix_all_permissions() {
+  log "修复所有缓存文件权限..."
+  
+  # 使用sudo确保有足够权限
+  sudo find /workdir/openwrt/build_dir -type d -exec chmod 755 {} \; 2>/dev/null || true
+  sudo find /workdir/openwrt/build_dir -type f -exec chmod 644 {} \; 2>/dev/null || true
+  
+  # 处理可执行文件，保留可执行权限
+  sudo find /workdir/openwrt/build_dir -type f -name "*.sh" -exec chmod 755 {} \; 2>/dev/null || true
+  sudo find /workdir/openwrt/build_dir -path "*/bin/*" -type f -exec chmod 755 {} \; 2>/dev/null || true
+  
+  # 处理特殊的锁文件
+  sudo find /workdir/openwrt/build_dir -name "*.lock" -delete 2>/dev/null || true
+  
+  # 更改所有文件的所有者
+  sudo chown -R 1000:1000 /workdir/openwrt 2>/dev/null || true
+  
+  log_success "所有文件权限已修复"
+}
+
 # SSH调试函数
 start_ssh_debug() {
   if [ "$SSH_DEBUG" = "true" ]; then
@@ -532,7 +553,8 @@ main() {
   # 执行编译
   if compile_firmware; then
     organize_firmware
-    prepare_cache  # 添加这一行，在编译成功后修复缓存权限
+    prepare_cache
+    fix_all_permissions  # 添加这一行，强力修复所有文件权限
   else
     log_error "编译失败，退出"
     echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
