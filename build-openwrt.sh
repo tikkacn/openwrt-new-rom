@@ -81,6 +81,14 @@ cleanup_temp_files() {
 clone_or_update_source() {
   log "处理OpenWrt源码..."
   
+  # 检查是否从缓存恢复的源码，如果是则跳过更新
+  if [ -f "$BUILD_STATE_DIR/source_from_cache" ]; then
+    log "检测到从缓存恢复的源码，跳过源码更新检查"
+    echo "source_changed=false" >> $GITHUB_ENV
+    SOURCE_CHANGED=false
+    return 0
+  }
+  
   # 检查OpenWrt文件夹是否存在并且是有效的git仓库
   if [ -d "/workdir/openwrt" ] && [ -d "/workdir/openwrt/.git" ]; then
     log "OpenWrt源码目录已存在，检查更新..."
@@ -91,6 +99,14 @@ clone_or_update_source() {
       # 保存当前HEAD提交哈希
       CURRENT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
       log "当前提交: $CURRENT_COMMIT"
+      
+      # 如果无法获取哈希或是首次运行，但源码目录已存在
+      if [ "$CURRENT_COMMIT" = "unknown" ] && [ -f ".config" ]; then
+        log "无法获取当前提交哈希，但源码目录已存在，假定未更改"
+        echo "source_changed=false" >> $GITHUB_ENV
+        SOURCE_CHANGED=false
+        return 0
+      }
       
       # 重置并更新源码
       git fetch --all
@@ -158,13 +174,23 @@ check_feeds() {
   log "当前 feeds 哈希: $CURRENT_FEEDS_HASH"
   log "之前 feeds 哈希: $PREVIOUS_FEEDS_HASH"
   
-  if [ "$CURRENT_FEEDS_HASH" != "$PREVIOUS_FEEDS_HASH" ] || [ "$SOURCE_CHANGED" = "true" ]; then
-    log_warning "Feeds 已变更或源码已更新，需要编译所有包"
+  # 修改判断逻辑，分离源码变更和feeds变更的影响
+  if [ "$CURRENT_FEEDS_HASH" != "$PREVIOUS_FEEDS_HASH" ]; then
+    # feeds真正发生变化
+    log_warning "Feeds 已变更，需要编译所有包"
+    echo "feeds_changed=true" >> $GITHUB_ENV
+    FEEDS_CHANGED=true
+    # 强制编译所有包的文件标记
+    touch $BUILD_STATE_DIR/rebuild_all_packages
+  elif [ "$SOURCE_CHANGED" = "true" ] && [ "$FORCE_UPDATE" = "true" ]; then
+    # 只有在强制更新标志为true时才因源码变更而强制重新编译
+    log_warning "源码已更新且强制更新被触发，需要编译所有包"
     echo "feeds_changed=true" >> $GITHUB_ENV
     FEEDS_CHANGED=true
     # 强制编译所有包的文件标记
     touch $BUILD_STATE_DIR/rebuild_all_packages
   else
+    # feeds没有变更，或者源码变更但非强制更新
     log "Feeds 未变更，可以使用缓存包"
     echo "feeds_changed=false" >> $GITHUB_ENV
     FEEDS_CHANGED=false
@@ -498,6 +524,12 @@ fix_all_permissions() {
   
   # 更改所有文件的所有者
   sudo chown -R 1000:1000 /workdir/openwrt 2>/dev/null || true
+  
+  # 修复cargo目录权限
+  if [ -d "/workdir/openwrt/dl/cargo" ]; then
+    sudo chmod -R 755 /workdir/openwrt/dl/cargo
+    sudo find /workdir/openwrt/dl/cargo -type f -exec chmod 644 {} \; 2>/dev/null || true
+  fi
   
   log_success "所有文件权限已修复"
 }
