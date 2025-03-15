@@ -145,7 +145,10 @@ jobs:
     - name: 解压缓存
       if: github.event.inputs.clean_build != 'true'
       run: |
-        mkdir -p /workdir/cached_archives /workdir/openwrt/bin /workdir/openwrt/build_dir /workdir/openwrt/staging_dir
+        mkdir -p /workdir/cached_archives /workdir/openwrt/bin /workdir/openwrt/build_dir /workdir/openwrt/staging_dir /workdir/build_state
+        
+        # 创建缓存源码标记
+        touch /workdir/build_state/source_from_cache
         
         # 解压bin缓存
         if [ -f "/workdir/cached_archives/bin.tar.gz" ]; then
