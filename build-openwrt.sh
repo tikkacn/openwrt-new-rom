@@ -87,7 +87,7 @@ clone_or_update_source() {
     echo "source_changed=false" >> $GITHUB_ENV
     SOURCE_CHANGED=false
     return 0
-  }
+  fi
   
   # 检查OpenWrt文件夹是否存在并且是有效的git仓库
   if [ -d "/workdir/openwrt" ] && [ -d "/workdir/openwrt/.git" ]; then
