@@ -90,19 +90,93 @@ jobs:
         restore-keys: |
           state-docker-${{ env.REPO_BRANCH }}-
 
-    # 恢复编译结果缓存
-    - name: 恢复编译结果缓存
+    # 恢复压缩的编译缓存
+    - name: 恢复压缩的编译缓存 - bin
       uses: actions/cache@v3
-      id: cache-build
+      id: cache-bin
       if: github.event.inputs.clean_build != 'true'
       with:
-        path: |
-          /workdir/openwrt/bin
-          /workdir/openwrt/build_dir
-          /workdir/openwrt/staging_dir
-        key: build-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        path: /workdir/cached_archives/bin.tar.gz
+        key: bin-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
         restore-keys: |
-          build-docker-${{ env.REPO_BRANCH }}-
+          bin-docker-${{ env.REPO_BRANCH }}-
+
+    - name: 恢复压缩的编译缓存 - staging_dir
+      uses: actions/cache@v3
+      id: cache-staging
+      if: github.event.inputs.clean_build != 'true'
+      with:
+        path: /workdir/cached_archives/staging_dir.tar.gz
+        key: staging-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        restore-keys: |
+          staging-docker-${{ env.REPO_BRANCH }}-
+
+    - name: 恢复压缩的编译缓存 - build_dir target
+      uses: actions/cache@v3
+      id: cache-build-target
+      if: github.event.inputs.clean_build != 'true'
+      with:
+        path: /workdir/cached_archives/build_dir_target.tar.gz
+        key: build-target-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        restore-keys: |
+          build-target-docker-${{ env.REPO_BRANCH }}-
+
+    - name: 恢复压缩的编译缓存 - build_dir host
+      uses: actions/cache@v3
+      id: cache-build-host
+      if: github.event.inputs.clean_build != 'true'
+      with:
+        path: /workdir/cached_archives/build_dir_host.tar.gz
+        key: build-host-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        restore-keys: |
+          build-host-docker-${{ env.REPO_BRANCH }}-
+
+    - name: 恢复压缩的编译缓存 - build_dir toolchain
+      uses: actions/cache@v3
+      id: cache-build-toolchain
+      if: github.event.inputs.clean_build != 'true'
+      with:
+        path: /workdir/cached_archives/build_dir_toolchain.tar.gz
+        key: build-toolchain-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        restore-keys: |
+          build-toolchain-docker-${{ env.REPO_BRANCH }}-
+
+    # 解压缓存
+    - name: 解压缓存
+      if: github.event.inputs.clean_build != 'true'
+      run: |
+        mkdir -p /workdir/cached_archives /workdir/openwrt/bin /workdir/openwrt/build_dir /workdir/openwrt/staging_dir
+        
+        # 解压bin缓存
+        if [ -f "/workdir/cached_archives/bin.tar.gz" ]; then
+          echo "解压bin缓存..."
+          tar -xzf /workdir/cached_archives/bin.tar.gz -C /workdir/openwrt
+        fi
+        
+        # 解压staging_dir缓存
+        if [ -f "/workdir/cached_archives/staging_dir.tar.gz" ]; then
+          echo "解压staging_dir缓存..."
+          tar -xzf /workdir/cached_archives/staging_dir.tar.gz -C /workdir/openwrt
+        fi
+        
+        # 解压build_dir缓存
+        if [ -f "/workdir/cached_archives/build_dir_target.tar.gz" ]; then
+          echo "解压target缓存..."
+          tar -xzf /workdir/cached_archives/build_dir_target.tar.gz -C /workdir/openwrt
+        fi
+        
+        if [ -f "/workdir/cached_archives/build_dir_host.tar.gz" ]; then
+          echo "解压host缓存..."
+          tar -xzf /workdir/cached_archives/build_dir_host.tar.gz -C /workdir/openwrt
+        fi
+        
+        if [ -f "/workdir/cached_archives/build_dir_toolchain.tar.gz" ]; then
+          echo "解压toolchain缓存..."
+          tar -xzf /workdir/cached_archives/build_dir_toolchain.tar.gz -C /workdir/openwrt
+        fi
+        
+        # 设置权限
+        chmod -R 777 /workdir/openwrt
 
     - name: 拉取 Docker 镜像
       run: docker pull ghcr.io/${{ github.repository_owner }}/openwrt-toolchain:latest
@@ -157,7 +231,7 @@ jobs:
         path: /workdir/openwrt
         key: source-docker-${{ env.REPO_BRANCH }}-${{ github.run_id }}
 
-    # 保存各种缓存
+    # 保存CCACHE缓存
     - name: 保存CCACHE缓存
       uses: actions/cache@v3
       if: always() && !cancelled()
@@ -165,6 +239,7 @@ jobs:
         path: /workdir/ccache
         key: ccache-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
 
+    # 保存构建状态缓存
     - name: 保存构建状态缓存
       uses: actions/cache@v3
       if: always() && !cancelled()
@@ -172,15 +247,41 @@ jobs:
         path: /workdir/build_state
         key: state-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
 
-    - name: 保存编译结果缓存
+    # 保存压缩的编译缓存
+    - name: 保存压缩的编译缓存 - bin
       uses: actions/cache@v3
       if: always() && !cancelled()
       with:
-        path: |
-          /workdir/openwrt/bin
-          /workdir/openwrt/build_dir
-          /workdir/openwrt/staging_dir
-        key: build-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+        path: /workdir/cached_archives/bin.tar.gz
+        key: bin-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+
+    - name: 保存压缩的编译缓存 - staging_dir
+      uses: actions/cache@v3
+      if: always() && !cancelled()
+      with:
+        path: /workdir/cached_archives/staging_dir.tar.gz
+        key: staging-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+
+    - name: 保存压缩的编译缓存 - build_dir target
+      uses: actions/cache@v3
+      if: always() && !cancelled()
+      with:
+        path: /workdir/cached_archives/build_dir_target.tar.gz
+        key: build-target-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+
+    - name: 保存压缩的编译缓存 - build_dir host
+      uses: actions/cache@v3
+      if: always() && !cancelled()
+      with:
+        path: /workdir/cached_archives/build_dir_host.tar.gz
+        key: build-host-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+
+    - name: 保存压缩的编译缓存 - build_dir toolchain
+      uses: actions/cache@v3
+      if: always() && !cancelled()
+      with:
+        path: /workdir/cached_archives/build_dir_toolchain.tar.gz
+        key: build-toolchain-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
 
     # 上传固件
     - name: 上传固件目录
