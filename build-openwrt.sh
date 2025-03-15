@@ -573,6 +573,14 @@ compress_cache_for_storage() {
     tar -czf /workdir/cached_archives/build_dir_toolchain.tar.gz -C /workdir/openwrt build_dir/toolchain* || true
   fi
   
+  # 压缩源码和feeds目录 - 新增
+  if [ -d "/workdir/openwrt" ]; then
+    log "压缩源码和feeds目录..."
+    # 排除一些不必要的大文件和Git历史记录，以及已经单独缓存的目录
+    tar --exclude='.git' --exclude='dl' --exclude='bin' --exclude='build_dir' --exclude='staging_dir' \
+        -czf /workdir/cached_archives/source_and_feeds.tar.gz -C /workdir openwrt || true
+  fi
+  
   # 确保归档文件对所有用户可读
   chmod -R 777 /workdir/cached_archives
   
