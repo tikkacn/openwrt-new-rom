@@ -81,12 +81,18 @@ cleanup_temp_files() {
 clone_or_update_source() {
   log "处理OpenWrt源码..."
   
-  # 检查是否从缓存恢复的源码，如果是则跳过更新
-  if [ -f "$BUILD_STATE_DIR/source_from_cache" ]; then
-    log "检测到从缓存恢复的源码，跳过源码更新检查"
+  # 检查是否从缓存恢复的源码，且确保源码完整
+  if [ -f "$BUILD_STATE_DIR/source_from_cache" ] && [ -d "/workdir/openwrt" ] && [ -d "/workdir/openwrt/scripts" ] && [ -x "/workdir/openwrt/scripts/feeds" ]; then
+    log "检测到从缓存恢复的有效源码，跳过源码更新检查"
     echo "source_changed=false" >> $GITHUB_ENV
     SOURCE_CHANGED=false
     return 0
+  fi
+  
+  # 如果缓存标记存在但源码不完整，移除标记
+  if [ -f "$BUILD_STATE_DIR/source_from_cache" ]; then
+    log_warning "缓存标记存在但源码不完整，将重新克隆源码"
+    rm -f "$BUILD_STATE_DIR/source_from_cache"
   fi
   
   # 检查OpenWrt文件夹是否存在并且是有效的git仓库
