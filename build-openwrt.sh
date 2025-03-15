@@ -106,7 +106,7 @@ clone_or_update_source() {
         echo "source_changed=false" >> $GITHUB_ENV
         SOURCE_CHANGED=false
         return 0
-      }
+      fi
       
       # 重置并更新源码
       git fetch --all
