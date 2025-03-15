@@ -58,17 +58,6 @@ jobs:
         remove-docker-images: 'true'
         build-mount-path: '/workdir'
 
-    # 恢复源码目录缓存 - 新增步骤
-    - name: 恢复源码目录缓存
-      uses: actions/cache@v3
-      id: cache-source
-      if: github.event.inputs.clean_build != 'true'
-      with:
-        path: /workdir/openwrt
-        key: source-docker-${{ env.REPO_BRANCH }}-${{ github.run_id }}
-        restore-keys: |
-          source-docker-${{ env.REPO_BRANCH }}-
-
     # 恢复CCACHE缓存
     - name: 恢复CCACHE缓存
       uses: actions/cache@v3
@@ -140,15 +129,23 @@ jobs:
         key: build-toolchain-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
         restore-keys: |
           build-toolchain-docker-${{ env.REPO_BRANCH }}-
+    
+    # 新增: 恢复源码和feeds缓存
+    - name: 恢复压缩的源码和feeds缓存
+      uses: actions/cache@v3
+      id: cache-source-feeds
+      if: github.event.inputs.clean_build != 'true'
+      with:
+        path: /workdir/cached_archives/source_and_feeds.tar.gz
+        key: source-feeds-docker-${{ env.REPO_BRANCH }}-${{ github.run_id }}
+        restore-keys: |
+          source-feeds-docker-${{ env.REPO_BRANCH }}-
 
     # 解压缓存
     - name: 解压缓存
       if: github.event.inputs.clean_build != 'true'
       run: |
         mkdir -p /workdir/cached_archives /workdir/openwrt/bin /workdir/openwrt/build_dir /workdir/openwrt/staging_dir /workdir/build_state
-        
-        # 创建缓存源码标记
-        touch /workdir/build_state/source_from_cache
         
         # 解压bin缓存
         if [ -f "/workdir/cached_archives/bin.tar.gz" ]; then
@@ -176,6 +173,17 @@ jobs:
         if [ -f "/workdir/cached_archives/build_dir_toolchain.tar.gz" ]; then
           echo "解压toolchain缓存..."
           tar -xzf /workdir/cached_archives/build_dir_toolchain.tar.gz -C /workdir/openwrt
+        fi
+        
+        # 解压源码和feeds缓存 - 新增
+        if [ -f "/workdir/cached_archives/source_and_feeds.tar.gz" ]; then
+          echo "解压源码和feeds缓存..."
+          tar -xzf /workdir/cached_archives/source_and_feeds.tar.gz -C /workdir
+          # 如果解压成功且源码目录完整，创建标记
+          if [ -d "/workdir/openwrt" ] && [ -d "/workdir/openwrt/scripts" ] && [ -x "/workdir/openwrt/scripts/feeds" ]; then
+            echo "源码和feeds解压成功，创建缓存标记"
+            touch /workdir/build_state/source_from_cache
+          fi
         fi
         
         # 设置权限
@@ -225,14 +233,6 @@ jobs:
         if [ -f .output ]; then
           cat .output >> $GITHUB_OUTPUT
         fi
-
-    # 保存源码目录缓存 - 新增步骤
-    - name: 保存源码目录缓存
-      uses: actions/cache@v3
-      if: always() && !cancelled()
-      with:
-        path: /workdir/openwrt
-        key: source-docker-${{ env.REPO_BRANCH }}-${{ github.run_id }}
 
     # 保存CCACHE缓存
     - name: 保存CCACHE缓存
@@ -285,6 +285,14 @@ jobs:
       with:
         path: /workdir/cached_archives/build_dir_toolchain.tar.gz
         key: build-toolchain-docker-${{ env.REPO_BRANCH }}-${{ hashFiles(env.CONFIG_FILE) }}
+    
+    # 新增: 保存源码和feeds缓存
+    - name: 保存压缩的源码和feeds缓存
+      uses: actions/cache@v3
+      if: always() && !cancelled()
+      with:
+        path: /workdir/cached_archives/source_and_feeds.tar.gz
+        key: source-feeds-docker-${{ env.REPO_BRANCH }}-${{ github.run_id }}
 
     # 上传固件
     - name: 上传固件目录
