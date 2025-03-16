@@ -608,3 +608,70 @@ compress_cache_for_storage() {
   chmod -R 777 /workdir/cached_archives
   
   log "缓存压缩完成，存储在 /workdir/cached_archives/"
+}
+
+# SSH调试函数
+start_ssh_debug() {
+  if [ "$SSH_DEBUG" = "true" ]; then
+    log "启动SSH调试会话..."
+    apt-get update && apt-get install -y openssh-server
+    mkdir -p /run/sshd
+    echo 'root:password' | chpasswd
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+    /usr/sbin/sshd -D &
+    
+    # 显示IP地址
+    IP_ADDR=$(hostname -I | awk '{print $1}')
+    log_warning "SSH服务已启动，可通过以下信息连接:"
+    log_warning "主机: $IP_ADDR"
+    log_warning "用户: root"
+    log_warning "密码: password"
+    log_warning "按Ctrl+C终止调试会话"
+    
+    # 等待用户操作
+    sleep 3600
+  fi
+}
+
+# 主函数
+main() {
+  # 设置变量
+  SOURCE_CHANGED=false
+  FEEDS_CHANGED=false
+  CONFIG_CHANGED=false
+  ELAPSED_TIME=0
+  
+  log "开始OpenWrt增量编译工作流..."
+  
+  # 初始化环境
+  init_env
+  
+  # 处理SSH调试
+  if [ "$SSH_DEBUG" = "true" ]; then
+    start_ssh_debug
+    exit 0
+  fi
+  
+  # 执行构建步骤
+  clone_or_update_source
+  check_feeds
+  configure_build
+  download_packages
+  
+  # 执行编译
+  if compile_firmware; then
+    organize_firmware
+    prepare_cache
+    fix_all_permissions
+    compress_cache_for_storage  # 添加压缩缓存步骤
+  else
+    log_error "编译失败，退出"
+    echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
+    exit 1
+  fi
+  
+  log_success "构建工作流完成!"
+}
+
+# 运行主函数
+main
