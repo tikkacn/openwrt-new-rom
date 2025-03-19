@@ -1,0 +1,546 @@
+name: 全新编译第八版
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH调试'
+        required: false
+        default: 'false'
+      clean_build:
+        description: '完全重新编译'
+        required: false
+        default: 'false'
+      config_file:
+        description: '配置文件'
+        required: false
+        default: '增量缓存优化.config'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF_URL: https://github.com/tikkacn/openwrt-new-rom/raw/main/feeds.conf.default
+  CONFIG_FILE: ${{ github.event.inputs.config_file || '增量缓存优化.config' }}
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+  CCACHE_DIR: /workdir/ccache
+  # 缓存目录环境变量
+  TOOLCHAIN_DIR: /workdir/openwrt/staging_dir
+  TOOLCHAIN_BUILD_DIR: /workdir/openwrt/build_dir/toolchain-x86_64_gcc-13.3.0_musl
+  PACKAGES_DIR: /workdir/openwrt/bin/targets
+  BUILD_STATE_DIR: /workdir/build_state
+  LINUX_DIR: /workdir/openwrt/build_dir/target-x86_64_musl/linux-x86_64
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@main
+
+    - name: 优化磁盘空间
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 20480
+        swap-size-mb: 5120
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+        build-mount-path: '/workdir'
+
+    - name: 额外清理磁盘空间并检查
+      run: |
+        echo "清理额外磁盘空间..."
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+        sudo rm -rf /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL
+        docker image prune -a -f || true
+        docker system prune -af || true
+        sudo apt-get clean
+        sudo apt-get autoremove -y
+        ROOT_AVAIL=$(df -m /dev/root | tail -1 | awk '{print $4}')
+        echo "根分区可用空间: ${ROOT_AVAIL}MB"
+        if [ "$ROOT_AVAIL" -lt 20480 ]; then
+          echo "错误：/dev/root 可用空间不足 20GB"
+          exit 1
+        fi
+        df -h
+
+    - name: 初始化环境
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+        vim wget xmlto xxd zlib1g-dev python3-setuptools jq bc lm-sensors pciutils
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        mkdir -p ${{ env.BUILD_STATE_DIR }} ${{ env.CCACHE_DIR }}
+        chmod -R 777 /workdir
+        echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
+        echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
+        chmod +x $GITHUB_WORKSPACE/diy-part1.sh
+        echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
+        echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
+        chmod +x $GITHUB_WORKSPACE/diy-part2.sh
+        if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+          echo "警告：配置文件 $CONFIG_FILE 不存在，创建默认配置文件"
+          echo "# 创建默认的最小化配置文件" > $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_TARGET_x86=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_TARGET_x86_64=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+        fi
+        df -h
+
+    - name: 克隆源代码并配置 Feeds
+      working-directory: /workdir
+      run: |
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        cd openwrt
+        find . -type f -name "*.sh" -exec chmod +x {} \;
+        curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "警告：无法下载 feeds.conf.default，使用仓库默认配置"
+        cat feeds.conf.default
+        rm -rf .git
+        # 创建必要的目录结构以确保缓存正常工作
+        mkdir -p ${{ env.PACKAGES_DIR }} ${{ env.TOOLCHAIN_DIR }}
+        
+        # 确保工具链构建目录存在
+        mkdir -p ${{ env.TOOLCHAIN_BUILD_DIR }} ${{ env.BUILD_STATE_DIR }}
+        
+        # 确保内核构建目录存在
+        mkdir -p ${{ env.LINUX_DIR }}
+
+    # 恢复工具链缓存（包含staging_dir和build_dir的工具链）
+    - name: 恢复工具链缓存
+      uses: actions/cache@v3
+      id: cache-toolchain
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          ${{ env.TOOLCHAIN_DIR }}
+          ${{ env.TOOLCHAIN_BUILD_DIR }}
+        key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache
+
+    # 恢复编译包缓存
+    - name: 恢复编译包缓存
+      uses: actions/cache@v3
+      id: cache-packages
+      if: inputs.clean_build != 'true'
+      with:
+        path: ${{ env.PACKAGES_DIR }}
+        key: packages-${{ env.REPO_BRANCH }}-fixed-cache
+        
+    # 恢复内核构建缓存
+    - name: 恢复内核构建缓存
+      uses: actions/cache@v3
+      id: cache-kernel
+      if: inputs.clean_build != 'true'
+      with:
+        path: ${{ env.LINUX_DIR }}
+        key: kernel-${{ env.REPO_BRANCH }}-fixed-cache
+
+    # 恢复CCACHE缓存
+    - name: 恢复CCACHE缓存
+      uses: actions/cache@v3
+      id: cache-ccache
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache
+
+    # 恢复构建状态缓存
+    - name: 恢复构建状态缓存
+      uses: actions/cache@v3
+      id: cache-state
+      if: inputs.clean_build != 'true'
+      with:
+        path: ${{ env.BUILD_STATE_DIR }}
+        key: state-${{ env.REPO_BRANCH }}-fixed-cache
+
+    - name: 检查缓存恢复状态
+      run: |
+        echo "CONFIG_FILE: ${{ env.CONFIG_FILE }}"
+        echo "工具链缓存恢复状态: ${{ steps.cache-toolchain.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "编译包缓存恢复状态: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "内核缓存恢复状态: ${{ steps.cache-kernel.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "CCACHE缓存恢复状态: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "构建状态缓存恢复状态: ${{ steps.cache-state.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        
+        # 检查工具链缓存大小
+        echo "工具链目录大小: $(du -sh ${{ env.TOOLCHAIN_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "工具链构建目录大小: $(du -sh ${{ env.TOOLCHAIN_BUILD_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "内核构建目录大小: $(du -sh ${{ env.LINUX_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "编译包目录大小: $(du -sh ${{ env.PACKAGES_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        
+        # 检查关键工具链文件
+        echo "检查关键工具链文件..."
+        find ${{ env.TOOLCHAIN_DIR }}/host/bin -name "gcc*" 2>/dev/null | head -5 || echo "未找到主机gcc"
+        find ${{ env.TOOLCHAIN_DIR }}/toolchain-* -name "*gcc*" 2>/dev/null | head -5 || echo "未找到交叉编译器gcc"
+        
+        # 检查内核构建状态
+        echo "检查内核构建状态..."
+        find ${{ env.LINUX_DIR }} -name ".config" 2>/dev/null | head -3 || echo "未找到内核配置文件"
+        find ${{ env.LINUX_DIR }} -name "modules.builtin" 2>/dev/null | head -3 || echo "未找到内核模块信息"
+        
+        # 如果内核构建状态不完整，设置标记
+        if [ -z "$(find ${{ env.LINUX_DIR }} -name ".config" 2>/dev/null)" ] || [ -z "$(find ${{ env.LINUX_DIR }} -name "modules.builtin" 2>/dev/null)" ]; then
+          echo "内核构建状态不完整，将触发内核重建"
+          echo "FORCE_KERNEL_REBUILD=true" >> $GITHUB_ENV
+        else
+          echo "内核构建状态完整"
+          echo "FORCE_KERNEL_REBUILD=false" >> $GITHUB_ENV
+        fi
+        
+        ls -la ${{ env.BUILD_STATE_DIR }}/ || echo "构建状态目录为空"
+        if [ -f "${{ env.BUILD_STATE_DIR }}/config.md5" ]; then
+          echo "之前MD5: $(cat ${{ env.BUILD_STATE_DIR }}/config.md5)"
+        fi
+        
+        if [ -d "${{ env.TOOLCHAIN_DIR }}/host/bin" ] && [ -f "${{ env.TOOLCHAIN_DIR }}/host/bin/libdeflate-gzip" ]; then
+          echo "工具链包含 libdeflate-gzip，缓存正常"
+        else
+          echo "警告：工具链缓存缺少 libdeflate-gzip"
+        fi
+        df -h
+
+    - name: 配置编译环境
+      run: |
+        cd /workdir/openwrt
+        if [ -f ".config" ]; then
+          cp .config .config.original
+        fi
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+        echo "更新并安装 Feeds..."
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        [ -e $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./files
+        cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
+        cp .config .config.input
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+        echo "CONFIG_AUTOREMOVE=n" >> .config
+        echo "CONFIG_AUTOREBUILD=n" >> .config
+        make defconfig
+        # 修复这里 - 使用排序命令
+        grep "^CONFIG_PACKAGE_.*=y" .config.input | sort > packages_input.txt || true
+        grep "^CONFIG_PACKAGE_.*=y" .config | sort > packages_defconfig.txt || true
+        comm -23 packages_input.txt packages_defconfig.txt > missing_packages.txt
+        if [ -s missing_packages.txt ]; then
+          echo "警告：以下包在 defconfig 后缺失，将尝试恢复："
+          cat missing_packages.txt
+          cat missing_packages.txt >> .config
+          while read -r line; do
+            pkg=$(echo "$line" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+            echo "安装包: $pkg"
+            ./scripts/feeds install "$pkg" || echo "警告：无法安装 $pkg，可能不在 feeds 中"
+          done < missing_packages.txt
+          make defconfig
+        else
+          echo "所有配置项均保留，无缺失"
+        fi
+        diff .config.input .config > config_diff.txt || echo "配置无差异"
+        cat config_diff.txt
+        df -h
+
+    - name: 检查源码变化
+      id: check-feeds
+      run: |
+        cd /workdir/openwrt
+        mkdir -p ${{ env.BUILD_STATE_DIR }}
+        find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > ${{ env.BUILD_STATE_DIR }}/feeds.sha256
+        CURRENT_FEEDS_HASH=$(cat ${{ env.BUILD_STATE_DIR }}/feeds.sha256 | awk '{print $1}')
+        PREVIOUS_FEEDS_HASH=$(cat ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256 2>/dev/null | awk '{print $1}' || echo "")
+        
+        echo "当前 feeds 哈希: $CURRENT_FEEDS_HASH"
+        echo "之前 feeds 哈希: $PREVIOUS_FEEDS_HASH"
+        
+        if [ "$CURRENT_FEEDS_HASH" != "$PREVIOUS_FEEDS_HASH" ]; then
+          echo "feeds_changed=true" >> $GITHUB_ENV
+          echo "Feeds 已变更，需要重新编译"
+        else
+          echo "feeds_changed=false" >> $GITHUB_ENV
+          echo "Feeds 未变更，可以使用缓存包"
+        fi
+        
+        # 保存当前哈希值供下次比较
+        cp ${{ env.BUILD_STATE_DIR }}/feeds.sha256 ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256
+
+    - name: 恢复已编译软件包
+      if: steps.cache-packages.outputs.cache-hit == 'true'
+      run: |
+        cd /workdir/openwrt
+        mkdir -p bin/targets
+        if [ "${{ env.feeds_changed }}" = "true" ]; then
+          echo "feeds 已更新，跳过恢复旧的编译包缓存"
+        else
+          echo "feeds 未变更，使用缓存编译包"
+          find ${{ env.PACKAGES_DIR }} -type f | wc -l
+        fi
+
+    - name: 开启SSH调试
+      uses: mxschmitt/action-tmate@v3
+      if: github.event.inputs.ssh == 'true'
+
+    - name: 下载软件包
+      run: |
+        cd /workdir/openwrt
+        make download -j8 || make download -j1 V=s
+        mkdir -p ${{ env.CCACHE_DIR }}
+        ccache -o cache_dir=${{ env.CCACHE_DIR }}
+        ccache -o max_size=8G  # 增加CCACHE大小
+        ccache -z
+        df -h
+
+    - name: 智能编译固件
+      id: compile
+      run: |
+        cd /workdir/openwrt
+        export CCACHE_DIR=${{ env.CCACHE_DIR }}
+        export PATH="/usr/lib/ccache:$PATH"
+
+        cleanup_temp_files() {
+          echo "清理临时文件以释放空间..."
+          find /tmp -type f -delete || true
+          df -h
+        }
+
+        save_cache_info() {
+          echo "保存缓存状态信息..."
+          mkdir -p ${{ env.BUILD_STATE_DIR }}
+          cp .config ${{ env.BUILD_STATE_DIR }}/config.txt
+          echo "$TOOLCHAIN_MD5" > ${{ env.BUILD_STATE_DIR }}/toolchain.md5
+          echo "$PACKAGE_MD5" > ${{ env.BUILD_STATE_DIR }}/package.md5
+          echo "保存构建状态完成"
+        }
+
+        compile_firmware() {
+          if [ $DO_FULL_BUILD -eq 1 ]; then
+            echo "下载依赖..."
+            make download -j8 V=s || make download -j1 V=s
+            if [ ! -d "${{ env.TOOLCHAIN_DIR }}/toolchain-"* ]; then
+              echo "编译工具链..."
+              make -j$(nproc) tools/compile V=s || make -j1 V=s tools/compile
+              make -j$(nproc) toolchain/compile V=s || make -j1 V=s toolchain/compile
+            else
+              echo "工具链已存在，跳过编译"
+            fi
+            cleanup_temp_files
+            echo "编译完整固件..."
+            make -j$(nproc) V=s || make -j1 V=s
+          elif [ "$FORCE_KERNEL_REBUILD" = "true" ]; then
+            echo "内核构建状态不完整，需要重建内核..."
+            # 确保清理内核相关目录
+            echo "清理内核目录..."
+            make target/linux/clean V=s
+            # 先编译内核
+            echo "重新编译内核..."
+            make -j$(nproc) target/linux/compile V=s || make -j1 V=s target/linux/compile
+            # 确保内核模块编译
+            echo "编译内核模块..."
+            make -j$(nproc) package/kernel/linux/compile V=s || make -j1 V=s package/kernel/linux/compile
+            # 继续编译其他部分
+            echo "继续编译固件..."
+            make -j$(nproc) V=s || make -j1 V=s
+          elif [ $DO_PACKAGE_BUILD -eq 1 ] || [ "${{ env.feeds_changed }}" = "true" ]; then
+            echo "软件包配置变化或源码更新，编译软件包..."
+            make -j$(nproc) package/compile V=s || make -j1 V=s package/compile
+            make -j$(nproc) package/index V=s || make -j1 V=s package/index
+            make -j$(nproc) target/install V=s || make -j1 V=s target/install  # 确保生成固件
+          else
+            echo "配置和feeds都未变化，执行最小增量编译..."
+            # 直接使用缓存的软件包生成固件，不清理和重新编译
+            make -j$(nproc) V=s || make -j1 V=s
+          fi
+
+          # 保存缓存信息
+          save_cache_info
+
+          if [ $? -eq 0 ]; then
+            echo "编译成功"
+          else
+            echo "编译失败"
+            exit 1
+          fi
+        }
+
+        TOOLCHAIN_CONFIG=$(grep "^CONFIG_TARGET" .config | sort)
+        TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG" | md5sum | awk '{print $1}')
+        PREVIOUS_TOOLCHAIN_MD5=$(cat ${{ env.BUILD_STATE_DIR }}/toolchain.md5 2>/dev/null || echo "")
+        PACKAGE_CONFIG=$(grep "^CONFIG_PACKAGE" .config | sort)
+        PACKAGE_MD5=$(echo "$PACKAGE_CONFIG" | md5sum | awk '{print $1}')
+        PREVIOUS_PACKAGE_MD5=$(cat ${{ env.BUILD_STATE_DIR }}/package.md5 2>/dev/null || echo "")
+        DO_FULL_BUILD=0
+        DO_PACKAGE_BUILD=0
+
+        if [ -z "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
+          echo "工具链配置变化或首次编译，需要全量编译"
+          DO_FULL_BUILD=1
+        elif [ -z "$PREVIOUS_PACKAGE_MD5" ] || [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
+          echo "软件包配置变化，需要编译软件包"
+          DO_PACKAGE_BUILD=1
+        else
+          echo "配置未变，检查源码变化..."
+        fi
+
+        compile_firmware
+
+        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+        ccache -s
+        df -h
+
+    # 备份缓存前检查工具链大小
+    - name: 检查工具链大小
+      if: "!cancelled()"
+      run: |
+        echo "编译完成，检查工具链大小..."
+        echo "工具链目录大小: $(du -sh ${{ env.TOOLCHAIN_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "工具链构建目录大小: $(du -sh ${{ env.TOOLCHAIN_BUILD_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "主机工具链目录: $(du -sh ${{ env.TOOLCHAIN_DIR }}/host 2>/dev/null || echo '目录不存在或为空')"
+        echo "目标工具链目录: $(du -sh ${{ env.TOOLCHAIN_DIR }}/toolchain-* 2>/dev/null || echo '目录不存在或为空')"
+        echo "内核目录大小: $(du -sh ${{ env.LINUX_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "CCACHE 目录大小: $(du -sh ${{ env.CCACHE_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "编译包目录大小: $(du -sh ${{ env.PACKAGES_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "构建状态目录大小: $(du -sh ${{ env.BUILD_STATE_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        
+        # 检查关键文件
+        echo "检查关键工具链文件..."
+        find ${{ env.TOOLCHAIN_DIR }}/host/bin -name "gcc*" 2>/dev/null | head -5 || echo "未找到主机gcc"
+        find ${{ env.TOOLCHAIN_DIR }}/toolchain-* -name "*gcc*" 2>/dev/null | head -5 || echo "未找到交叉编译器gcc"
+        
+        # 检查内核构建状态
+        echo "检查内核构建状态..."
+        find ${{ env.LINUX_DIR }} -name ".config" | head -3 || echo "未找到内核配置文件"
+        find ${{ env.LINUX_DIR }} -name "modules.builtin" | head -3 || echo "未找到内核模块信息"
+        
+        # 确保构建状态目录包含时间戳信息
+        mkdir -p ${{ env.BUILD_STATE_DIR }}
+        echo "缓存创建时间: $(date)" > ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
+        echo "运行ID: ${{ github.run_id }}" >> ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
+        echo "构建分支: ${{ env.REPO_BRANCH }}" >> ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
+
+    # 保存工具链缓存
+    - name: 保存工具链缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: |
+          ${{ env.TOOLCHAIN_DIR }}
+          ${{ env.TOOLCHAIN_BUILD_DIR }}
+        key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache
+    
+    # 保存编译包缓存
+    - name: 保存编译包缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.PACKAGES_DIR }}
+        key: packages-${{ env.REPO_BRANCH }}-fixed-cache
+        
+    # 保存内核构建缓存
+    - name: 保存内核构建缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.LINUX_DIR }}
+        key: kernel-${{ env.REPO_BRANCH }}-fixed-cache
+    
+    # 保存构建状态缓存
+    - name: 保存构建状态缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.BUILD_STATE_DIR }}
+        key: state-${{ env.REPO_BRANCH }}-fixed-cache
+    
+    # 保存CCACHE缓存
+    - name: 保存CCACHE缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache
+
+    - name: 验证缓存已保存
+      if: "!cancelled()"
+      run: |
+        echo "已完成所有缓存保存，现在可以安全地进行后续文件整理和清理操作"
+        # 显示缓存时间戳
+        if [ -f "${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt" ]; then
+          echo "缓存时间戳内容:"
+          cat ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
+        fi
+        df -h
+
+    # 现在可以安全地进行文件整理和上传
+    - name: 整理文件
+      id: organize
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd /workdir/openwrt/bin/targets/*/*
+        # 注意：不要删除可能用于缓存的文件
+        mkdir -p firmware
+        FIRMWARE_FILES=$(find . -maxdepth 1 -name "*combined*" -or -name "*sysupgrade*")
+        if [ -z "$FIRMWARE_FILES" ]; then
+          echo "警告：未找到固件文件，使用所有bin文件"
+          FIRMWARE_FILES=$(find . -maxdepth 1 -name "*.bin")
+        fi
+        if [ -n "$FIRMWARE_FILES" ]; then
+          echo "$FIRMWARE_FILES" | xargs -i cp {} ./firmware/
+        else
+          cp -r * ./firmware/
+        fi
+        cp /workdir/openwrt/.config ./firmware/config.txt
+        zip -r firmware.zip firmware
+        echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
+        echo "FIRMWARE_ZIP=$PWD/firmware.zip" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    # 上传固件
+    - name: 上传固件目录
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: 生成发布标签
+      id: tag
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "## OpenWrt固件构建完成 📦" > release.txt
+        echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
+        echo "📂 固件下载" >> release.txt
+        echo "⚠️ 请在刷机前先做好备份！" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件到Releases
+      uses: softprops/action-gh-release@v2
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: 删除旧的Releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
