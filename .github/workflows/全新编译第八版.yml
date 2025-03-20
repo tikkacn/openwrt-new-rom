@@ -265,7 +265,43 @@ jobs:
     - name: 下载软件包
       run: |
         cd /workdir/openwrt
-        make download -j8 || make download -j1 V=s
+        
+        # 为单个包下载添加重试机制
+        MAX_RETRIES=3
+        RETRY_WAIT=10
+        
+        # 创建包下载重试脚本
+        cat > download_with_retry.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        MAX_RETRIES=$1
+        RETRY_WAIT=$2
+        shift 2
+        
+        retries=0
+        until [ $retries -ge $MAX_RETRIES ]
+        do
+          echo "尝试下载，第 $((retries+1)) 次，共 $MAX_RETRIES 次..."
+          if make download -j8 "$@"; then
+            echo "下载成功！"
+            exit 0
+          fi
+          retries=$((retries+1))
+          if [ $retries -lt $MAX_RETRIES ]; then
+            echo "下载失败，等待 $RETRY_WAIT 秒后重试..."
+            sleep $RETRY_WAIT
+          fi
+        done
+        
+        echo "达到最大重试次数，退出下载尝试。"
+        exit 1
+        EOF
+        
+        chmod +x download_with_retry.sh
+        
+        # 使用重试脚本进行下载
+        ./download_with_retry.sh $MAX_RETRIES $RETRY_WAIT || make download -j1 V=s
+        
         mkdir -p ${{ env.CCACHE_DIR }}
         ccache -o cache_dir=${{ env.CCACHE_DIR }}
         ccache -o max_size=8G  # 增加CCACHE大小
@@ -294,10 +330,45 @@ jobs:
           echo "保存构建状态完成"
         }
 
+        handle_failed_downloads() {
+          echo "检测到编译失败，尝试识别下载问题..."
+          
+          # 检查最近的编译日志
+          local log_files=($(find logs -type f -name "*.txt" -mtime -1 | sort -r))
+          local failed_packages=()
+          
+          for log in "${log_files[@]}"; do
+            if grep -q "No more mirrors to try - giving up" "$log" || grep -q "Download failed" "$log"; then
+              local pkg=$(grep -B 5 "No more mirrors to try - giving up" "$log" | grep -o "package/feeds/.*/.*" | head -n 1 | awk -F'/' '{print $NF}')
+              if [ -n "$pkg" ]; then
+                failed_packages+=("$pkg")
+                echo "检测到包 $pkg 下载失败"
+              fi
+            fi
+          done
+          
+          if [ ${#failed_packages[@]} -gt 0 ]; then
+            echo "以下包下载失败，将从配置中禁用："
+            for pkg in "${failed_packages[@]}"; do
+              echo "- $pkg"
+              # 从配置中删除该包
+              sed -i "/CONFIG_PACKAGE_${pkg}=/d" .config
+              echo "CONFIG_PACKAGE_${pkg}=n" >> .config
+            done
+            
+            # 更新配置并重新开始编译
+            make defconfig
+            echo "重新开始编译流程，跳过有问题的包..."
+            return 0  # 继续编译
+          fi
+          
+          return 1  # 无法处理的错误
+        }
+
         compile_firmware() {
           if [ $DO_FULL_BUILD -eq 1 ]; then
             echo "下载依赖..."
-            make download -j8 V=s || make download -j1 V=s
+            ./download_with_retry.sh $MAX_RETRIES $RETRY_WAIT || make download -j1 V=s
             if [ ! -d "${{ env.TOOLCHAIN_DIR }}/toolchain-"* ]; then
               echo "编译工具链..."
               make -j$(nproc) tools/compile V=s || make -j1 V=s tools/compile
@@ -307,17 +378,35 @@ jobs:
             fi
             cleanup_temp_files
             echo "编译完整固件..."
-            make -j$(nproc) V=s || make -j1 V=s
+            make -j$(nproc) V=s || {
+              if handle_failed_downloads; then
+                make -j$(nproc) V=s || make -j1 V=s
+              else
+                make -j1 V=s
+              fi
+            }
           elif [ $DO_PACKAGE_BUILD -eq 1 ] || [ "${{ env.feeds_changed }}" = "true" ]; then
             echo "软件包配置变化或源码更新，编译软件包..."
             make -j$(nproc) package/clean V=s || make -j1 V=s package/clean
-            make -j$(nproc) package/compile V=s || make -j1 V=s package/compile
+            make -j$(nproc) package/compile V=s || {
+              if handle_failed_downloads; then
+                make -j$(nproc) package/compile V=s || make -j1 V=s package/compile
+              else
+                make -j1 V=s package/compile
+              fi
+            }
             make -j$(nproc) package/index V=s || make -j1 V=s package/index
             make -j$(nproc) target/install V=s || make -j1 V=s target/install  # 确保生成固件
           else
             echo "配置和feeds都未变化，执行最小增量编译..."
             # 直接使用缓存的软件包生成固件，不清理和重新编译
-            make -j$(nproc) V=s || make -j1 V=s
+            make -j$(nproc) V=s || {
+              if handle_failed_downloads; then
+                make -j$(nproc) V=s || make -j1 V=s
+              else
+                make -j1 V=s
+              fi
+            }
           fi
 
           # 保存缓存信息
@@ -330,6 +419,10 @@ jobs:
             exit 1
           fi
         }
+        
+        # 设置下载重试参数
+        MAX_RETRIES=3
+        RETRY_WAIT=10
 
         TOOLCHAIN_CONFIG=$(grep "^CONFIG_TARGET" .config | sort)
         TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG" | md5sum | awk '{print $1}')
@@ -459,7 +552,7 @@ jobs:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
-    - name: 生成发布标签
+     - name: 生成发布标签
       id: tag
       if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
