@@ -117,6 +117,9 @@ jobs:
         
         # 确保工具链构建目录存在
         mkdir -p ${{ env.TOOLCHAIN_BUILD_DIR }} ${{ env.BUILD_STATE_DIR }}
+        
+        # 创建日志目录
+        mkdir -p logs
 
     # 恢复工具链缓存（包含staging_dir和build_dir的工具链）
     - name: 恢复工具链缓存
@@ -282,7 +285,7 @@ jobs:
         until [ $retries -ge $MAX_RETRIES ]
         do
           echo "尝试下载，第 $((retries+1)) 次，共 $MAX_RETRIES 次..."
-          if make download -j8 "$@"; then
+          if make download -j8 "$@" 2>&1 | tee download_attempt_$retries.log; then
             echo "下载成功！"
             exit 0
           fi
@@ -293,7 +296,10 @@ jobs:
           fi
         done
         
-        echo "达到最大重试次数，退出下载尝试。"
+        echo "达到最大重试次数，保存日志以分析失败的包..."
+        # 保存最后一次尝试的日志
+        mkdir -p logs
+        cp download_attempt_$(($retries-1)).log logs/download_failures.log
         exit 1
         EOF
         
@@ -307,6 +313,67 @@ jobs:
         ccache -o max_size=8G  # 增加CCACHE大小
         ccache -z
         df -h
+
+    - name: 检测下载失败的包
+      run: |
+        cd /workdir/openwrt
+        
+        # 创建检测下载失败的脚本
+        cat > detect_failed_downloads.sh << 'EOF'
+        #!/bin/bash
+        
+        # 检查下载日志中是否有失败的包
+        if [ -f "logs/download_failures.log" ]; then
+          echo "分析下载失败日志..."
+          
+          # 提取失败的URL信息
+          grep -E "(curl:.*(403|404)|No more mirrors to try)" logs/download_failures.log > failed_urls.txt || true
+          
+          # 查找失败的包名
+          declare -A failed_packages
+          
+          while IFS= read -r line; do
+            # 从URL或错误信息中提取包名
+            if [[ $line =~ \/([^\/]+)[-_][0-9].*\.tar ]]; then
+              pkg_name="${BASH_REMATCH[1]}"
+              failed_packages["$pkg_name"]=1
+              echo "检测到下载失败的包: $pkg_name"
+            fi
+          done < failed_urls.txt
+          
+          # 如果找到失败的包，则禁用它们
+          if [ ${#failed_packages[@]} -gt 0 ]; then
+            echo "以下包将被禁用，因为无法下载："
+            for pkg in "${!failed_packages[@]}"; do
+              echo " - $pkg"
+              # 查找所有与包名相关的配置条目
+              grep -l "CONFIG_PACKAGE_.*$pkg.*=y" .config | while read config_file; do
+                pkgs=$(grep -o "CONFIG_PACKAGE_[^=]*$pkg[^=]*=y" $config_file || true)
+                if [ -n "$pkgs" ]; then
+                  while IFS= read -r pkg_config; do
+                    # 禁用包
+                    pkg_name=$(echo "$pkg_config" | cut -d'=' -f1)
+                    echo "禁用配置: $pkg_name"
+                    sed -i "/$pkg_name=y/d" .config
+                    echo "$pkg_name=n" >> .config
+                  done <<< "$pkgs"
+                fi
+              done
+            done
+            
+            # 更新配置
+            make defconfig
+            echo "已禁用无法下载的包，并更新配置"
+            return 0
+          fi
+        fi
+        
+        echo "没有检测到下载失败的包，或无需禁用任何包"
+        return 0
+        EOF
+        
+        chmod +x detect_failed_downloads.sh
+        ./detect_failed_downloads.sh
 
     - name: 智能编译固件
       id: compile
@@ -333,27 +400,52 @@ jobs:
         handle_failed_downloads() {
           echo "检测到编译失败，尝试识别下载问题..."
           
-          # 检查最近的编译日志
-          local log_files=($(find logs -type f -name "*.txt" -mtime -1 | sort -r))
+          # 创建日志目录（若不存在）
+          mkdir -p logs
+          
+          # 分析编译日志
+          COMPILE_LOG="logs/compile_error.log"
+          echo "$1" > "$COMPILE_LOG"
+          
+          # 提取下载失败的包
           local failed_packages=()
           
-          for log in "${log_files[@]}"; do
-            if grep -q "No more mirrors to try - giving up" "$log" || grep -q "Download failed" "$log"; then
-              local pkg=$(grep -B 5 "No more mirrors to try - giving up" "$log" | grep -o "package/feeds/.*/.*" | head -n 1 | awk -F'/' '{print $NF}')
+          # 搜索已知的下载失败模式
+          if grep -q "No more mirrors to try - giving up\|Download failed" "$COMPILE_LOG"; then
+            # 尝试找出失败的包名
+            local pkg=$(grep -B 5 "No more mirrors to try\|Download failed" "$COMPILE_LOG" | grep -o "package/feeds/[^/]*/[^[:space:]]*" | head -n 1 | awk -F'/' '{print $NF}')
+            
+            if [ -n "$pkg" ]; then
+              failed_packages+=("$pkg")
+              echo "检测到包 $pkg 下载失败"
+            else
+              # 如果无法从日志中提取包名，尝试在当前执行的任务中找
+              pkg=$(grep -o "Building package .* in .*" "$COMPILE_LOG" | tail -n 1 | awk '{print $3}')
               if [ -n "$pkg" ]; then
                 failed_packages+=("$pkg")
-                echo "检测到包 $pkg 下载失败"
+                echo "检测到当前构建的包 $pkg 可能下载失败"
               fi
             fi
-          done
+          fi
           
+          # 如果找到了问题包，禁用它们
           if [ ${#failed_packages[@]} -gt 0 ]; then
             echo "以下包下载失败，将从配置中禁用："
             for pkg in "${failed_packages[@]}"; do
               echo "- $pkg"
-              # 从配置中删除该包
-              sed -i "/CONFIG_PACKAGE_${pkg}=/d" .config
-              echo "CONFIG_PACKAGE_${pkg}=n" >> .config
+              # 查找与包名相关的配置条目
+              grep -l "CONFIG_PACKAGE_.*$pkg.*=y" .config | while read config_file; do
+                pkgs=$(grep -o "CONFIG_PACKAGE_[^=]*$pkg[^=]*=y" "$config_file" || true)
+                if [ -n "$pkgs" ]; then
+                  while IFS= read -r pkg_config; do
+                    # 禁用包
+                    pkg_name=$(echo "$pkg_config" | cut -d'=' -f1)
+                    echo "禁用配置: $pkg_name"
+                    sed -i "/$pkg_name=y/d" .config
+                    echo "$pkg_name=n" >> .config
+                  done <<< "$pkgs"
+                fi
+              done
             done
             
             # 更新配置并重新开始编译
@@ -369,6 +461,10 @@ jobs:
           if [ $DO_FULL_BUILD -eq 1 ]; then
             echo "下载依赖..."
             ./download_with_retry.sh $MAX_RETRIES $RETRY_WAIT || make download -j1 V=s
+            
+            # 检测下载失败的包并禁用
+            ./detect_failed_downloads.sh
+            
             if [ ! -d "${{ env.TOOLCHAIN_DIR }}/toolchain-"* ]; then
               echo "编译工具链..."
               make -j$(nproc) tools/compile V=s || make -j1 V=s tools/compile
@@ -378,35 +474,37 @@ jobs:
             fi
             cleanup_temp_files
             echo "编译完整固件..."
-            make -j$(nproc) V=s || {
-              if handle_failed_downloads; then
+            if ! make -j$(nproc) V=s 2>&1 | tee logs/compile_output.log; then
+              if handle_failed_downloads "$(cat logs/compile_output.log)"; then
                 make -j$(nproc) V=s || make -j1 V=s
               else
                 make -j1 V=s
               fi
-            }
+            fi
           elif [ $DO_PACKAGE_BUILD -eq 1 ] || [ "${{ env.feeds_changed }}" = "true" ]; then
             echo "软件包配置变化或源码更新，编译软件包..."
             make -j$(nproc) package/clean V=s || make -j1 V=s package/clean
-            make -j$(nproc) package/compile V=s || {
-              if handle_failed_downloads; then
+            
+            if ! make -j$(nproc) package/compile V=s 2>&1 | tee logs/compile_output.log; then
+              if handle_failed_downloads "$(cat logs/compile_output.log)"; then
                 make -j$(nproc) package/compile V=s || make -j1 V=s package/compile
               else
                 make -j1 V=s package/compile
               fi
-            }
+            fi
+            
             make -j$(nproc) package/index V=s || make -j1 V=s package/index
             make -j$(nproc) target/install V=s || make -j1 V=s target/install  # 确保生成固件
           else
             echo "配置和feeds都未变化，执行最小增量编译..."
             # 直接使用缓存的软件包生成固件，不清理和重新编译
-            make -j$(nproc) V=s || {
-              if handle_failed_downloads; then
+            if ! make -j$(nproc) V=s 2>&1 | tee logs/compile_output.log; then
+              if handle_failed_downloads "$(cat logs/compile_output.log)"; then
                 make -j$(nproc) V=s || make -j1 V=s
               else
                 make -j1 V=s
               fi
-            }
+            fi
           fi
 
           # 保存缓存信息
