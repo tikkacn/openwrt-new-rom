@@ -364,12 +364,12 @@ jobs:
             # 更新配置
             make defconfig
             echo "已禁用无法下载的包，并更新配置"
-            return 0
+            exit 0
           fi
         fi
         
         echo "没有检测到下载失败的包，或无需禁用任何包"
-        return 0
+        exit 0
         EOF
         
         chmod +x detect_failed_downloads.sh
