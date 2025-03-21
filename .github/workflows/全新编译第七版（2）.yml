@@ -202,9 +202,8 @@ jobs:
         echo "CONFIG_AUTOREMOVE=n" >> .config
         echo "CONFIG_AUTOREBUILD=n" >> .config
         make defconfig
-        # 修复这里 - 使用排序命令
-        grep "^CONFIG_PACKAGE_.*=y" .config.input | sort > packages_input.txt || true
-        grep "^CONFIG_PACKAGE_.*=y" .config | sort > packages_defconfig.txt || true
+        grep "^CONFIG_PACKAGE_.*=y" .config.input > packages_input.txt || true
+        grep "^CONFIG_PACKAGE_.*=y" .config > packages_defconfig.txt || true
         comm -23 packages_input.txt packages_defconfig.txt > missing_packages.txt
         if [ -s missing_packages.txt ]; then
           echo "警告：以下包在 defconfig 后缺失，将尝试恢复："
