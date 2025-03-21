@@ -75,7 +75,13 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt-get -qq update
-3-setuptools jq bc lm-sensors pciutils
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+        vim wget xmlto xxd zlib1g-dev python3-setuptools jq bc lm-sensors pciutils
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         mkdir -p ${{ env.BUILD_STATE_DIR }} ${{ env.CCACHE_DIR }}
@@ -121,7 +127,7 @@ jobs:
         path: |
           ${{ env.TOOLCHAIN_DIR }}
           ${{ env.TOOLCHAIN_BUILD_DIR }}
-        key: toolchain-${{ env.REPO_BRANCH }}-one-cache
+        key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache
 
     # 恢复编译包缓存
     - name: 恢复编译包缓存
@@ -130,7 +136,7 @@ jobs:
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.PACKAGES_DIR }}
-        key: packages-${{ env.REPO_BRANCH }}-one-cache
+        key: packages-${{ env.REPO_BRANCH }}-fixed-cache
 
     # 恢复CCACHE缓存
     - name: 恢复CCACHE缓存
@@ -138,7 +144,7 @@ jobs:
       id: cache-ccache
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_BRANCH }}-one-cache
+        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache
 
     # 恢复构建状态缓存
     - name: 恢复构建状态缓存
@@ -147,7 +153,7 @@ jobs:
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.BUILD_STATE_DIR }}
-        key: state-${{ env.REPO_BRANCH }}-one-cache
+        key: state-${{ env.REPO_BRANCH }}-fixed-cache
 
     - name: 检查缓存恢复状态
       run: |
@@ -196,14 +202,10 @@ jobs:
         echo "CONFIG_AUTOREMOVE=n" >> .config
         echo "CONFIG_AUTOREBUILD=n" >> .config
         make defconfig
-        
-        # 修复: 确保输入文件已排序
+        # 修复这里 - 使用排序命令
         grep "^CONFIG_PACKAGE_.*=y" .config.input | sort > packages_input.txt || true
         grep "^CONFIG_PACKAGE_.*=y" .config | sort > packages_defconfig.txt || true
-        
-        # 使用排序后的文件执行comm命令
-        comm -23 packages_input.txt packages_defconfig.txt > missing_packages.txt || true
-        
+        comm -23 packages_input.txt packages_defconfig.txt > missing_packages.txt
         if [ -s missing_packages.txt ]; then
           echo "警告：以下包在 defconfig 后缺失，将尝试恢复："
           cat missing_packages.txt
@@ -380,7 +382,7 @@ jobs:
         echo "运行ID: ${{ github.run_id }}" >> ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
         echo "构建分支: ${{ env.REPO_BRANCH }}" >> ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
 
-    # 保存工具链缓存 - 只保留一份
+    # 保存工具链缓存
     - name: 保存工具链缓存
       uses: actions/cache@v3
       if: "!cancelled()"
@@ -388,31 +390,31 @@ jobs:
         path: |
           ${{ env.TOOLCHAIN_DIR }}
           ${{ env.TOOLCHAIN_BUILD_DIR }}
-        key: toolchain-${{ env.REPO_BRANCH }}-one-cache
+        key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache
     
-    # 保存编译包缓存 - 只保留一份
+    # 保存编译包缓存
     - name: 保存编译包缓存
       uses: actions/cache@v3
       if: "!cancelled()"
       with:
         path: ${{ env.PACKAGES_DIR }}
-        key: packages-${{ env.REPO_BRANCH }}-one-cache
+        key: packages-${{ env.REPO_BRANCH }}-fixed-cache
     
-    # 保存构建状态缓存 - 只保留一份
+    # 保存构建状态缓存
     - name: 保存构建状态缓存
       uses: actions/cache@v3
       if: "!cancelled()"
       with:
         path: ${{ env.BUILD_STATE_DIR }}
-        key: state-${{ env.REPO_BRANCH }}-one-cache
+        key: state-${{ env.REPO_BRANCH }}-fixed-cache
     
-    # 保存CCACHE缓存 - 只保留一份
+    # 保存CCACHE缓存
     - name: 保存CCACHE缓存
       uses: actions/cache@v3
       if: "!cancelled()"
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_BRANCH }}-one-cache
+        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache
 
     - name: 验证缓存已保存
       if: "!cancelled()"
@@ -433,17 +435,15 @@ jobs:
         cd /workdir/openwrt/bin/targets/*/*
         # 注意：不要删除可能用于缓存的文件
         mkdir -p firmware
-        # 只保留一份固件
-        FIRMWARE_FILE=$(find . -maxdepth 1 -name "*combined*" -or -name "*sysupgrade*" | head -n 1)
-        if [ -z "$FIRMWARE_FILE" ]; then
-          echo "警告：未找到固件文件，使用第一个bin文件"
-          FIRMWARE_FILE=$(find . -maxdepth 1 -name "*.bin" | head -n 1)
+        FIRMWARE_FILES=$(find . -maxdepth 1 -name "*combined*" -or -name "*sysupgrade*")
+        if [ -z "$FIRMWARE_FILES" ]; then
+          echo "警告：未找到固件文件，使用所有bin文件"
+          FIRMWARE_FILES=$(find . -maxdepth 1 -name "*.bin")
         fi
-        if [ -n "$FIRMWARE_FILE" ]; then
-          echo "保留固件: $FIRMWARE_FILE"
-          cp "$FIRMWARE_FILE" ./firmware/
+        if [ -n "$FIRMWARE_FILES" ]; then
+          echo "$FIRMWARE_FILES" | xargs -i cp {} ./firmware/
         else
-          echo "警告：未找到任何固件文件"
+          cp -r * ./firmware/
         fi
         cp /workdir/openwrt/.config ./firmware/config.txt
         zip -r firmware.zip firmware
