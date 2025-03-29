@@ -515,6 +515,6 @@ jobs:
       id: tag
       if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "RELEASE_TAG=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
         echo "## OpenWrt固件构建完成 📦" > release.txt
-        echo "📅 构建时间: $(date +"%Y-%m-%d %H:%
+        echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
