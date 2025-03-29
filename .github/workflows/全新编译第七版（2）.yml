@@ -518,3 +518,16 @@ jobs:
         echo "RELEASE_TAG=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
         echo "## OpenWrt固件构建完成 📦" > release.txt
         echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 创建GitHub Release
+      uses: softprops/action-gh-release@v1
+      if: steps.tag.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
+        name: OpenWrt ${{ steps.tag.outputs.RELEASE_TAG }} 自动构建
+        body_path: release.txt
+        files: |
+          ${{ env.FIRMWARE_ZIP }}
