@@ -1,3 +1,4 @@
+
 name: 全新编译第七版(2)
 
 on:
@@ -75,9 +76,6 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt-get -qq update
-        # 修复CMake - 清理并重新安装
-        sudo -E apt-get -qq remove cmake || true
-        
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
@@ -85,10 +83,6 @@ jobs:
         mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
         libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
         vim wget xmlto xxd zlib1g-dev python3-setuptools jq bc lm-sensors pciutils
-        
-        # 确认 CMake 版本
-        cmake --version
-        
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         mkdir -p ${{ env.BUILD_STATE_DIR }} ${{ env.CCACHE_DIR }}
@@ -134,7 +128,7 @@ jobs:
         path: |
           ${{ env.TOOLCHAIN_DIR }}
           ${{ env.TOOLCHAIN_BUILD_DIR }}
-        key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache-v1
+        key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache
 
     # 恢复编译包缓存
     - name: 恢复编译包缓存
@@ -143,7 +137,7 @@ jobs:
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.PACKAGES_DIR }}
-        key: packages-${{ env.REPO_BRANCH }}-fixed-cache-v1
+        key: packages-${{ env.REPO_BRANCH }}-fixed-cache
 
     # 恢复CCACHE缓存
     - name: 恢复CCACHE缓存
@@ -151,7 +145,7 @@ jobs:
       id: cache-ccache
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache-v1
+        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache
 
     # 恢复构建状态缓存
     - name: 恢复构建状态缓存
@@ -160,19 +154,15 @@ jobs:
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.BUILD_STATE_DIR }}
-        key: state-${{ env.REPO_BRANCH }}-fixed-cache-v1
+        key: state-${{ env.REPO_BRANCH }}-fixed-cache
 
-    - name: 缓存准备和验证
+    - name: 检查缓存恢复状态
       run: |
         echo "CONFIG_FILE: ${{ env.CONFIG_FILE }}"
         echo "工具链缓存恢复状态: ${{ steps.cache-toolchain.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "编译包缓存恢复状态: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "CCACHE缓存恢复状态: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
         echo "构建状态缓存恢复状态: ${{ steps.cache-state.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
-        
-        # 创建必要的目录结构
-        mkdir -p ${{ env.TOOLCHAIN_DIR }} ${{ env.TOOLCHAIN_BUILD_DIR }} ${{ env.PACKAGES_DIR }} ${{ env.BUILD_STATE_DIR }}
-        chmod -R 777 ${{ env.TOOLCHAIN_DIR }} ${{ env.TOOLCHAIN_BUILD_DIR }} ${{ env.PACKAGES_DIR }} ${{ env.BUILD_STATE_DIR }}
         
         # 检查工具链缓存大小
         echo "工具链目录大小: $(du -sh ${{ env.TOOLCHAIN_DIR }} 2>/dev/null || echo '目录不存在或为空')"
@@ -184,10 +174,6 @@ jobs:
         find ${{ env.TOOLCHAIN_DIR }}/host/bin -name "gcc*" 2>/dev/null | head -5 || echo "未找到主机gcc"
         find ${{ env.TOOLCHAIN_DIR }}/toolchain-* -name "*gcc*" 2>/dev/null | head -5 || echo "未找到交叉编译器gcc"
         
-        # 清理可能导致问题的CMake缓存文件
-        find ${{ env.TOOLCHAIN_DIR }} -name "CMakeCache.txt" -delete || true
-        find ${{ env.TOOLCHAIN_BUILD_DIR }} -name "CMakeCache.txt" -delete || true
-        
         ls -la ${{ env.BUILD_STATE_DIR }}/ || echo "构建状态目录为空"
         if [ -f "${{ env.BUILD_STATE_DIR }}/config.md5" ]; then
           echo "之前MD5: $(cat ${{ env.BUILD_STATE_DIR }}/config.md5)"
@@ -197,7 +183,6 @@ jobs:
           echo "工具链包含 libdeflate-gzip，缓存正常"
         else
           echo "警告：工具链缓存缺少 libdeflate-gzip"
-          echo "toolchain_valid=false" >> $GITHUB_ENV
         fi
         df -h
 
@@ -218,7 +203,7 @@ jobs:
         echo "CONFIG_AUTOREMOVE=n" >> .config
         echo "CONFIG_AUTOREBUILD=n" >> .config
         make defconfig
-        # 修复这里 - A使用排序命令
+        # 修复这里 - 使用排序命令
         grep "^CONFIG_PACKAGE_.*=y" .config.input | sort > packages_input.txt || true
         grep "^CONFIG_PACKAGE_.*=y" .config | sort > packages_defconfig.txt || true
         comm -23 packages_input.txt packages_defconfig.txt > missing_packages.txt
@@ -274,21 +259,6 @@ jobs:
           find ${{ env.PACKAGES_DIR }} -type f | wc -l
         fi
 
-    - name: 修复CMake问题
-      run: |
-        echo "修复CMake问题..."
-        # 确保使用最新版本的CMake
-        sudo apt-get purge -y cmake || true
-        sudo apt-get update
-        sudo apt-get install -y cmake
-        # 验证CMake版本
-        cmake --version
-        # 清理CMake缓存
-        cd /workdir/openwrt
-        find . -name "CMakeCache.txt" -delete || true
-        # 确保没有损坏的CMake文件
-        find . -name "CMakeLists.txt" -exec grep -l "CMAKE_PLATFORM_INFO_INITIALIZED" {} \; | xargs -r cat || true
-
     - name: 开启SSH调试
       uses: mxschmitt/action-tmate@v3
       if: github.event.inputs.ssh == 'true'
@@ -326,37 +296,29 @@ jobs:
         }
 
         compile_firmware() {
-          # 检查可用内存并动态调整并行任务数
-          AVAIL_MEM=$(free -m | awk '/^Mem:/{print $7}')
-          JOBS=$(( AVAIL_MEM / 1024 > 1 ? AVAIL_MEM / 1024 : 1 ))
-          if [ $JOBS -gt $(nproc) ]; then
-            JOBS=$(nproc)
-          fi
-          echo "可用内存: ${AVAIL_MEM}MB, 设置并行任务数: $JOBS"
-          
           if [ $DO_FULL_BUILD -eq 1 ]; then
             echo "下载依赖..."
             make download -j8 V=s || make download -j1 V=s
             if [ ! -d "${{ env.TOOLCHAIN_DIR }}/toolchain-"* ]; then
               echo "编译工具链..."
-              make -j$JOBS tools/compile V=s || make -j1 V=s tools/compile
-              make -j$JOBS toolchain/compile V=s || make -j1 V=s toolchain/compile
+              make -j$(nproc) tools/compile V=s || make -j1 V=s tools/compile
+              make -j$(nproc) toolchain/compile V=s || make -j1 V=s toolchain/compile
             else
               echo "工具链已存在，跳过编译"
             fi
             cleanup_temp_files
             echo "编译完整固件..."
-            make -j$JOBS V=s || make -j2 V=s || make -j1 V=s
+            make -j$(nproc) V=s || make -j1 V=s
           elif [ $DO_PACKAGE_BUILD -eq 1 ] || [ "${{ env.feeds_changed }}" = "true" ]; then
             echo "软件包配置变化或源码更新，编译软件包..."
-            make -j$JOBS package/clean V=s || make -j1 V=s package/clean
-            make -j$JOBS package/compile V=s || make -j2 V=s package/compile || make -j1 V=s package/compile
-            make -j$JOBS package/index V=s || make -j1 V=s package/index
-            make -j$JOBS target/install V=s || make -j1 V=s target/install  # 确保生成固件
+            make -j$(nproc) package/clean V=s || make -j1 V=s package/clean
+            make -j$(nproc) package/compile V=s || make -j1 V=s package/compile
+            make -j$(nproc) package/index V=s || make -j1 V=s package/index
+            make -j$(nproc) target/install V=s || make -j1 V=s target/install  # 确保生成固件
           else
             echo "配置和feeds都未变化，执行最小增量编译..."
             # 直接使用缓存的软件包生成固件，不清理和重新编译
-            make -j$JOBS V=s || make -j2 V=s || make -j1 V=s
+            make -j$(nproc) V=s || make -j1 V=s
           fi
 
           # 保存缓存信息
@@ -379,7 +341,7 @@ jobs:
         DO_FULL_BUILD=0
         DO_PACKAGE_BUILD=0
 
-        if [ -z "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "${{ github.event.inputs.clean_build }}" = "true" ] || [ "${{ env.toolchain_valid }}" = "false" ]; then
+        if [ -z "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
           echo "工具链配置变化或首次编译，需要全量编译"
           DO_FULL_BUILD=1
         elif [ -z "$PREVIOUS_PACKAGE_MD5" ] || [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
@@ -421,19 +383,6 @@ jobs:
         echo "运行ID: ${{ github.run_id }}" >> ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
         echo "构建分支: ${{ env.REPO_BRANCH }}" >> ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
 
-    # 清理不必要的缓存文件
-    - name: 清理不必要的缓存文件
-      if: "!cancelled()"
-      run: |
-        # 清理不必要的对象文件以减小缓存大小
-        find ${{ env.TOOLCHAIN_BUILD_DIR }} -type f -name "*.o" -delete || true
-        find ${{ env.TOOLCHAIN_BUILD_DIR }} -type f -name "*.a" -not -path "*/lib/*" -delete || true
-        # 清理可能有问题的CMake文件
-        find ${{ env.TOOLCHAIN_DIR }} -name "CMakeCache.txt" -delete || true
-        find ${{ env.TOOLCHAIN_BUILD_DIR }} -name "CMakeCache.txt" -delete || true
-        # 显示清理后的大小
-        echo "清理后工具链构建目录大小: $(du -sh ${{ env.TOOLCHAIN_BUILD_DIR }} 2>/dev/null || echo '目录不存在或为空')"
-
     # 保存工具链缓存
     - name: 保存工具链缓存
       uses: actions/cache@v3
@@ -442,7 +391,7 @@ jobs:
         path: |
           ${{ env.TOOLCHAIN_DIR }}
           ${{ env.TOOLCHAIN_BUILD_DIR }}
-        key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache-v1
+        key: toolchain-${{ env.REPO_BRANCH }}-fixed-cache
     
     # 保存编译包缓存
     - name: 保存编译包缓存
@@ -450,7 +399,7 @@ jobs:
       if: "!cancelled()"
       with:
         path: ${{ env.PACKAGES_DIR }}
-        key: packages-${{ env.REPO_BRANCH }}-fixed-cache-v1
+        key: packages-${{ env.REPO_BRANCH }}-fixed-cache
     
     # 保存构建状态缓存
     - name: 保存构建状态缓存
@@ -458,7 +407,7 @@ jobs:
       if: "!cancelled()"
       with:
         path: ${{ env.BUILD_STATE_DIR }}
-        key: state-${{ env.REPO_BRANCH }}-fixed-cache-v1
+        key: state-${{ env.REPO_BRANCH }}-fixed-cache
     
     # 保存CCACHE缓存
     - name: 保存CCACHE缓存
@@ -466,7 +415,7 @@ jobs:
       if: "!cancelled()"
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache-v1
+        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache
 
     - name: 验证缓存已保存
       if: "!cancelled()"
@@ -515,19 +464,28 @@ jobs:
       id: tag
       if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "RELEASE_TAG=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
+        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         echo "## OpenWrt固件构建完成 📦" > release.txt
         echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
+        echo "📂 固件下载" >> release.txt
+        echo "⚠️ 请在刷机前先做好备份！" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: 创建GitHub Release
-      uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+    - name: 上传固件到Releases
+      uses: softprops/action-gh-release@v2
+      if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
-        name: OpenWrt ${{ steps.tag.outputs.RELEASE_TAG }} 自动构建
         body_path: release.txt
-        files: |
-          ${{ env.FIRMWARE_ZIP }}
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: 删除旧的Releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
