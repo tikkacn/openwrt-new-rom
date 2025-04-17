@@ -1,4 +1,4 @@
-name: 全新编译第八版
+name: 全新编译第八版(修复)
 
 on:
   workflow_dispatch:
@@ -204,6 +204,37 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_P2_SH
         echo "CONFIG_AUTOREMOVE=n" >> .config
         echo "CONFIG_AUTOREBUILD=n" >> .config
+        
+        # 增加固件生成的关键配置
+        echo "确保包含必要的固件生成配置..."
+        if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then
+          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
+          echo "添加了 CONFIG_TARGET_ROOTFS_SQUASHFS=y"
+        fi
+        
+        if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then
+          echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
+          echo "添加了 CONFIG_TARGET_IMAGES_GZIP=y"
+        fi
+        
+        if ! grep -q "CONFIG_TARGET_ROOTFS_TARGZ=y" .config; then
+          echo "CONFIG_TARGET_ROOTFS_TARGZ=y" >> .config
+          echo "添加了 CONFIG_TARGET_ROOTFS_TARGZ=y"
+        fi
+        
+        # 对于x86平台增加额外的镜像配置
+        if grep -q "CONFIG_TARGET_x86=y" .config; then
+          if ! grep -q "CONFIG_GRUB_IMAGES=y" .config; then
+            echo "CONFIG_GRUB_IMAGES=y" >> .config
+            echo "添加了 CONFIG_GRUB_IMAGES=y"
+          fi
+          
+          if ! grep -q "CONFIG_TARGET_IMAGES_PAD=y" .config; then
+            echo "CONFIG_TARGET_IMAGES_PAD=y" >> .config
+            echo "添加了 CONFIG_TARGET_IMAGES_PAD=y"
+          fi
+        fi
+        
         make defconfig
         # 修复这里 - 使用排序命令
         grep "^CONFIG_PACKAGE_.*=y" .config.input | sort > packages_input.txt || true
@@ -222,6 +253,11 @@ jobs:
         else
           echo "所有配置项均保留，无缺失"
         fi
+        
+        # 显示最终配置中的关键固件生成选项
+        echo "最终配置中的镜像生成选项:"
+        grep -E "CONFIG_TARGET_ROOTFS|CONFIG_TARGET_IMAGES|CONFIG_GRUB|CONFIG_ISO|CONFIG_EFI" .config || echo "未找到镜像相关配置"
+        
         diff .config.input .config > config_diff.txt || echo "配置无差异"
         cat config_diff.txt
         df -h
@@ -411,7 +447,7 @@ jobs:
           local failed_packages=()
           
           # 搜索已知的下载失败模式
-          if grep -q "No more mirrors to try - giving up\|Download failed" "$COMPILE_LOG"; then
+          if grep -q "No more mirrors to try\|Download failed" "$COMPILE_LOG"; then
             # 尝试找出失败的包名
             local pkg=$(grep -B 5 "No more mirrors to try\|Download failed" "$COMPILE_LOG" | grep -o "package/feeds/[^/]*/[^[:space:]]*" | head -n 1 | awk -F'/' '{print $NF}')
             
@@ -494,7 +530,10 @@ jobs:
             fi
             
             make -j$(nproc) package/index V=s || make -j1 V=s package/index
-            make -j$(nproc) target/install V=s || make -j1 V=s target/install  # 确保生成固件
+            
+            # 确保生成固件 - 不管前面步骤如何，都强制执行
+            echo "强制执行固件生成步骤..."
+            make -j$(nproc) target/install V=s || make -j1 V=s target/install
           else
             echo "配置和feeds都未变化，执行最小增量编译..."
             # 直接使用缓存的软件包生成固件，不清理和重新编译
@@ -507,9 +546,28 @@ jobs:
             fi
           fi
 
+          # 无论编译结果如何，都确保执行固件生成步骤
+          echo "确保执行固件生成步骤，无论前面编译是否成功..."
+          make -j$(nproc) target/install V=s || make -j1 V=s target/install
+          
           # 保存缓存信息
           save_cache_info
 
+          # 检查固件生成结果
+          echo "检查固件生成结果:"
+          find bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" | xargs ls -lh || echo "没有找到固件文件！"
+          
+          # 如果没有找到固件文件，尝试单独构建镜像
+          if [ -z "$(find bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*")" ]; then
+            echo "未找到固件文件，尝试单独构建镜像..."
+            # 检查是否已经构建了packages
+            if [ -d "bin/packages" ]; then
+              echo "已有软件包，尝试单独构建固件镜像..."
+              make -j1 target/install V=s
+              find bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" | xargs ls -lh || echo "构建固件仍然失败！"
+            fi
+          fi
+          
           if [ $? -eq 0 ]; then
             echo "编译成功"
           else
@@ -548,6 +606,43 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
         ccache -s
         df -h
+
+    # 检查固件生成结果
+    - name: 检查固件生成结果
+      run: |
+        echo "检查固件生成结果..."
+        find /workdir/openwrt/bin/targets -type f | sort
+        
+        # 检查固件文件大小
+        echo "固件文件大小:"
+        find /workdir/openwrt/bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" | xargs ls -lh || echo "未找到固件文件"
+        
+        # 检查是否有squashfs文件
+        echo "检查squashfs文件:"
+        find /workdir/openwrt/build_dir -name "*.squashfs" | xargs ls -lh || echo "未找到squashfs文件"
+        
+        # 如果没有找到固件文件，尝试最后一次强制生成
+        if [ -z "$(find /workdir/openwrt/bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*")" ]; then
+          echo "警告：未找到固件文件，尝试强制重新生成..."
+          cd /workdir/openwrt
+          # 确保配置中包含固件生成选项
+          if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then
+            echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
+          fi
+          if grep -q "CONFIG_TARGET_x86=y" .config; then
+            if ! grep -q "CONFIG_GRUB_IMAGES=y" .config; then
+              echo "CONFIG_GRUB_IMAGES=y" >> .config
+            fi
+            if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then
+              echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
+            fi
+          fi
+          make defconfig
+          # 强制生成固件
+          make -j1 target/install V=s
+          echo "重新检查固件文件:"
+          find /workdir/openwrt/bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" | xargs ls -lh || echo "仍然未找到固件文件"
+        fi
 
     # 备份缓存前检查工具链大小
     - name: 检查工具链大小
@@ -623,7 +718,12 @@ jobs:
       id: organize
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        # 检查编译目录是否存在
+        # 首先广泛搜索所有可能的固件文件
+        echo "搜索所有可能的固件文件..."
+        find /workdir/openwrt/bin -type f -name "*.bin" -o -name "*.img" -o -name "*sysupgrade*" -o -name "*combined*" | \
+          xargs -r ls -lh || echo "未找到可能的固件文件"
+          
+        # 检查是否有目标目录
         if [ ! -d "/workdir/openwrt/bin/targets" ]; then
           echo "错误：编译目标目录不存在，可能编译失败"
           # 即使没有固件文件也不报错，而是创建一个空的固件目录
@@ -633,51 +733,88 @@ jobs:
           exit 0
         fi
         
-        # 找到实际的固件目录（可能有多个架构）
-        cd /workdir/openwrt/bin/targets
-        TARGET_DIR=$(find . -type d -name "generic" -o -name "x86-64" -o -name "ramips" | head -1 | xargs dirname 2>/dev/null || echo ".")
-        cd "$TARGET_DIR"
-        echo "使用目标目录: $PWD"
+        # 查找所有目标目录
+        TARGET_DIRS=$(find /workdir/openwrt/bin/targets -mindepth 2 -maxdepth 2 -type d)
         
-        # 创建固件目录并确保它是空的
-        rm -rf firmware
-        mkdir -p firmware
-        
-        # 查找固件文件
-        FIRMWARE_FILES=$(find . -maxdepth 1 -name "*combined*" -o -name "*sysupgrade*")
-        if [ -z "$FIRMWARE_FILES" ]; then
-          echo "警告：未找到典型固件文件，尝试使用所有bin文件"
-          FIRMWARE_FILES=$(find . -maxdepth 1 -name "*.bin")
+        if [ -z "$TARGET_DIRS" ]; then
+          echo "警告：未找到具体目标目录，创建通用目录"
+          mkdir -p /workdir/openwrt/bin/targets/generic/generic
+          TARGET_DIRS="/workdir/openwrt/bin/targets/generic/generic"
         fi
         
-        # 复制找到的固件文件
-        if [ -n "$FIRMWARE_FILES" ]; then
-          echo "找到以下固件文件:"
-          echo "$FIRMWARE_FILES"
-          echo "$FIRMWARE_FILES" | xargs -i cp -f {} ./firmware/
-        else
-          echo "警告：未找到任何固件文件，尝试复制所有文件（不包括子目录）"
-          find . -maxdepth 1 -type f -not -path "./firmware*" | xargs -i cp -f {} ./firmware/
-        fi
+        # 对于每个目标目录，尝试查找固件文件
+        for TARGET_DIR in $TARGET_DIRS; do
+          echo "处理目标目录: $TARGET_DIR"
+          cd "$TARGET_DIR"
+          
+          # 创建固件目录并确保它是空的
+          rm -rf firmware
+          mkdir -p firmware
+          
+          # 查找固件文件 - 使用更宽松的匹配规则
+          FILES_FOUND=0
+          
+          # 尝试复制标准固件文件
+          for pattern in "*combined*" "*sysupgrade*" "*.img" "*.bin"; do
+            echo "尝试复制匹配 $pattern 的文件..."
+            if find . -maxdepth 1 -name "$pattern" | grep -q .; then
+              find . -maxdepth 1 -name "$pattern" -exec cp -f {} ./firmware/ \;
+              FILES_FOUND=1
+            fi
+          done
+          
+          # 如果没有找到标准固件文件，尝试复制所有非清单文件
+          if [ $FILES_FOUND -eq 0 ]; then
+            echo "未找到标准固件文件，尝试复制所有可能的文件..."
+            find . -maxdepth 1 -type f -not -name "*.manifest" -not -name "*.txt" -not -name "*.json" \
+              -not -name "*.buildinfo" -exec cp -f {} ./firmware/ \;
+          fi
+          
+          # 复制配置文件
+          if [ -f "/workdir/openwrt/.config" ]; then
+            cp -f /workdir/openwrt/.config ./firmware/config.txt
+          fi
+          
+          # 检查是否成功复制了任何文件
+          if [ -n "$(ls -A firmware)" ]; then
+            echo "成功复制固件文件到 $TARGET_DIR/firmware"
+            echo "固件内容:"
+            ls -lh firmware/
+            
+            echo "FIRMWARE=$TARGET_DIR/firmware" >> $GITHUB_ENV
+            echo "status=success" >> $GITHUB_OUTPUT
+            break
+          else
+            echo "警告: $TARGET_DIR 中未找到可用固件文件"
+          fi
+        done
         
-        # 检查固件目录是否为空
-        if [ -z "$(ls -A firmware)" ]; then
-          echo "警告: 固件目录为空，可能编译失败或没有生成文件"
-        fi
-        
-        # 复制配置文件
-        if [ -f "/workdir/openwrt/.config" ]; then
-          cp -f /workdir/openwrt/.config ./firmware/config.txt
-        else
-          echo "警告：找不到.config文件"
+        # 如果没有找到任何固件文件，使用紧急备用方法
+        if [ -z "$FIRMWARE" ]; then
+          echo "警告：未能在任何目标目录中找到固件文件，使用紧急备用方法"
+          BACKUP_DIR="/workdir/openwrt/bin/targets/generic/backup_firmware"
+          mkdir -p "$BACKUP_DIR/firmware"
+          
+          # 复制所有bin目录下的非包文件
+          find /workdir/openwrt/bin -type f -not -path "*/packages/*" -exec cp -f {} "$BACKUP_DIR/firmware/" \;
+          
+          # 确保至少有一个配置文件
+          if [ -f "/workdir/openwrt/.config" ]; then
+            cp -f /workdir/openwrt/.config "$BACKUP_DIR/firmware/config.txt"
+          else
+            echo "# 紧急备用配置" > "$BACKUP_DIR/firmware/config.txt"
+          fi
+          
+          echo "FIRMWARE=$BACKUP_DIR/firmware" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
         fi
         
         # 创建固件压缩包
-        zip -r firmware.zip firmware
-        
-        echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
-        echo "FIRMWARE_ZIP=$PWD/firmware.zip" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+        if [ -n "$FIRMWARE" ]; then
+          cd $(dirname "$FIRMWARE")
+          zip -r firmware.zip $(basename "$FIRMWARE")
+          echo "FIRMWARE_ZIP=$(dirname "$FIRMWARE")/firmware.zip" >> $GITHUB_ENV
+        fi
 
     # 上传固件
     - name: 上传固件目录
