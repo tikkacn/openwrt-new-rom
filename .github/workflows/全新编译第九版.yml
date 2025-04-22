@@ -1,0 +1,441 @@
+name: 全新编译第九版(优化缓存大小)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH调试'
+        required: false
+        default: 'false'
+      clean_build:
+        description: '完全重新编译'
+        required: false
+        default: 'false'
+      config_file:
+        description: '配置文件'
+        required: false
+        default: '增量缓存优化.config'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF_URL: https://github.com/tikkacn/openwrt-new-rom/raw/main/feeds.conf.default
+  CONFIG_FILE: ${{ github.event.inputs.config_file || '增量缓存优化.config' }}
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+  WORKDIR: /workdir
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@main
+
+    - name: 优化磁盘空间
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 20480
+        swap-size-mb: 8192
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+        build-mount-path: '/workdir'
+
+    - name: 初始化环境
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext \
+        genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev \
+        libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
+        libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf \
+        python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
+        swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        chmod -R 777 /workdir
+        df -h
+
+    - name: 计算构建指纹
+      id: fingerprint
+      run: |
+        # 创建配置文件副本（如果不存在则创建默认配置）
+        CONFIG_PATH="$GITHUB_WORKSPACE/$CONFIG_FILE"
+        if [ ! -f "$CONFIG_PATH" ]; then
+          echo "CONFIG_TARGET_x86=y" > "$CONFIG_PATH"
+          echo "CONFIG_TARGET_x86_64=y" >> "$CONFIG_PATH"
+          echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> "$CONFIG_PATH"
+          echo "CONFIG_PACKAGE_luci=y" >> "$CONFIG_PATH"
+        fi
+        
+        # 计算配置文件MD5
+        CONFIG_MD5=$(md5sum "$CONFIG_PATH" | awk '{print $1}')
+        echo "CONFIG_MD5=$CONFIG_MD5" >> $GITHUB_OUTPUT
+        
+        # 创建用于缓存的唯一指纹
+        CACHE_KEY_PREFIX="${REPO_BRANCH}-${CONFIG_MD5:0:8}"
+        echo "CACHE_KEY_PREFIX=$CACHE_KEY_PREFIX" >> $GITHUB_OUTPUT
+
+    # 优化缓存策略，分多个小缓存以满足10GB限制
+    - name: 恢复工具链核心缓存
+      uses: actions/cache@v3
+      id: cache-toolchain-core
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          ${{ env.WORKDIR }}/toolchain-core
+        key: toolchain-core-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
+        restore-keys: |
+          toolchain-core-${{ env.REPO_BRANCH }}-
+
+    - name: 恢复工具链库缓存
+      uses: actions/cache@v3
+      id: cache-toolchain-libs
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          ${{ env.WORKDIR }}/toolchain-libs
+        key: toolchain-libs-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
+        restore-keys: |
+          toolchain-libs-${{ env.REPO_BRANCH }}-
+
+    - name: 恢复工具链头文件缓存
+      uses: actions/cache@v3
+      id: cache-toolchain-headers
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          ${{ env.WORKDIR }}/toolchain-headers
+        key: toolchain-headers-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
+        restore-keys: |
+          toolchain-headers-${{ env.REPO_BRANCH }}-
+
+    - name: 恢复构建缓存（基础）
+      uses: actions/cache@v3
+      id: cache-build-base
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          ${{ env.WORKDIR }}/build-base
+        key: build-base-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
+        restore-keys: |
+          build-base-${{ env.REPO_BRANCH }}-
+
+    - name: 恢复包缓存
+      uses: actions/cache@v3
+      id: cache-packages
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          ${{ env.WORKDIR }}/packages-cache
+        key: packages-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
+        restore-keys: |
+          packages-${{ env.REPO_BRANCH }}-
+
+    - name: 恢复下载缓存
+      uses: actions/cache@v3
+      id: cache-dl
+      if: inputs.clean_build != 'true'
+      with:
+        path: |
+          ${{ env.WORKDIR }}/dl
+        key: dl-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
+        restore-keys: |
+          dl-${{ env.REPO_BRANCH }}-
+
+    - name: 恢复CCACHE缓存
+      uses: actions/cache@v3
+      id: cache-ccache
+      with:
+        path: |
+          ${{ env.WORKDIR }}/ccache
+        key: ccache-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
+        restore-keys: |
+          ccache-${{ env.REPO_BRANCH }}-
+
+    - name: 检查缓存恢复状态
+      run: |
+        echo "缓存恢复状态："
+        echo "工具链核心缓存: ${{ steps.cache-toolchain-core.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
+        echo "工具链库缓存: ${{ steps.cache-toolchain-libs.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
+        echo "工具链头文件缓存: ${{ steps.cache-toolchain-headers.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
+        echo "构建基础缓存: ${{ steps.cache-build-base.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
+        echo "包缓存: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
+        echo "下载缓存: ${{ steps.cache-dl.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
+        echo "CCACHE缓存: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
+        
+        # 显示缓存目录大小
+        for dir in toolchain-core toolchain-libs toolchain-headers build-base packages-cache dl ccache; do
+          if [ -d "${{ env.WORKDIR }}/$dir" ]; then
+            echo "${dir}目录大小: $(du -sh ${{ env.WORKDIR }}/$dir | cut -f1)"
+          else
+            echo "${dir}目录不存在"
+          fi
+        done
+
+    - name: 克隆源代码
+      working-directory: ${{ env.WORKDIR }}
+      run: |
+        if [ ! -d "openwrt" ]; then
+          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        fi
+        ln -sf ${{ env.WORKDIR }}/openwrt $GITHUB_WORKSPACE/openwrt
+        cd openwrt
+        
+        # 恢复工具链
+        mkdir -p staging_dir
+        if [ -d "${{ env.WORKDIR }}/toolchain-core" ]; then
+          echo "恢复工具链核心..."
+          cp -a ${{ env.WORKDIR }}/toolchain-core/* staging_dir/ 2>/dev/null || true
+        fi
+        if [ -d "${{ env.WORKDIR }}/toolchain-libs" ]; then
+          echo "恢复工具链库..."
+          cp -a ${{ env.WORKDIR }}/toolchain-libs/* staging_dir/ 2>/dev/null || true
+        fi
+        if [ -d "${{ env.WORKDIR }}/toolchain-headers" ]; then
+          echo "恢复工具链头文件..."
+          cp -a ${{ env.WORKDIR }}/toolchain-headers/* staging_dir/ 2>/dev/null || true
+        fi
+        
+        # 恢复构建目录
+        if [ -d "${{ env.WORKDIR }}/build-base" ]; then
+          echo "恢复构建基础..."
+          mkdir -p build_dir
+          cp -a ${{ env.WORKDIR }}/build-base/* build_dir/ 2>/dev/null || true
+        fi
+        
+        # 恢复包目录
+        if [ -d "${{ env.WORKDIR }}/packages-cache" ]; then
+          echo "恢复包缓存..."
+          mkdir -p bin
+          cp -a ${{ env.WORKDIR }}/packages-cache/* bin/ 2>/dev/null || true
+        fi
+        
+        # 恢复下载目录
+        if [ -d "${{ env.WORKDIR }}/dl" ]; then
+          echo "恢复下载目录..."
+          ln -sfn ${{ env.WORKDIR }}/dl dl
+        fi
+        
+        # 配置feeds
+        curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "使用仓库默认feeds配置"
+
+    - name: 配置编译环境
+      run: |
+        cd ${{ env.WORKDIR }}/openwrt
+        
+        # 创建diy脚本
+        echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
+        echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
+        chmod +x $GITHUB_WORKSPACE/diy-part1.sh
+        
+        echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
+        echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
+        chmod +x $GITHUB_WORKSPACE/diy-part2.sh
+        
+        # 执行diy脚本
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+        
+        # 更新feeds
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+        # 应用配置
+        cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+        
+        # 优化编译配置
+        echo "CONFIG_CCACHE=y" >> .config
+        echo "CONFIG_DEVEL=y" >> .config
+        echo "CONFIG_AUTOREMOVE=n" >> .config
+        echo "CONFIG_AUTOREBUILD=n" >> .config
+        echo "CONFIG_IB=y" >> .config
+        echo "CONFIG_SDK=y" >> .config
+        
+        # 固件生成配置
+        echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
+        if grep -q "CONFIG_TARGET_x86=y" .config; then
+          echo "CONFIG_GRUB_IMAGES=y" >> .config
+          echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
+        fi
+        
+        make defconfig
+
+    - name: 配置CCACHE
+      run: |
+        mkdir -p ${{ env.WORKDIR }}/ccache
+        export CCACHE_DIR=${{ env.WORKDIR }}/ccache
+        ccache -o cache_dir=$CCACHE_DIR
+        ccache -o compression=true
+        ccache -o compression_level=6
+        ccache -o max_size=5G  # 减小到5G以适应10GB限制
+        ccache -o hash_dir=false
+        ccache -o sloppiness=file_macro,locale,include_file_mtime,include_file_ctime,time_macros,file_stat_matches_ctime
+        ccache -z
+        echo "CCACHE_DIR=$CCACHE_DIR" >> $GITHUB_ENV
+        echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+
+    - name: 开启SSH调试
+      uses: mxschmitt/action-tmate@v3
+      if: github.event.inputs.ssh == 'true'
+
+    - name: 智能编译固件
+      id: compile
+      run: |
+        cd ${{ env.WORKDIR }}/openwrt
+        
+        # 设置环境变量
+        export CCACHE_DIR=${{ env.WORKDIR }}/ccache
+        export PATH="/usr/lib/ccache:$PATH"
+        
+        # 检查是否需要完整编译
+        NEED_FULL_BUILD=false
+        TOOLCHAIN_COMPLETE=false
+        
+        # 检查工具链是否完整
+        if [ -f "staging_dir/host/bin/gcc" ] && [ -d "staging_dir/toolchain"* ]; then
+          TOOLCHAIN_COMPLETE=true
+        fi
+        
+        if [ "${{ inputs.clean_build }}" = "true" ] || [ "$TOOLCHAIN_COMPLETE" = "false" ]; then
+          NEED_FULL_BUILD=true
+          echo "需要完整编译..."
+        fi
+        
+        # 下载依赖
+        echo "下载依赖包..."
+        make download -j8 || make download -j1 V=s
+        
+        if [ "$NEED_FULL_BUILD" = "true" ]; then
+          echo "执行完整编译..."
+          
+          # 编译工具链
+          make -j$(nproc) tools/compile V=s || make -j1 V=s tools/compile
+          make -j$(nproc) toolchain/compile V=s || make -j1 V=s toolchain/compile
+          
+          # 完整编译
+          make -j$(nproc) V=s || make -j1 V=s
+        else
+          echo "执行增量编译..."
+          
+          # 只编译必要部分
+          make -j$(nproc) V=s || make -j1 V=s
+        fi
+        
+        echo "status=success" >> $GITHUB_OUTPUT
+        ccache -s
+
+    - name: 备份缓存
+      if: always()
+      run: |
+        cd ${{ env.WORKDIR }}/openwrt
+        
+        # 备份工具链（分成多个小缓存）
+        if [ -d "staging_dir" ]; then
+          # 备份核心工具链
+          mkdir -p ${{ env.WORKDIR }}/toolchain-core
+          for dir in staging_dir/host staging_dir/toolchain-*; do
+            if [ -d "$dir" ]; then
+              # 只备份bin和lib目录的核心文件
+              mkdir -p ${{ env.WORKDIR }}/toolchain-core/$(basename $dir)
+              if [ -d "$dir/bin" ]; then
+                cp -a $dir/bin ${{ env.WORKDIR }}/toolchain-core/$(basename $dir)/
+              fi
+              if [ -d "$dir/lib" ]; then
+                cp -a $dir/lib ${{ env.WORKDIR }}/toolchain-core/$(basename $dir)/
+              fi
+            fi
+          done
+          
+          # 备份工具链库
+          mkdir -p ${{ env.WORKDIR }}/toolchain-libs
+          find staging_dir -path "*/lib/*.so*" -o -path "*/lib/*.a" | tar cf - -T - | tar xf - -C ${{ env.WORKDIR }}/toolchain-libs
+          
+          # 备份工具链头文件
+          mkdir -p ${{ env.WORKDIR }}/toolchain-headers
+          find staging_dir -path "*/include/*" | tar cf - -T - | tar xf - -C ${{ env.WORKDIR }}/toolchain-headers
+        fi
+        
+        # 备份构建目录（只保留必要文件）
+        if [ -d "build_dir" ]; then
+          mkdir -p ${{ env.WORKDIR }}/build-base
+          # 只备份host目录和工具链构建目录
+          if [ -d "build_dir/host" ]; then
+            cp -a build_dir/host ${{ env.WORKDIR }}/build-base/
+          fi
+          for dir in build_dir/toolchain-*; do
+            if [ -d "$dir" ]; then
+              mkdir -p ${{ env.WORKDIR }}/build-base/$(basename $dir)
+              # 只复制编译后的二进制文件
+              find $dir -type f -executable | tar cf - -T - | tar xf - -C ${{ env.WORKDIR }}/build-base/$(basename $dir)
+            fi
+          done
+        fi
+        
+        # 备份包目录
+        if [ -d "bin" ]; then
+          mkdir -p ${{ env.WORKDIR }}/packages-cache
+          cp -a bin/* ${{ env.WORKDIR }}/packages-cache/
+        fi
+        
+        # 显示缓存大小
+        echo "缓存大小："
+        for dir in toolchain-core toolchain-libs toolchain-headers build-base packages-cache dl ccache; do
+          if [ -d "${{ env.WORKDIR }}/$dir" ]; then
+            echo "${dir}: $(du -sh ${{ env.WORKDIR }}/$dir | cut -f1)"
+          fi
+        done
+
+    - name: 整理固件文件
+      id: organize
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        cd ${{ env.WORKDIR }}/openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware_${{ steps.fingerprint.outputs.CONFIG_MD5 }}_$(date +"%Y%m%d%H%M")
+        path: ${{ env.FIRMWARE }}
+
+    - name: 生成发布标签
+      id: tag
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "## OpenWrt固件构建完成 📦" > release.txt
+        echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
+        echo "⚠️ 请在刷机前先做好备份！" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件到Release
+      uses: softprops/action-gh-release@v2
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: 删除旧的Releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
