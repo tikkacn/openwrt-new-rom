@@ -1,4 +1,4 @@
-name: 全新编译第九版(修复兼容性)
+name: 全新编译第九版(修复所有问题)
 
 on:
   workflow_dispatch:
@@ -65,6 +65,9 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         chmod -R 777 /workdir
         df -h
+        
+        # 设置日期变量供后续使用
+        echo "DATE_TAG=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
     - name: 计算构建指纹
       id: fingerprint
@@ -80,20 +83,21 @@ jobs:
         
         # 计算配置文件MD5和版本ID
         CONFIG_MD5=$(md5sum "$CONFIG_PATH" | awk '{print $1}')
-        VERSION_ID=$(date +"%Y%m%d")
+        CONFIG_MD5_SHORT=${CONFIG_MD5:0:8}
         echo "CONFIG_MD5=$CONFIG_MD5" >> $GITHUB_OUTPUT
-        echo "VERSION_ID=$VERSION_ID" >> $GITHUB_OUTPUT
+        echo "CONFIG_MD5_SHORT=$CONFIG_MD5_SHORT" >> $GITHUB_ENV
         
         # 设置构建ID
-        BUILD_ID="${REPO_BRANCH}-${CONFIG_MD5:0:8}-${VERSION_ID}"
+        BUILD_ID="${REPO_BRANCH}-${CONFIG_MD5:0:8}-$(date +"%Y%m%d")"
         echo "BUILD_ID=$BUILD_ID" >> $GITHUB_OUTPUT
+        echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
 
     # 使用artifact下载上一次编译的重要组件
     - name: 下载CCACHE
       uses: dawidd6/action-download-artifact@v2
       if: env.CACHE_ARTIFACTS == 'true' && inputs.clean_build != 'true'
       with:
-        name: ccache-${{ steps.fingerprint.outputs.BUILD_ID }}
+        name: ccache-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/ccache
         workflow: ${{ github.workflow }}
         workflow_conclusion: success
@@ -103,7 +107,7 @@ jobs:
       uses: dawidd6/action-download-artifact@v2
       if: env.CACHE_ARTIFACTS == 'true' && inputs.clean_build != 'true'
       with:
-        name: toolchain-${{ steps.fingerprint.outputs.BUILD_ID }}
+        name: toolchain-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/toolchain
         workflow: ${{ github.workflow }}
         workflow_conclusion: success
@@ -113,7 +117,7 @@ jobs:
       uses: dawidd6/action-download-artifact@v2
       if: env.CACHE_ARTIFACTS == 'true' && inputs.clean_build != 'true'
       with:
-        name: build-dir-${{ steps.fingerprint.outputs.BUILD_ID }}
+        name: build-dir-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/build_dir
         workflow: ${{ github.workflow }}
         workflow_conclusion: success
@@ -123,7 +127,7 @@ jobs:
       uses: dawidd6/action-download-artifact@v2
       if: env.CACHE_ARTIFACTS == 'true' && inputs.clean_build != 'true'
       with:
-        name: dl-${{ steps.fingerprint.outputs.BUILD_ID }}
+        name: dl-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/dl
         workflow: ${{ github.workflow }}
         workflow_conclusion: success
@@ -137,7 +141,7 @@ jobs:
       with:
         path: |
           ${{ env.WORKDIR }}/ccache
-        key: ccache-${{ env.REPO_BRANCH }}-${{ steps.fingerprint.outputs.CONFIG_MD5 }}-v7
+        key: ccache-${{ env.REPO_BRANCH }}-${{ steps.fingerprint.outputs.CONFIG_MD5 }}-v8
         restore-keys: |
           ccache-${{ env.REPO_BRANCH }}-
 
@@ -146,7 +150,7 @@ jobs:
         echo "缓存状态检查："
         
         for dir in ccache toolchain build_dir dl; do
-          if [ -d "${{ env.WORKDIR }}/$dir" ]; then
+          if [ -d "${{ env.WORKDIR }}/$dir" ] && [ "$(ls -A ${{ env.WORKDIR }}/$dir 2>/dev/null)" ]; then
             SIZE=$(du -sh ${{ env.WORKDIR }}/$dir | cut -f1)
             echo "$dir 目录存在，大小: $SIZE"
             
@@ -175,13 +179,13 @@ jobs:
         
         # 创建并链接工具链目录
         mkdir -p staging_dir
-        if [ -d "${{ env.WORKDIR }}/toolchain" ] && [ "$(ls -A ${{ env.WORKDIR }}/toolchain)" ]; then
+        if [ -d "${{ env.WORKDIR }}/toolchain" ] && [ "$(ls -A ${{ env.WORKDIR }}/toolchain 2>/dev/null)" ]; then
           echo "恢复工具链..."
           rsync -a ${{ env.WORKDIR }}/toolchain/ staging_dir/
         fi
         
         # 创建并链接构建目录
-        if [ -d "${{ env.WORKDIR }}/build_dir" ] && [ "$(ls -A ${{ env.WORKDIR }}/build_dir)" ]; then
+        if [ -d "${{ env.WORKDIR }}/build_dir" ] && [ "$(ls -A ${{ env.WORKDIR }}/build_dir 2>/dev/null)" ]; then
           echo "恢复构建目录..."
           ln -sf ${{ env.WORKDIR }}/build_dir build_dir
         else
@@ -189,7 +193,7 @@ jobs:
         fi
         
         # 创建并链接下载目录
-        if [ -d "${{ env.WORKDIR }}/dl" ] && [ "$(ls -A ${{ env.WORKDIR }}/dl)" ]; then
+        if [ -d "${{ env.WORKDIR }}/dl" ] && [ "$(ls -A ${{ env.WORKDIR }}/dl 2>/dev/null)" ]; then
           echo "恢复下载目录..."
           ln -sf ${{ env.WORKDIR }}/dl dl
         else
@@ -334,7 +338,7 @@ jobs:
       uses: actions/upload-artifact@main
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       with:
-        name: ccache-${{ steps.fingerprint.outputs.BUILD_ID }}
+        name: ccache-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/ccache
         retention-days: 5
 
@@ -344,25 +348,20 @@ jobs:
         cd ${{ env.WORKDIR }}/openwrt
         
         if [ -d "staging_dir" ]; then
-          # 创建小型工具链备份
           echo "备份关键工具链文件..."
+          
+          # 创建小型工具链备份
           mkdir -p ${{ env.WORKDIR }}/toolchain_backup
           
-          # 备份关键可执行文件
-          for file in $(find staging_dir -type f -executable -a -name "gcc*" -o -name "*-gcc" -o -name "g++*" -o -name "*-g++"); do
-            dir=$(dirname $file)
-            mkdir -p ${{ env.WORKDIR }}/toolchain_backup/$dir
-            cp $file ${{ env.WORKDIR }}/toolchain_backup/$dir/
-          done
+          # 使用rsync复制可执行文件，解决目录复制问题
+          rsync -a --include="*/" --include="*.h" --include="*gcc*" --include="*g++*" --exclude="*" \
+            staging_dir/ ${{ env.WORKDIR }}/toolchain_backup/
           
           # 备份主机工具链关键目录
-          if [ -d "staging_dir/host" ]; then
+          if [ -d "staging_dir/host/bin" ]; then
             mkdir -p ${{ env.WORKDIR }}/toolchain_backup/staging_dir/host/bin
-            cp -a staging_dir/host/bin/* ${{ env.WORKDIR }}/toolchain_backup/staging_dir/host/bin/
+            rsync -a staging_dir/host/bin/ ${{ env.WORKDIR }}/toolchain_backup/staging_dir/host/bin/
           fi
-          
-          # 备份目标工具链头文件
-          find staging_dir -name "*.h" | head -1000 | xargs -I{} cp --parents {} ${{ env.WORKDIR }}/toolchain_backup/
           
           # 显示备份大小
           echo "工具链备份大小: $(du -sh ${{ env.WORKDIR }}/toolchain_backup | cut -f1)"
@@ -376,7 +375,7 @@ jobs:
       uses: actions/upload-artifact@main
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       with:
-        name: toolchain-${{ steps.fingerprint.outputs.BUILD_ID }}
+        name: toolchain-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/toolchain
         retention-days: 5
 
@@ -387,20 +386,19 @@ jobs:
         
         if [ -d "build_dir" ]; then
           echo "备份关键构建文件..."
-          mkdir -p ${{ env.WORKDIR }}/build_dir_backup
+          mkdir -p ${{ env.WORKDIR }}/build_dir_backup/host
           
-          # 备份主机构建目录
-          if [ -d "build_dir/host" ]; then
-            mkdir -p ${{ env.WORKDIR }}/build_dir_backup/host
-            cp -a build_dir/host/stamp ${{ env.WORKDIR }}/build_dir_backup/host/ 2>/dev/null || true
+          # 使用rsync复制文件，解决目录复制问题
+          if [ -d "build_dir/host/stamp" ]; then
+            rsync -a build_dir/host/stamp/ ${{ env.WORKDIR }}/build_dir_backup/host/stamp/
           fi
           
           # 备份工具链构建标记
           for dir in build_dir/toolchain-*; do
-            if [ -d "$dir" ]; then
+            if [ -d "$dir" ] && [ -d "$dir/stamp" ]; then
               base_dir=$(basename $dir)
-              mkdir -p ${{ env.WORKDIR }}/build_dir_backup/$base_dir
-              cp -a $dir/stamp ${{ env.WORKDIR }}/build_dir_backup/$base_dir/ 2>/dev/null || true
+              mkdir -p ${{ env.WORKDIR }}/build_dir_backup/$base_dir/stamp
+              rsync -a $dir/stamp/ ${{ env.WORKDIR }}/build_dir_backup/$base_dir/stamp/
             fi
           done
           
@@ -416,7 +414,7 @@ jobs:
       uses: actions/upload-artifact@main
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       with:
-        name: build-dir-${{ steps.fingerprint.outputs.BUILD_ID }}
+        name: build-dir-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/build_dir
         retention-days: 5
 
@@ -425,20 +423,26 @@ jobs:
       run: |
         cd ${{ env.WORKDIR }}
         
-        if [ -d "dl" ] && [ "$(ls -A dl)" ]; then
+        if [ -d "dl" ] && [ "$(ls -A dl 2>/dev/null)" ]; then
           echo "备份下载文件..."
-          # 压缩下载目录
-          tar -czf dl.tar.gz -C dl .
+          # 压缩下载目录中的内容
+          mkdir -p dl_backup
+          # 只复制小于10MB的文件以确保不超过限制
+          find dl -type f -size -10M -exec cp {} dl_backup/ \;
+          
+          # 显示备份大小
+          echo "下载目录备份大小: $(du -sh dl_backup | cut -f1)"
+          
+          # 替换原目录
           rm -rf dl
-          mkdir -p dl
-          mv dl.tar.gz dl/
+          mv dl_backup dl
         fi
 
     - name: 存储下载缓存
       uses: actions/upload-artifact@main
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       with:
-        name: dl-${{ steps.fingerprint.outputs.BUILD_ID }}
+        name: dl-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/dl
         retention-days: 5
 
@@ -455,7 +459,7 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware_${{ steps.fingerprint.outputs.CONFIG_MD5 }}_$(date +"%Y%m%d%H%M")
+        name: OpenWrt_firmware_${{ env.CONFIG_MD5_SHORT }}_${{ env.DATE_TAG }}
         path: ${{ env.FIRMWARE }}
 
     - name: 生成发布标签
