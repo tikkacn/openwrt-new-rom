@@ -1,4 +1,4 @@
-name: 全新编译第十版(修复缓存生成)
+name: 全新编译第九版(修复兼容性)
 
 on:
   workflow_dispatch:
@@ -329,15 +329,14 @@ jobs:
         # 显示可用空间
         df -h
 
-    # 使用artifact存储编译结果，不受10GB限制
+    # 使用旧版的upload-artifact
     - name: 存储CCACHE
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@main
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       with:
         name: ccache-${{ steps.fingerprint.outputs.BUILD_ID }}
         path: ${{ env.WORKDIR }}/ccache
         retention-days: 5
-        if-no-files-found: warn
 
     - name: 备份重要工具链文件
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
@@ -374,13 +373,12 @@ jobs:
         fi
 
     - name: 存储工具链
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@main
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       with:
         name: toolchain-${{ steps.fingerprint.outputs.BUILD_ID }}
         path: ${{ env.WORKDIR }}/toolchain
         retention-days: 5
-        if-no-files-found: warn
 
     - name: 备份重要构建文件
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
@@ -415,13 +413,12 @@ jobs:
         fi
 
     - name: 存储构建目录
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@main
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       with:
         name: build-dir-${{ steps.fingerprint.outputs.BUILD_ID }}
         path: ${{ env.WORKDIR }}/build_dir
         retention-days: 5
-        if-no-files-found: warn
 
     - name: 备份下载文件
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
@@ -438,13 +435,12 @@ jobs:
         fi
 
     - name: 存储下载缓存
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@main
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       with:
         name: dl-${{ steps.fingerprint.outputs.BUILD_ID }}
         path: ${{ env.WORKDIR }}/dl
         retention-days: 5
-        if-no-files-found: warn
 
     - name: 整理固件文件
       id: organize
