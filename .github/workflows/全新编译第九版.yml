@@ -1,4 +1,4 @@
-name: 全新编译第九版(修复所有问题)
+name: 全新编译第九版(修复缓存警告)
 
 on:
   workflow_dispatch:
@@ -141,7 +141,7 @@ jobs:
       with:
         path: |
           ${{ env.WORKDIR }}/ccache
-        key: ccache-${{ env.REPO_BRANCH }}-${{ steps.fingerprint.outputs.CONFIG_MD5 }}-v8
+        key: ccache-${{ env.REPO_BRANCH }}-${{ steps.fingerprint.outputs.CONFIG_MD5 }}-v9
         restore-keys: |
           ccache-${{ env.REPO_BRANCH }}-
 
@@ -287,6 +287,26 @@ jobs:
         echo "下载依赖包..."
         make download -j8 || make download -j1 V=s
         
+        # 确保dl目录内容保存到缓存
+        if [ -d "dl" ] && [ "$(ls -A dl 2>/dev/null)" ]; then
+          echo "保存dl目录到缓存..."
+          mkdir -p ${{ env.WORKDIR }}/dl_temp
+          # 只复制小于2MB的文件以确保不超过限制
+          find dl -type f -size -2M -exec cp -p {} ${{ env.WORKDIR }}/dl_temp/ \;
+          
+          # 显示备份大小
+          echo "下载缓存大小: $(du -sh ${{ env.WORKDIR }}/dl_temp | cut -f1)"
+          
+          # 保存一个示例文件以确保目录不为空
+          mkdir -p ${{ env.WORKDIR }}/dl
+          touch ${{ env.WORKDIR }}/dl/cache_marker.txt
+          echo "此文件用于确保缓存目录不为空" > ${{ env.WORKDIR }}/dl/cache_marker.txt
+          
+          # 复制文件到缓存目录
+          cp -a ${{ env.WORKDIR }}/dl_temp/* ${{ env.WORKDIR }}/dl/ 2>/dev/null || true
+          rm -rf ${{ env.WORKDIR }}/dl_temp
+        fi
+        
         # 编译过程
         if [ "$NEED_FULL_BUILD" = "true" ]; then
           echo "执行完整编译..."
@@ -350,25 +370,31 @@ jobs:
         if [ -d "staging_dir" ]; then
           echo "备份关键工具链文件..."
           
-          # 创建小型工具链备份
-          mkdir -p ${{ env.WORKDIR }}/toolchain_backup
+          # 确保工具链缓存目录存在
+          mkdir -p ${{ env.WORKDIR }}/toolchain
           
-          # 使用rsync复制可执行文件，解决目录复制问题
-          rsync -a --include="*/" --include="*.h" --include="*gcc*" --include="*g++*" --exclude="*" \
-            staging_dir/ ${{ env.WORKDIR }}/toolchain_backup/
-          
-          # 备份主机工具链关键目录
+          # 备份关键可执行文件和头文件
+          echo "备份主机工具链..."
           if [ -d "staging_dir/host/bin" ]; then
-            mkdir -p ${{ env.WORKDIR }}/toolchain_backup/staging_dir/host/bin
-            rsync -a staging_dir/host/bin/ ${{ env.WORKDIR }}/toolchain_backup/staging_dir/host/bin/
+            mkdir -p ${{ env.WORKDIR }}/toolchain/staging_dir/host/bin
+            rsync -a staging_dir/host/bin/ ${{ env.WORKDIR }}/toolchain/staging_dir/host/bin/
           fi
           
-          # 显示备份大小
-          echo "工具链备份大小: $(du -sh ${{ env.WORKDIR }}/toolchain_backup | cut -f1)"
+          # 备份交叉编译工具链
+          for dir in staging_dir/toolchain-*; do
+            if [ -d "$dir" ]; then
+              base_dir=$(basename $dir)
+              echo "备份交叉编译工具链: $base_dir"
+              mkdir -p ${{ env.WORKDIR }}/toolchain/staging_dir/$base_dir/bin
+              rsync -a $dir/bin/ ${{ env.WORKDIR }}/toolchain/staging_dir/$base_dir/bin/ || true
+            fi
+          done
           
-          # 移动备份
-          rm -rf ${{ env.WORKDIR }}/toolchain
-          mv ${{ env.WORKDIR }}/toolchain_backup ${{ env.WORKDIR }}/toolchain
+          # 生成一个标记文件，确保目录不为空
+          echo "工具链缓存版本: $(date)" > ${{ env.WORKDIR }}/toolchain/version.txt
+          
+          # 显示备份大小
+          echo "工具链备份大小: $(du -sh ${{ env.WORKDIR }}/toolchain | cut -f1)"
         fi
 
     - name: 存储工具链
@@ -379,36 +405,40 @@ jobs:
         path: ${{ env.WORKDIR }}/toolchain
         retention-days: 5
 
-    - name: 备份重要构建文件
+    - name: 备份关键构建文件
       if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         cd ${{ env.WORKDIR }}/openwrt
         
+        # 确保构建缓存目录不为空
+        mkdir -p ${{ env.WORKDIR }}/build_dir
+        echo "构建缓存版本: $(date)" > ${{ env.WORKDIR }}/build_dir/version.txt
+        
         if [ -d "build_dir" ]; then
           echo "备份关键构建文件..."
-          mkdir -p ${{ env.WORKDIR }}/build_dir_backup/host
           
-          # 使用rsync复制文件，解决目录复制问题
-          if [ -d "build_dir/host/stamp" ]; then
-            rsync -a build_dir/host/stamp/ ${{ env.WORKDIR }}/build_dir_backup/host/stamp/
+          # 备份主机构建标记
+          if [ -d "build_dir/host" ]; then
+            mkdir -p ${{ env.WORKDIR }}/build_dir/host
+            echo "备份主机构建状态..." > ${{ env.WORKDIR }}/build_dir/host/status.txt
+            find build_dir/host -name ".built" -o -name ".configured" | \
+              xargs tar cf - 2>/dev/null | tar xf - -C ${{ env.WORKDIR }} 2>/dev/null || true
           fi
           
           # 备份工具链构建标记
           for dir in build_dir/toolchain-*; do
-            if [ -d "$dir" ] && [ -d "$dir/stamp" ]; then
+            if [ -d "$dir" ]; then
               base_dir=$(basename $dir)
-              mkdir -p ${{ env.WORKDIR }}/build_dir_backup/$base_dir/stamp
-              rsync -a $dir/stamp/ ${{ env.WORKDIR }}/build_dir_backup/$base_dir/stamp/
+              mkdir -p ${{ env.WORKDIR }}/build_dir/$base_dir
+              echo "备份工具链构建状态: $base_dir" > ${{ env.WORKDIR }}/build_dir/$base_dir/status.txt
+              find $dir -name ".built" -o -name ".configured" | \
+                xargs tar cf - 2>/dev/null | tar xf - -C ${{ env.WORKDIR }} 2>/dev/null || true
             fi
           done
-          
-          # 显示备份大小
-          echo "构建目录备份大小: $(du -sh ${{ env.WORKDIR }}/build_dir_backup | cut -f1)"
-          
-          # 移动备份
-          rm -rf ${{ env.WORKDIR }}/build_dir
-          mv ${{ env.WORKDIR }}/build_dir_backup ${{ env.WORKDIR }}/build_dir
         fi
+        
+        # 显示备份大小
+        echo "构建目录备份大小: $(du -sh ${{ env.WORKDIR }}/build_dir | cut -f1)"
 
     - name: 存储构建目录
       uses: actions/upload-artifact@main
@@ -417,26 +447,6 @@ jobs:
         name: build-dir-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/build_dir
         retention-days: 5
-
-    - name: 备份下载文件
-      if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
-      run: |
-        cd ${{ env.WORKDIR }}
-        
-        if [ -d "dl" ] && [ "$(ls -A dl 2>/dev/null)" ]; then
-          echo "备份下载文件..."
-          # 压缩下载目录中的内容
-          mkdir -p dl_backup
-          # 只复制小于10MB的文件以确保不超过限制
-          find dl -type f -size -10M -exec cp {} dl_backup/ \;
-          
-          # 显示备份大小
-          echo "下载目录备份大小: $(du -sh dl_backup | cut -f1)"
-          
-          # 替换原目录
-          rm -rf dl
-          mv dl_backup dl
-        fi
 
     - name: 存储下载缓存
       uses: actions/upload-artifact@main
