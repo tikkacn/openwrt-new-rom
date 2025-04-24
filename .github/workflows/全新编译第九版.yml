@@ -1,4 +1,4 @@
-name: 全新编译第九版(优化缓存大小)
+name: 全新编译第十版(修复缓存生成)
 
 on:
   workflow_dispatch:
@@ -27,6 +27,7 @@ env:
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
   WORKDIR: /workdir
+  CACHE_ARTIFACTS: true # 设置为true以启用构建物存储而不是缓存
 
 jobs:
   build:
@@ -77,108 +78,89 @@ jobs:
           echo "CONFIG_PACKAGE_luci=y" >> "$CONFIG_PATH"
         fi
         
-        # 计算配置文件MD5
+        # 计算配置文件MD5和版本ID
         CONFIG_MD5=$(md5sum "$CONFIG_PATH" | awk '{print $1}')
+        VERSION_ID=$(date +"%Y%m%d")
         echo "CONFIG_MD5=$CONFIG_MD5" >> $GITHUB_OUTPUT
+        echo "VERSION_ID=$VERSION_ID" >> $GITHUB_OUTPUT
         
-        # 创建用于缓存的唯一指纹
-        CACHE_KEY_PREFIX="${REPO_BRANCH}-${CONFIG_MD5:0:8}"
-        echo "CACHE_KEY_PREFIX=$CACHE_KEY_PREFIX" >> $GITHUB_OUTPUT
+        # 设置构建ID
+        BUILD_ID="${REPO_BRANCH}-${CONFIG_MD5:0:8}-${VERSION_ID}"
+        echo "BUILD_ID=$BUILD_ID" >> $GITHUB_OUTPUT
 
-    # 优化缓存策略，分多个小缓存以满足10GB限制
-    - name: 恢复工具链核心缓存
-      uses: actions/cache@v3
-      id: cache-toolchain-core
-      if: inputs.clean_build != 'true'
+    # 使用artifact下载上一次编译的重要组件
+    - name: 下载CCACHE
+      uses: dawidd6/action-download-artifact@v2
+      if: env.CACHE_ARTIFACTS == 'true' && inputs.clean_build != 'true'
       with:
-        path: |
-          ${{ env.WORKDIR }}/toolchain-core
-        key: toolchain-core-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
-        restore-keys: |
-          toolchain-core-${{ env.REPO_BRANCH }}-
-
-    - name: 恢复工具链库缓存
-      uses: actions/cache@v3
-      id: cache-toolchain-libs
-      if: inputs.clean_build != 'true'
+        name: ccache-${{ steps.fingerprint.outputs.BUILD_ID }}
+        path: ${{ env.WORKDIR }}/ccache
+        workflow: ${{ github.workflow }}
+        workflow_conclusion: success
+        if_no_artifact_found: ignore
+    
+    - name: 下载工具链
+      uses: dawidd6/action-download-artifact@v2
+      if: env.CACHE_ARTIFACTS == 'true' && inputs.clean_build != 'true'
       with:
-        path: |
-          ${{ env.WORKDIR }}/toolchain-libs
-        key: toolchain-libs-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
-        restore-keys: |
-          toolchain-libs-${{ env.REPO_BRANCH }}-
-
-    - name: 恢复工具链头文件缓存
-      uses: actions/cache@v3
-      id: cache-toolchain-headers
-      if: inputs.clean_build != 'true'
+        name: toolchain-${{ steps.fingerprint.outputs.BUILD_ID }}
+        path: ${{ env.WORKDIR }}/toolchain
+        workflow: ${{ github.workflow }}
+        workflow_conclusion: success
+        if_no_artifact_found: ignore
+    
+    - name: 下载构建目录
+      uses: dawidd6/action-download-artifact@v2
+      if: env.CACHE_ARTIFACTS == 'true' && inputs.clean_build != 'true'
       with:
-        path: |
-          ${{ env.WORKDIR }}/toolchain-headers
-        key: toolchain-headers-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
-        restore-keys: |
-          toolchain-headers-${{ env.REPO_BRANCH }}-
-
-    - name: 恢复构建缓存（基础）
-      uses: actions/cache@v3
-      id: cache-build-base
-      if: inputs.clean_build != 'true'
+        name: build-dir-${{ steps.fingerprint.outputs.BUILD_ID }}
+        path: ${{ env.WORKDIR }}/build_dir
+        workflow: ${{ github.workflow }}
+        workflow_conclusion: success
+        if_no_artifact_found: ignore
+    
+    - name: 下载下载缓存
+      uses: dawidd6/action-download-artifact@v2
+      if: env.CACHE_ARTIFACTS == 'true' && inputs.clean_build != 'true'
       with:
-        path: |
-          ${{ env.WORKDIR }}/build-base
-        key: build-base-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
-        restore-keys: |
-          build-base-${{ env.REPO_BRANCH }}-
+        name: dl-${{ steps.fingerprint.outputs.BUILD_ID }}
+        path: ${{ env.WORKDIR }}/dl
+        workflow: ${{ github.workflow }}
+        workflow_conclusion: success
+        if_no_artifact_found: ignore
 
-    - name: 恢复包缓存
-      uses: actions/cache@v3
-      id: cache-packages
-      if: inputs.clean_build != 'true'
-      with:
-        path: |
-          ${{ env.WORKDIR }}/packages-cache
-        key: packages-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
-        restore-keys: |
-          packages-${{ env.REPO_BRANCH }}-
-
-    - name: 恢复下载缓存
-      uses: actions/cache@v3
-      id: cache-dl
-      if: inputs.clean_build != 'true'
-      with:
-        path: |
-          ${{ env.WORKDIR }}/dl
-        key: dl-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
-        restore-keys: |
-          dl-${{ env.REPO_BRANCH }}-
-
+    # 使用传统缓存作为备用
     - name: 恢复CCACHE缓存
       uses: actions/cache@v3
       id: cache-ccache
+      if: env.CACHE_ARTIFACTS != 'true' || inputs.clean_build == 'true'
       with:
         path: |
           ${{ env.WORKDIR }}/ccache
-        key: ccache-${{ steps.fingerprint.outputs.CACHE_KEY_PREFIX }}-v6
+        key: ccache-${{ env.REPO_BRANCH }}-${{ steps.fingerprint.outputs.CONFIG_MD5 }}-v7
         restore-keys: |
           ccache-${{ env.REPO_BRANCH }}-
 
     - name: 检查缓存恢复状态
       run: |
-        echo "缓存恢复状态："
-        echo "工具链核心缓存: ${{ steps.cache-toolchain-core.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
-        echo "工具链库缓存: ${{ steps.cache-toolchain-libs.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
-        echo "工具链头文件缓存: ${{ steps.cache-toolchain-headers.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
-        echo "构建基础缓存: ${{ steps.cache-build-base.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
-        echo "包缓存: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
-        echo "下载缓存: ${{ steps.cache-dl.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
-        echo "CCACHE缓存: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '命中' || '未命中' }}"
+        echo "缓存状态检查："
         
-        # 显示缓存目录大小
-        for dir in toolchain-core toolchain-libs toolchain-headers build-base packages-cache dl ccache; do
+        for dir in ccache toolchain build_dir dl; do
           if [ -d "${{ env.WORKDIR }}/$dir" ]; then
-            echo "${dir}目录大小: $(du -sh ${{ env.WORKDIR }}/$dir | cut -f1)"
+            SIZE=$(du -sh ${{ env.WORKDIR }}/$dir | cut -f1)
+            echo "$dir 目录存在，大小: $SIZE"
+            
+            # 列出一些关键文件以验证内容
+            if [ "$dir" = "toolchain" ]; then
+              echo "工具链内容:"
+              find ${{ env.WORKDIR }}/$dir -name "gcc" -type f | head -5
+            elif [ "$dir" = "ccache" ]; then
+              echo "CCACHE内容:"
+              ls -la ${{ env.WORKDIR }}/$dir | head -5
+            fi
           else
-            echo "${dir}目录不存在"
+            echo "$dir 目录不存在或为空"
+            mkdir -p ${{ env.WORKDIR }}/$dir
           fi
         done
 
@@ -191,39 +173,27 @@ jobs:
         ln -sf ${{ env.WORKDIR }}/openwrt $GITHUB_WORKSPACE/openwrt
         cd openwrt
         
-        # 恢复工具链
+        # 创建并链接工具链目录
         mkdir -p staging_dir
-        if [ -d "${{ env.WORKDIR }}/toolchain-core" ]; then
-          echo "恢复工具链核心..."
-          cp -a ${{ env.WORKDIR }}/toolchain-core/* staging_dir/ 2>/dev/null || true
-        fi
-        if [ -d "${{ env.WORKDIR }}/toolchain-libs" ]; then
-          echo "恢复工具链库..."
-          cp -a ${{ env.WORKDIR }}/toolchain-libs/* staging_dir/ 2>/dev/null || true
-        fi
-        if [ -d "${{ env.WORKDIR }}/toolchain-headers" ]; then
-          echo "恢复工具链头文件..."
-          cp -a ${{ env.WORKDIR }}/toolchain-headers/* staging_dir/ 2>/dev/null || true
+        if [ -d "${{ env.WORKDIR }}/toolchain" ] && [ "$(ls -A ${{ env.WORKDIR }}/toolchain)" ]; then
+          echo "恢复工具链..."
+          rsync -a ${{ env.WORKDIR }}/toolchain/ staging_dir/
         fi
         
-        # 恢复构建目录
-        if [ -d "${{ env.WORKDIR }}/build-base" ]; then
-          echo "恢复构建基础..."
+        # 创建并链接构建目录
+        if [ -d "${{ env.WORKDIR }}/build_dir" ] && [ "$(ls -A ${{ env.WORKDIR }}/build_dir)" ]; then
+          echo "恢复构建目录..."
+          ln -sf ${{ env.WORKDIR }}/build_dir build_dir
+        else
           mkdir -p build_dir
-          cp -a ${{ env.WORKDIR }}/build-base/* build_dir/ 2>/dev/null || true
         fi
         
-        # 恢复包目录
-        if [ -d "${{ env.WORKDIR }}/packages-cache" ]; then
-          echo "恢复包缓存..."
-          mkdir -p bin
-          cp -a ${{ env.WORKDIR }}/packages-cache/* bin/ 2>/dev/null || true
-        fi
-        
-        # 恢复下载目录
-        if [ -d "${{ env.WORKDIR }}/dl" ]; then
+        # 创建并链接下载目录
+        if [ -d "${{ env.WORKDIR }}/dl" ] && [ "$(ls -A ${{ env.WORKDIR }}/dl)" ]; then
           echo "恢复下载目录..."
-          ln -sfn ${{ env.WORKDIR }}/dl dl
+          ln -sf ${{ env.WORKDIR }}/dl dl
+        else
+          mkdir -p dl
         fi
         
         # 配置feeds
@@ -258,8 +228,6 @@ jobs:
         echo "CONFIG_DEVEL=y" >> .config
         echo "CONFIG_AUTOREMOVE=n" >> .config
         echo "CONFIG_AUTOREBUILD=n" >> .config
-        echo "CONFIG_IB=y" >> .config
-        echo "CONFIG_SDK=y" >> .config
         
         # 固件生成配置
         echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
@@ -277,7 +245,7 @@ jobs:
         ccache -o cache_dir=$CCACHE_DIR
         ccache -o compression=true
         ccache -o compression_level=6
-        ccache -o max_size=5G  # 减小到5G以适应10GB限制
+        ccache -o max_size=5G
         ccache -o hash_dir=false
         ccache -o sloppiness=file_macro,locale,include_file_mtime,include_file_ctime,time_macros,file_stat_matches_ctime
         ccache -z
@@ -299,101 +267,184 @@ jobs:
         
         # 检查是否需要完整编译
         NEED_FULL_BUILD=false
-        TOOLCHAIN_COMPLETE=false
         
         # 检查工具链是否完整
-        if [ -f "staging_dir/host/bin/gcc" ] && [ -d "staging_dir/toolchain"* ]; then
-          TOOLCHAIN_COMPLETE=true
+        if [ ! -f "staging_dir/host/bin/gcc" ] || [ ! -d "staging_dir/toolchain"* ]; then
+          NEED_FULL_BUILD=true
+          echo "工具链不完整，需要完整编译"
         fi
         
-        if [ "${{ inputs.clean_build }}" = "true" ] || [ "$TOOLCHAIN_COMPLETE" = "false" ]; then
+        if [ "${{ inputs.clean_build }}" = "true" ]; then
           NEED_FULL_BUILD=true
-          echo "需要完整编译..."
+          echo "强制完整编译"
         fi
         
         # 下载依赖
         echo "下载依赖包..."
         make download -j8 || make download -j1 V=s
         
+        # 编译过程
         if [ "$NEED_FULL_BUILD" = "true" ]; then
           echo "执行完整编译..."
           
           # 编译工具链
-          make -j$(nproc) tools/compile V=s || make -j1 V=s tools/compile
-          make -j$(nproc) toolchain/compile V=s || make -j1 V=s toolchain/compile
+          make -j$(nproc) tools/compile || make -j1 tools/compile
+          make -j$(nproc) toolchain/compile || make -j1 toolchain/compile
+          
+          # 备份工具链到缓存目录
+          echo "备份工具链..."
+          mkdir -p ${{ env.WORKDIR }}/toolchain
+          cp -a staging_dir/* ${{ env.WORKDIR }}/toolchain/
           
           # 完整编译
-          make -j$(nproc) V=s || make -j1 V=s
+          make -j$(nproc) || make -j1
         else
           echo "执行增量编译..."
-          
-          # 只编译必要部分
-          make -j$(nproc) V=s || make -j1 V=s
+          make -j$(nproc) || make -j1
         fi
         
-        echo "status=success" >> $GITHUB_OUTPUT
+        echo "编译完成，显示CCACHE统计:"
         ccache -s
+        
+        echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: 备份缓存
+    - name: 检查编译结果
       if: always()
       run: |
         cd ${{ env.WORKDIR }}/openwrt
+        echo "查找固件文件..."
+        find bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" | xargs ls -lh || echo "未找到固件文件"
         
-        # 备份工具链（分成多个小缓存）
-        if [ -d "staging_dir" ]; then
-          # 备份核心工具链
-          mkdir -p ${{ env.WORKDIR }}/toolchain-core
-          for dir in staging_dir/host staging_dir/toolchain-*; do
-            if [ -d "$dir" ]; then
-              # 只备份bin和lib目录的核心文件
-              mkdir -p ${{ env.WORKDIR }}/toolchain-core/$(basename $dir)
-              if [ -d "$dir/bin" ]; then
-                cp -a $dir/bin ${{ env.WORKDIR }}/toolchain-core/$(basename $dir)/
-              fi
-              if [ -d "$dir/lib" ]; then
-                cp -a $dir/lib ${{ env.WORKDIR }}/toolchain-core/$(basename $dir)/
-              fi
-            fi
-          done
-          
-          # 备份工具链库
-          mkdir -p ${{ env.WORKDIR }}/toolchain-libs
-          find staging_dir -path "*/lib/*.so*" -o -path "*/lib/*.a" | tar cf - -T - | tar xf - -C ${{ env.WORKDIR }}/toolchain-libs
-          
-          # 备份工具链头文件
-          mkdir -p ${{ env.WORKDIR }}/toolchain-headers
-          find staging_dir -path "*/include/*" | tar cf - -T - | tar xf - -C ${{ env.WORKDIR }}/toolchain-headers
-        fi
-        
-        # 备份构建目录（只保留必要文件）
-        if [ -d "build_dir" ]; then
-          mkdir -p ${{ env.WORKDIR }}/build-base
-          # 只备份host目录和工具链构建目录
-          if [ -d "build_dir/host" ]; then
-            cp -a build_dir/host ${{ env.WORKDIR }}/build-base/
-          fi
-          for dir in build_dir/toolchain-*; do
-            if [ -d "$dir" ]; then
-              mkdir -p ${{ env.WORKDIR }}/build-base/$(basename $dir)
-              # 只复制编译后的二进制文件
-              find $dir -type f -executable | tar cf - -T - | tar xf - -C ${{ env.WORKDIR }}/build-base/$(basename $dir)
-            fi
-          done
-        fi
-        
-        # 备份包目录
-        if [ -d "bin" ]; then
-          mkdir -p ${{ env.WORKDIR }}/packages-cache
-          cp -a bin/* ${{ env.WORKDIR }}/packages-cache/
-        fi
-        
-        # 显示缓存大小
-        echo "缓存大小："
-        for dir in toolchain-core toolchain-libs toolchain-headers build-base packages-cache dl ccache; do
-          if [ -d "${{ env.WORKDIR }}/$dir" ]; then
-            echo "${dir}: $(du -sh ${{ env.WORKDIR }}/$dir | cut -f1)"
+        # 显示各目录大小
+        echo "目录大小："
+        for dir in staging_dir build_dir bin dl; do
+          if [ -d "$dir" ]; then
+            echo "${dir}: $(du -sh $dir | cut -f1)"
           fi
         done
+        
+        # 检查CCACHE目录大小
+        echo "CCACHE目录大小: $(du -sh ${{ env.WORKDIR }}/ccache | cut -f1)"
+        
+        # 显示可用空间
+        df -h
+
+    # 使用artifact存储编译结果，不受10GB限制
+    - name: 存储CCACHE
+      uses: actions/upload-artifact@v3
+      if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      with:
+        name: ccache-${{ steps.fingerprint.outputs.BUILD_ID }}
+        path: ${{ env.WORKDIR }}/ccache
+        retention-days: 5
+        if-no-files-found: warn
+
+    - name: 备份重要工具链文件
+      if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        cd ${{ env.WORKDIR }}/openwrt
+        
+        if [ -d "staging_dir" ]; then
+          # 创建小型工具链备份
+          echo "备份关键工具链文件..."
+          mkdir -p ${{ env.WORKDIR }}/toolchain_backup
+          
+          # 备份关键可执行文件
+          for file in $(find staging_dir -type f -executable -a -name "gcc*" -o -name "*-gcc" -o -name "g++*" -o -name "*-g++"); do
+            dir=$(dirname $file)
+            mkdir -p ${{ env.WORKDIR }}/toolchain_backup/$dir
+            cp $file ${{ env.WORKDIR }}/toolchain_backup/$dir/
+          done
+          
+          # 备份主机工具链关键目录
+          if [ -d "staging_dir/host" ]; then
+            mkdir -p ${{ env.WORKDIR }}/toolchain_backup/staging_dir/host/bin
+            cp -a staging_dir/host/bin/* ${{ env.WORKDIR }}/toolchain_backup/staging_dir/host/bin/
+          fi
+          
+          # 备份目标工具链头文件
+          find staging_dir -name "*.h" | head -1000 | xargs -I{} cp --parents {} ${{ env.WORKDIR }}/toolchain_backup/
+          
+          # 显示备份大小
+          echo "工具链备份大小: $(du -sh ${{ env.WORKDIR }}/toolchain_backup | cut -f1)"
+          
+          # 移动备份
+          rm -rf ${{ env.WORKDIR }}/toolchain
+          mv ${{ env.WORKDIR }}/toolchain_backup ${{ env.WORKDIR }}/toolchain
+        fi
+
+    - name: 存储工具链
+      uses: actions/upload-artifact@v3
+      if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      with:
+        name: toolchain-${{ steps.fingerprint.outputs.BUILD_ID }}
+        path: ${{ env.WORKDIR }}/toolchain
+        retention-days: 5
+        if-no-files-found: warn
+
+    - name: 备份重要构建文件
+      if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        cd ${{ env.WORKDIR }}/openwrt
+        
+        if [ -d "build_dir" ]; then
+          echo "备份关键构建文件..."
+          mkdir -p ${{ env.WORKDIR }}/build_dir_backup
+          
+          # 备份主机构建目录
+          if [ -d "build_dir/host" ]; then
+            mkdir -p ${{ env.WORKDIR }}/build_dir_backup/host
+            cp -a build_dir/host/stamp ${{ env.WORKDIR }}/build_dir_backup/host/ 2>/dev/null || true
+          fi
+          
+          # 备份工具链构建标记
+          for dir in build_dir/toolchain-*; do
+            if [ -d "$dir" ]; then
+              base_dir=$(basename $dir)
+              mkdir -p ${{ env.WORKDIR }}/build_dir_backup/$base_dir
+              cp -a $dir/stamp ${{ env.WORKDIR }}/build_dir_backup/$base_dir/ 2>/dev/null || true
+            fi
+          done
+          
+          # 显示备份大小
+          echo "构建目录备份大小: $(du -sh ${{ env.WORKDIR }}/build_dir_backup | cut -f1)"
+          
+          # 移动备份
+          rm -rf ${{ env.WORKDIR }}/build_dir
+          mv ${{ env.WORKDIR }}/build_dir_backup ${{ env.WORKDIR }}/build_dir
+        fi
+
+    - name: 存储构建目录
+      uses: actions/upload-artifact@v3
+      if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      with:
+        name: build-dir-${{ steps.fingerprint.outputs.BUILD_ID }}
+        path: ${{ env.WORKDIR }}/build_dir
+        retention-days: 5
+        if-no-files-found: warn
+
+    - name: 备份下载文件
+      if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        cd ${{ env.WORKDIR }}
+        
+        if [ -d "dl" ] && [ "$(ls -A dl)" ]; then
+          echo "备份下载文件..."
+          # 压缩下载目录
+          tar -czf dl.tar.gz -C dl .
+          rm -rf dl
+          mkdir -p dl
+          mv dl.tar.gz dl/
+        fi
+
+    - name: 存储下载缓存
+      uses: actions/upload-artifact@v3
+      if: env.CACHE_ARTIFACTS == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      with:
+        name: dl-${{ steps.fingerprint.outputs.BUILD_ID }}
+        path: ${{ env.WORKDIR }}/dl
+        retention-days: 5
+        if-no-files-found: warn
 
     - name: 整理固件文件
       id: organize
@@ -404,16 +455,11 @@ jobs:
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: 设置日期变量
-      id: date
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      run: echo "TODAY=$(date +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
-
     - name: 上传固件
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware_${{ steps.fingerprint.outputs.CONFIG_MD5 }}_${{ steps.date.outputs.TODAY }}
+        name: OpenWrt_firmware_${{ steps.fingerprint.outputs.CONFIG_MD5 }}_$(date +"%Y%m%d%H%M")
         path: ${{ env.FIRMWARE }}
 
     - name: 生成发布标签
