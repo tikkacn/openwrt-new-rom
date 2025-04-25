@@ -1,4 +1,4 @@
-name: 全新编译第九版(修复缓存警告)
+name: 全新编译第九版(修复日期问题)
 
 on:
   workflow_dispatch:
@@ -87,10 +87,26 @@ jobs:
         echo "CONFIG_MD5=$CONFIG_MD5" >> $GITHUB_OUTPUT
         echo "CONFIG_MD5_SHORT=$CONFIG_MD5_SHORT" >> $GITHUB_ENV
         
-        # 设置构建ID
-        BUILD_ID="${REPO_BRANCH}-${CONFIG_MD5:0:8}-$(date +"%Y%m%d")"
+        # 设置固定的构建ID - 不包含日期，避免日期变化导致缓存不匹配
+        BUILD_ID="${REPO_BRANCH}-${CONFIG_MD5:0:8}"
         echo "BUILD_ID=$BUILD_ID" >> $GITHUB_OUTPUT
         echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
+
+    # 列出可用的Artifacts，帮助调试
+    - name: 列出可用的Artifacts
+      if: env.CACHE_ARTIFACTS == 'true' && inputs.clean_build != 'true'
+      run: |
+        echo "尝试查找最近的缓存Artifacts..."
+        
+        # 列出当前仓库所有的工作流
+        REPO=$(echo "$GITHUB_REPOSITORY")
+        echo "当前仓库: $REPO"
+        
+        # 记录要搜索的Artifact名称前缀
+        echo "要查找的Artifact前缀: ccache-${{ env.BUILD_ID }}"
+        echo "要查找的Artifact前缀: toolchain-${{ env.BUILD_ID }}"
+        echo "要查找的Artifact前缀: build-dir-${{ env.BUILD_ID }}"
+        echo "要查找的Artifact前缀: dl-${{ env.BUILD_ID }}"
 
     # 使用artifact下载上一次编译的重要组件
     - name: 下载CCACHE
@@ -100,7 +116,7 @@ jobs:
         name: ccache-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/ccache
         workflow: ${{ github.workflow }}
-        workflow_conclusion: success
+        search_artifacts: true
         if_no_artifact_found: ignore
     
     - name: 下载工具链
@@ -110,7 +126,7 @@ jobs:
         name: toolchain-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/toolchain
         workflow: ${{ github.workflow }}
-        workflow_conclusion: success
+        search_artifacts: true
         if_no_artifact_found: ignore
     
     - name: 下载构建目录
@@ -120,7 +136,7 @@ jobs:
         name: build-dir-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/build_dir
         workflow: ${{ github.workflow }}
-        workflow_conclusion: success
+        search_artifacts: true
         if_no_artifact_found: ignore
     
     - name: 下载下载缓存
@@ -130,7 +146,7 @@ jobs:
         name: dl-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/dl
         workflow: ${{ github.workflow }}
-        workflow_conclusion: success
+        search_artifacts: true
         if_no_artifact_found: ignore
 
     # 使用传统缓存作为备用
@@ -141,7 +157,7 @@ jobs:
       with:
         path: |
           ${{ env.WORKDIR }}/ccache
-        key: ccache-${{ env.REPO_BRANCH }}-${{ steps.fingerprint.outputs.CONFIG_MD5 }}-v9
+        key: ccache-${{ env.REPO_BRANCH }}-${{ steps.fingerprint.outputs.CONFIG_MD5 }}-v10
         restore-keys: |
           ccache-${{ env.REPO_BRANCH }}-
 
