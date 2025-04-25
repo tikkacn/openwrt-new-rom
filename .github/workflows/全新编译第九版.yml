@@ -1,4 +1,4 @@
-name: 全新编译第九版(修复日期问题)
+name: 全新编译第九版(优化完整版)
 
 on:
   workflow_dispatch:
@@ -59,8 +59,8 @@ jobs:
         genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev \
         libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
         libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf \
-        python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
-        swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        python3 python3-pyelftools python3-setuptools python3-distutils python3-dev python3-stdeb python3-all \
+        qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         chmod -R 777 /workdir
@@ -157,7 +157,7 @@ jobs:
       with:
         path: |
           ${{ env.WORKDIR }}/ccache
-        key: ccache-${{ env.REPO_BRANCH }}-${{ steps.fingerprint.outputs.CONFIG_MD5 }}-v10
+        key: ccache-${{ env.REPO_BRANCH }}-${{ steps.fingerprint.outputs.CONFIG_MD5 }}-v11
         restore-keys: |
           ccache-${{ env.REPO_BRANCH }}-
 
@@ -235,8 +235,13 @@ jobs:
         # 执行diy脚本
         $GITHUB_WORKSPACE/$DIY_P1_SH
         
-        # 更新feeds
+        # 优化feeds更新流程
+        echo "第一次更新feeds..."
         ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        # 二次更新确保所有依赖安装
+        echo "第二次更新feeds确保所有依赖都已安装..."
+        ./scripts/feeds update -i
         ./scripts/feeds install -a
         
         # 应用配置
@@ -328,8 +333,8 @@ jobs:
           echo "执行完整编译..."
           
           # 编译工具链
-          make -j$(nproc) tools/compile || make -j1 tools/compile
-          make -j$(nproc) toolchain/compile || make -j1 toolchain/compile
+          FORCE=1 make -j$(nproc) tools/compile || FORCE=1 make -j1 tools/compile
+          FORCE=1 make -j$(nproc) toolchain/compile || FORCE=1 make -j1 toolchain/compile
           
           # 备份工具链到缓存目录
           echo "备份工具链..."
@@ -337,10 +342,37 @@ jobs:
           cp -a staging_dir/* ${{ env.WORKDIR }}/toolchain/
           
           # 完整编译
-          make -j$(nproc) || make -j1
+          FORCE=1 make -j$(nproc) || FORCE=1 make -j1
         else
           echo "执行增量编译..."
-          make -j$(nproc) || make -j1
+          # 优先尝试常规编译
+          make -j$(nproc) || make -j1 || {
+            echo "增量编译失败，尝试使用FORCE=1参数重新编译"
+            FORCE=1 make -j$(nproc) || FORCE=1 make -j1
+          }
+        fi
+        
+        # 确保所有必要的包都已生成
+        echo "验证所有必要的包是否已生成..."
+        if [ -f ".config" ]; then
+          # 提取配置文件中的所有packages
+          CONFIG_PACKAGES=$(grep "^CONFIG_PACKAGE_.*=y" .config | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
+          
+          # 检查是否所有包都已生成
+          MISSING_PACKAGES=0
+          for pkg in $CONFIG_PACKAGES; do
+            if [ ! -z "$pkg" ] && ! find bin/packages -name "*${pkg}*" -type f 2>/dev/null | grep -q .; then
+              echo "警告: 可能缺失包 $pkg"
+              MISSING_PACKAGES=$((MISSING_PACKAGES+1))
+            fi
+          done
+          
+          if [ $MISSING_PACKAGES -gt 0 ]; then
+            echo "警告: 可能有 $MISSING_PACKAGES 个包缺失，执行make package/compile确保完整性"
+            FORCE=1 make package/compile -j$(nproc) || FORCE=1 make package/compile -j1
+            # 再次执行一次完整编译以确保固件完整
+            FORCE=1 make -j$(nproc) || FORCE=1 make -j1
+          fi
         fi
         
         echo "编译完成，显示CCACHE统计:"
@@ -394,6 +426,12 @@ jobs:
           if [ -d "staging_dir/host/bin" ]; then
             mkdir -p ${{ env.WORKDIR }}/toolchain/staging_dir/host/bin
             rsync -a staging_dir/host/bin/ ${{ env.WORKDIR }}/toolchain/staging_dir/host/bin/
+          fi
+          
+          # 确保包含 libdeflate-gzip 这个关键文件
+          if [ -f "staging_dir/host/bin/libdeflate-gzip" ]; then
+            mkdir -p ${{ env.WORKDIR }}/toolchain/staging_dir/host/bin
+            cp -a staging_dir/host/bin/libdeflate-gzip ${{ env.WORKDIR }}/toolchain/staging_dir/host/bin/
           fi
           
           # 备份交叉编译工具链
