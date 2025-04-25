@@ -115,7 +115,7 @@ jobs:
       with:
         name: ccache-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/ccache
-        workflow: ${{ github.workflow }}
+        workflow: '' # 空字符串会搜索所有工作流
         search_artifacts: true
         if_no_artifact_found: ignore
     
@@ -125,7 +125,7 @@ jobs:
       with:
         name: toolchain-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/toolchain
-        workflow: ${{ github.workflow }}
+        workflow: '' # 空字符串会搜索所有工作流
         search_artifacts: true
         if_no_artifact_found: ignore
     
@@ -135,7 +135,7 @@ jobs:
       with:
         name: build-dir-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/build_dir
-        workflow: ${{ github.workflow }}
+        workflow: '' # 空字符串会搜索所有工作流
         search_artifacts: true
         if_no_artifact_found: ignore
     
@@ -145,7 +145,7 @@ jobs:
       with:
         name: dl-${{ env.BUILD_ID }}
         path: ${{ env.WORKDIR }}/dl
-        workflow: ${{ github.workflow }}
+        workflow: '' # 空字符串会搜索所有工作流
         search_artifacts: true
         if_no_artifact_found: ignore
 
