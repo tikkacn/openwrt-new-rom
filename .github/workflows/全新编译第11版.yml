@@ -1,4 +1,3 @@
-```yaml
 name: 全新编译第十版(优化版)
 
 on:
@@ -807,4 +806,3 @@ jobs:
           /workdir/openwrt/.config
           /workdir/openwrt/config_diff.txt
           /workdir/openwrt/missing_packages.txt
-```
