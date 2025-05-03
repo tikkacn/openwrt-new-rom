@@ -127,6 +127,12 @@ jobs:
     - name: 克隆源代码并配置 Feeds
       working-directory: /workdir
       run: |
+        # 先检查并清理已存在的 openwrt 目录
+        if [ -d "openwrt" ]; then
+          echo "检测到已存在的 openwrt 目录，正在清理..."
+          rm -rf openwrt
+        fi
+        
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
         cd openwrt
