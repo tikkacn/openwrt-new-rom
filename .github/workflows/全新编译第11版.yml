@@ -1,136 +1,4 @@
-- name: 智能编译固件
-      id: compile
-      run: |
-        # 在Docker容器中执行编译
-        docker run --rm -v $GITHUB_WORKSPACE:/src -v ${{ env.DOCKER_WORK_DIR }}:/workdir \
-          -e CCACHE_DIR=${{ env.CCACHE_DIR }} \
-          -e PATH="/usr/lib/ccache:$PATH" \
-          openwrt-builder bash -c "cd /workdir/openwrt && \
-          export BUILD_MODE=${{ env.BUILD_MODE }} && \
-          echo \"编译模式: \$BUILD_MODE\" && \
-          
-          # 定义函数
-          cleanup_temp_files() {
-            echo \"清理临时文件以释放空间...\"
-            find /tmp -type f -delete || true
-            df -h
-          } 
-          
-          save_cache_info() {
-            echo \"保存缓存状态信息...\"
-            mkdir -p ${{ env.BUILD_STATE_DIR }}
-            cp .config ${{ env.BUILD_STATE_DIR }}/config.txt
-            echo \"\$TOOLCHAIN_CONFIG_MD5\" > ${{ env.BUILD_STATE_DIR }}/toolchain.md5
-            echo \"\$PACKAGE_CONFIG_MD5\" > ${{ env.BUILD_STATE_DIR }}/package.md5
-            echo \"保存构建状态完成\"
-          }
-          
-          # 仅提取目标架构相关配置计算哈希值
-          TOOLCHAIN_CONFIG=\$(grep \"^CONFIG_TARGET\" .config | sort)
-          TOOLCHAIN_CONFIG_MD5=\$(echo \"\$TOOLCHAIN_CONFIG\" | md5sum | awk '{print \$1}')
-          PREVIOUS_TOOLCHAIN_MD5=\$(cat ${{ env.BUILD_STATE_DIR }}/toolchain.md5 2>/dev/null || echo \"\")
-          
-          # 仅提取包配置计算哈希值
-          PACKAGE_CONFIG=\$(grep \"^CONFIG_PACKAGE\" .config | sort)
-          PACKAGE_CONFIG_MD5=\$(echo \"\$PACKAGE_CONFIG\" | md5sum | awk '{print \$1}')
-          PREVIOUS_PACKAGE_MD5=\$(cat ${{ env.BUILD_STATE_DIR }}/package.md5 2>/dev/null || echo \"\")
-          
-          # 根据编译模式执行不同的编译流程
-          case \"\$BUILD_MODE\" in
-            full)
-              echo \"执行完全编译流程...\"
-              make clean
-              # 编译工具链
-              echo \"编译工具链...\"
-              make -j\$(nproc) tools/compile V=s || make -j1 V=s tools/compile
-              make -j\$(nproc) toolchain/compile V=s || make -j1 V=s toolchain/compile
-              # 编译完整固件
-              echo \"编译完整固件...\"
-              if ! make -j\$(nproc) V=s; then
-                make -j1 V=s
-              fi
-              ;;
-            
-            packages)
-              echo \"执行包编译流程...\"
-              # 不清理工具链，只清理包
-              make package/clean V=s || make -j1 V=s package/clean
-              # 编译软件包
-              echo \"编译软件包...\"
-              if ! make -j\$(nproc) package/compile V=s; then
-                make -j1 V=s package/compile
-              fi
-              # 创建包索引
-              echo \"创建包索引...\"
-              make -j\$(nproc) package/index V=s || make -j1 V=s package/index
-              # 生成固件
-              echo \"生成固件镜像...\"
-              make -j\$(nproc) target/install V=s || make -j1 V=s target/install
-              ;;
-            
-            incremental)
-              echo \"执行真正的增量编译流程...\"
-              # 只编译已经变化的文件，并生成新固件
-              # 首先，标记所有需要重新构建的包
-              find \$(grep ^CONFIG_PACKAGE .config | grep =y | sed -e 's/CONFIG_PACKAGE_\\([^=]*\\)=y/\\1/' | xargs -n1 -i find package -name {}) -type f -name Makefile | xargs touch
-              # 使用增量编译模式
-              if ! make -j\$(nproc) V=s; then
-                make -j1 V=s
-              fi
-              ;;
-            
-            *)
-              echo \"未知的编译模式，默认执行完全编译...\"
-              if ! make -j\$(nproc) V=s; then
-                make -j1 V=s
-              fi
-              ;;
-          esac
-          
-          # 无论编译结果如何，都确保执行固件生成步骤
-          echo \"确保执行固件生成步骤，无论前面编译是否成功...\"
-          make -j\$(nproc) target/install V=s || make -j1 V=s target/install
-          
-          # 保存缓存信息
-          save_cache_info
-          
-          # 显示CCACHE统计信息
-          ccache -s
-          
-          # 检查固件生成结果
-          echo \"检查固件生成结果:\"
-          find bin/targets -type f -name \"*.bin\" -o -name \"*combined*\" -o -name \"*sysupgrade*\" | xargs ls -lh || echo \"没有找到固件文件！\"
-          
-          # 设置设备名称环境变量
-          DEVICE_NAME=_\$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\\1/' | tr '\\n' '_')
-          echo \"DEVICE_NAME=\$DEVICE_NAME\" > /workdir/device_name.env
-          
-          # 设置文件日期环境变量
-          FILE_DATE=_\$(date +\"%Y%m%d%H%M\")
-          echo \"FILE_DATE=\$FILE_DATE\" > /workdir/file_date.env
-          
-          echo \"status=success\" > /workdir/compile_status.env"
-        
-        # 读取环境变量
-        if [ -f "${{ env.DOCKER_WORK_DIR }}/device_name.env" ]; then
-          source ${{ env.DOCKER_WORK_DIR }}/device_name.env
-          echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_ENV
-        fi
-        
-        if [ -f "${{ env.DOCKER_WORK_DIR }}/file_date.env" ]; then
-          source ${{ env.DOCKER_WORK_DIR }}/file_date.env
-          echo "FILE_DATE=$FILE_DATE" >> $GITHUB_ENV
-        fi
-        
-        if [ -f "${{ env.DOCKER_WORK_DIR }}/compile_status.env" ]; then
-          source ${{ env.DOCKER_WORK_DIR }}/compile_status.env
-          echo "status=$status" >> $GITHUB_OUTPUT
-        else
-          echo "status=failure" >> $GITHUB_OUTPUT
-        fi
-        
-        # 显示编译后的磁盘使用情况
-        df -hname: 全新编译Docker版(优化版)
+name: "全新编译Docker第11版(优化版)"
 
 on:
   workflow_dispatch:
@@ -537,11 +405,10 @@ EOFINNER
       id: compile
       run: |
         # 在Docker容器中执行编译
-        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir \
+        docker run --rm -v $GITHUB_WORKSPACE:/src -v ${{ env.DOCKER_WORK_DIR }}:/workdir \
           -e CCACHE_DIR=${{ env.CCACHE_DIR }} \
           -e PATH="/usr/lib/ccache:$PATH" \
-          openwrt-builder bash -c "\
-          cd /workdir/openwrt && \
+          openwrt-builder bash -c "cd /workdir/openwrt && \
           export BUILD_MODE=${{ env.BUILD_MODE }} && \
           echo \"编译模式: \$BUILD_MODE\" && \
           
@@ -550,7 +417,7 @@ EOFINNER
             echo \"清理临时文件以释放空间...\"
             find /tmp -type f -delete || true
             df -h
-          } && \
+          } 
           
           save_cache_info() {
             echo \"保存缓存状态信息...\"
@@ -559,56 +426,56 @@ EOFINNER
             echo \"\$TOOLCHAIN_CONFIG_MD5\" > ${{ env.BUILD_STATE_DIR }}/toolchain.md5
             echo \"\$PACKAGE_CONFIG_MD5\" > ${{ env.BUILD_STATE_DIR }}/package.md5
             echo \"保存构建状态完成\"
-          } && \
+          }
           
           # 仅提取目标架构相关配置计算哈希值
-          TOOLCHAIN_CONFIG=\$(grep \"^CONFIG_TARGET\" .config | sort) && \
-          TOOLCHAIN_CONFIG_MD5=\$(echo \"\$TOOLCHAIN_CONFIG\" | md5sum | awk '{print \$1}') && \
-          PREVIOUS_TOOLCHAIN_MD5=\$(cat ${{ env.BUILD_STATE_DIR }}/toolchain.md5 2>/dev/null || echo \"\") && \
+          TOOLCHAIN_CONFIG=\$(grep \"^CONFIG_TARGET\" .config | sort)
+          TOOLCHAIN_CONFIG_MD5=\$(echo \"\$TOOLCHAIN_CONFIG\" | md5sum | awk '{print \$1}')
+          PREVIOUS_TOOLCHAIN_MD5=\$(cat ${{ env.BUILD_STATE_DIR }}/toolchain.md5 2>/dev/null || echo \"\")
           
           # 仅提取包配置计算哈希值
-          PACKAGE_CONFIG=\$(grep \"^CONFIG_PACKAGE\" .config | sort) && \
-          PACKAGE_CONFIG_MD5=\$(echo \"\$PACKAGE_CONFIG\" | md5sum | awk '{print \$1}') && \
-          PREVIOUS_PACKAGE_MD5=\$(cat ${{ env.BUILD_STATE_DIR }}/package.md5 2>/dev/null || echo \"\") && \
+          PACKAGE_CONFIG=\$(grep \"^CONFIG_PACKAGE\" .config | sort)
+          PACKAGE_CONFIG_MD5=\$(echo \"\$PACKAGE_CONFIG\" | md5sum | awk '{print \$1}')
+          PREVIOUS_PACKAGE_MD5=\$(cat ${{ env.BUILD_STATE_DIR }}/package.md5 2>/dev/null || echo \"\")
           
           # 根据编译模式执行不同的编译流程
           case \"\$BUILD_MODE\" in
             full)
-              echo \"执行完全编译流程...\" && \
-              make clean && \
+              echo \"执行完全编译流程...\"
+              make clean
               # 编译工具链
-              echo \"编译工具链...\" && \
-              make -j\$(nproc) tools/compile V=s || make -j1 V=s tools/compile && \
-              make -j\$(nproc) toolchain/compile V=s || make -j1 V=s toolchain/compile && \
+              echo \"编译工具链...\"
+              make -j\$(nproc) tools/compile V=s || make -j1 V=s tools/compile
+              make -j\$(nproc) toolchain/compile V=s || make -j1 V=s toolchain/compile
               # 编译完整固件
-              echo \"编译完整固件...\" && \
+              echo \"编译完整固件...\"
               if ! make -j\$(nproc) V=s; then
                 make -j1 V=s
               fi
               ;;
             
             packages)
-              echo \"执行包编译流程...\" && \
+              echo \"执行包编译流程...\"
               # 不清理工具链，只清理包
-              make package/clean V=s || make -j1 V=s package/clean && \
+              make package/clean V=s || make -j1 V=s package/clean
               # 编译软件包
-              echo \"编译软件包...\" && \
+              echo \"编译软件包...\"
               if ! make -j\$(nproc) package/compile V=s; then
                 make -j1 V=s package/compile
-              fi && \
+              fi
               # 创建包索引
-              echo \"创建包索引...\" && \
-              make -j\$(nproc) package/index V=s || make -j1 V=s package/index && \
+              echo \"创建包索引...\"
+              make -j\$(nproc) package/index V=s || make -j1 V=s package/index
               # 生成固件
-              echo \"生成固件镜像...\" && \
+              echo \"生成固件镜像...\"
               make -j\$(nproc) target/install V=s || make -j1 V=s target/install
               ;;
             
             incremental)
-              echo \"执行真正的增量编译流程...\" && \
+              echo \"执行真正的增量编译流程...\"
               # 只编译已经变化的文件，并生成新固件
               # 首先，标记所有需要重新构建的包
-              find \$(grep ^CONFIG_PACKAGE .config | grep =y | sed -e 's/CONFIG_PACKAGE_\\([^=]*\\)=y/\\1/' | xargs -n1 -i find package -name {}) -type f -name Makefile | xargs touch && \
+              find \$(grep ^CONFIG_PACKAGE .config | grep =y | sed -e 's/CONFIG_PACKAGE_\\([^=]*\\)=y/\\1/' | xargs -n1 -i find package -name {}) -type f -name Makefile | xargs touch
               # 使用增量编译模式
               if ! make -j\$(nproc) V=s; then
                 make -j1 V=s
@@ -616,34 +483,34 @@ EOFINNER
               ;;
             
             *)
-              echo \"未知的编译模式，默认执行完全编译...\" && \
+              echo \"未知的编译模式，默认执行完全编译...\"
               if ! make -j\$(nproc) V=s; then
                 make -j1 V=s
               fi
               ;;
-          esac && \
+          esac
           
           # 无论编译结果如何，都确保执行固件生成步骤
-          echo \"确保执行固件生成步骤，无论前面编译是否成功...\" && \
-          make -j\$(nproc) target/install V=s || make -j1 V=s target/install && \
+          echo \"确保执行固件生成步骤，无论前面编译是否成功...\"
+          make -j\$(nproc) target/install V=s || make -j1 V=s target/install
           
           # 保存缓存信息
-          save_cache_info && \
+          save_cache_info
           
           # 显示CCACHE统计信息
-          ccache -s && \
+          ccache -s
           
           # 检查固件生成结果
-          echo \"检查固件生成结果:\" && \
-          find bin/targets -type f -name \"*.bin\" -o -name \"*combined*\" -o -name \"*sysupgrade*\" | xargs ls -lh || echo \"没有找到固件文件！\" && \
+          echo \"检查固件生成结果:\"
+          find bin/targets -type f -name \"*.bin\" -o -name \"*combined*\" -o -name \"*sysupgrade*\" | xargs ls -lh || echo \"没有找到固件文件！\"
           
           # 设置设备名称环境变量
-          DEVICE_NAME=_\$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\\1/' | tr '\\n' '_') && \
-          echo \"DEVICE_NAME=\$DEVICE_NAME\" > /workdir/device_name.env && \
+          DEVICE_NAME=_\$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\\1/' | tr '\\n' '_')
+          echo \"DEVICE_NAME=\$DEVICE_NAME\" > /workdir/device_name.env
           
           # 设置文件日期环境变量
-          FILE_DATE=_\$(date +\"%Y%m%d%H%M\") && \
-          echo \"FILE_DATE=\$FILE_DATE\" > /workdir/file_date.env && \
+          FILE_DATE=_\$(date +\"%Y%m%d%H%M\")
+          echo \"FILE_DATE=\$FILE_DATE\" > /workdir/file_date.env
           
           echo \"status=success\" > /workdir/compile_status.env"
         
@@ -718,8 +585,7 @@ EOFINNER
       run: |
         echo "搜索所有可能的固件文件..."
         # 使用Docker容器查找固件文件
-        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "\
-          find /workdir/openwrt/bin -type f -name '*.bin' -o -name '*.img' -o -name '*sysupgrade*' -o -name '*combined*' | \
+        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "find /workdir/openwrt/bin -type f -name '*.bin' -o -name '*.img' -o -name '*sysupgrade*' -o -name '*combined*' | \
           xargs -r ls -lh || echo '未找到可能的固件文件'"
           
         # 检查是否有目标目录
@@ -733,7 +599,7 @@ EOFINNER
         fi
         
         # 在Docker容器中整理固件文件
-        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "\
+        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "
           # 查找所有目标目录
           TARGET_DIRS=\$(find /workdir/openwrt/bin/targets -mindepth 2 -maxdepth 2 -type d)
           
@@ -759,7 +625,7 @@ EOFINNER
             for pattern in '*combined*' '*sysupgrade*' '*.img' '*.bin'; do
               echo \"尝试复制匹配 \$pattern 的文件...\"
               if find . -maxdepth 1 -name \"\$pattern\" | grep -q .; then
-                find . -maxdepth 1 -name \"\$pattern\" -exec cp -f {} ./firmware/ \\;
+                find . -maxdepth 1 -name \"\$pattern\" -exec cp -f {} ./firmware/ \;
                 FILES_FOUND=1
               fi
             done
@@ -768,7 +634,7 @@ EOFINNER
             if [ \$FILES_FOUND -eq 0 ]; then
               echo '未找到标准固件文件，尝试复制所有可能的文件...'
               find . -maxdepth 1 -type f -not -name '*.manifest' -not -name '*.txt' -not -name '*.json' \
-                -not -name '*.buildinfo' -exec cp -f {} ./firmware/ \\;
+                -not -name '*.buildinfo' -exec cp -f {} ./firmware/ \;
             fi
             
             # 复制配置文件
@@ -797,7 +663,7 @@ EOFINNER
             mkdir -p \"\$BACKUP_DIR/firmware\"
             
             # 复制所有bin目录下的非包文件
-            find /workdir/openwrt/bin -type f -not -path '*/packages/*' -exec cp -f {} \"\$BACKUP_DIR/firmware/\" \\;
+            find /workdir/openwrt/bin -type f -not -path '*/packages/*' -exec cp -f {} \"\$BACKUP_DIR/firmware/\" \;
             
             # 确保至少有一个配置文件
             if [ -f '/workdir/openwrt/.config' ]; then
