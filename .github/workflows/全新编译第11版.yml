@@ -51,7 +51,6 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
-        build-mount-path: '/workdir'
 
     - name: 额外清理磁盘空间并检查
       run: |
@@ -207,7 +206,7 @@ EOF
           ${{ env.STAMP_DIR }}
           /workdir/openwrt/staging_dir/target-*/stamps
           /workdir/openwrt/.packageinfo
-        key: stamps-docker-${{ env.REPO_BRANCH }}-${{ hashFiles('**/feeds.conf.default') }}
+        key: stamps-docker-${{ env immagine:REPO_BRANCH }}-${{ hashFiles('**/feeds.conf.default') }}
         restore-keys: |
           stamps-docker-${{ env.REPO_BRANCH }}-
 
