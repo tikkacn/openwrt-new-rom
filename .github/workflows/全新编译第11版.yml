@@ -1,4 +1,4 @@
-- name: 智能编译固件docker版11版本
+- name: 智能编译固件
       id: compile
       run: |
         # 在Docker容器中执行编译
