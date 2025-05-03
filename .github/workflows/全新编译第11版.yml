@@ -585,8 +585,7 @@ EOFINNER
       run: |
         echo "搜索所有可能的固件文件..."
         # 使用Docker容器查找固件文件
-        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "find /workdir/openwrt/bin -type f -name '*.bin' -o -name '*.img' -o -name '*sysupgrade*' -o -name '*combined*' | \
-          xargs -r ls -lh || echo '未找到可能的固件文件'"
+        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "find /workdir/openwrt/bin -type f -name '*.bin' -o -name '*.img' -o -name '*sysupgrade*' -o -name '*combined*' | xargs -r ls -lh || echo '未找到可能的固件文件'"
           
         # 检查是否有目标目录
         if [ ! -d "${{ env.DOCKER_WORK_DIR }}/openwrt/bin/targets" ]; then
@@ -599,20 +598,20 @@ EOFINNER
         fi
         
         # 在Docker容器中整理固件文件
-        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "
+        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c '
           # 查找所有目标目录
-          TARGET_DIRS=\$(find /workdir/openwrt/bin/targets -mindepth 2 -maxdepth 2 -type d)
+          TARGET_DIRS=$(find /workdir/openwrt/bin/targets -mindepth 2 -maxdepth 2 -type d)
           
-          if [ -z \"\$TARGET_DIRS\" ]; then
-            echo '警告：未找到具体目标目录，创建通用目录'
+          if [ -z "$TARGET_DIRS" ]; then
+            echo "警告：未找到具体目标目录，创建通用目录"
             mkdir -p /workdir/openwrt/bin/targets/generic/generic
-            TARGET_DIRS='/workdir/openwrt/bin/targets/generic/generic'
+            TARGET_DIRS="/workdir/openwrt/bin/targets/generic/generic"
           fi
           
           # 对于每个目标目录，尝试查找固件文件
-          for TARGET_DIR in \$TARGET_DIRS; do
-            echo \"处理目标目录: \$TARGET_DIR\"
-            cd \"\$TARGET_DIR\"
+          for TARGET_DIR in $TARGET_DIRS; do
+            echo "处理目标目录: $TARGET_DIR"
+            cd "$TARGET_DIR"
             
             # 创建固件目录并确保它是空的
             rm -rf firmware
@@ -622,67 +621,68 @@ EOFINNER
             FILES_FOUND=0
             
             # 尝试复制标准固件文件
-            for pattern in '*combined*' '*sysupgrade*' '*.img' '*.bin'; do
-              echo \"尝试复制匹配 \$pattern 的文件...\"
-              if find . -maxdepth 1 -name \"\$pattern\" | grep -q .; then
-                find . -maxdepth 1 -name \"\$pattern\" -exec cp -f {} ./firmware/ \;
+            for pattern in "*combined*" "*sysupgrade*" "*.img" "*.bin"; do
+              echo "尝试复制匹配 $pattern 的文件..."
+              if find . -maxdepth 1 -name "$pattern" | grep -q .; then
+                find . -maxdepth 1 -name "$pattern" -exec cp -f {} ./firmware/ \;
                 FILES_FOUND=1
               fi
             done
             
             # 如果没有找到标准固件文件，尝试复制所有非清单文件
-            if [ \$FILES_FOUND -eq 0 ]; then
-              echo '未找到标准固件文件，尝试复制所有可能的文件...'
-              find . -maxdepth 1 -type f -not -name '*.manifest' -not -name '*.txt' -not -name '*.json' \
-                -not -name '*.buildinfo' -exec cp -f {} ./firmware/ \;
+            if [ $FILES_FOUND -eq 0 ]; then
+              echo "未找到标准固件文件，尝试复制所有可能的文件..."
+              find . -maxdepth 1 -type f -not -name "*.manifest" -not -name "*.txt" -not -name "*.json" \
+                -not -name "*.buildinfo" -exec cp -f {} ./firmware/ \;
             fi
             
             # 复制配置文件
-            if [ -f '/workdir/openwrt/.config' ]; then
+            if [ -f "/workdir/openwrt/.config" ]; then
               cp -f /workdir/openwrt/.config ./firmware/config.txt
             fi
             
             # 检查是否成功复制了任何文件
-            if [ -n \"\$(ls -A firmware)\" ]; then
-              echo \"成功复制固件文件到 \$TARGET_DIR/firmware\"
-              echo \"固件内容:\"
+            if [ -n "$(ls -A firmware)" ]; then
+              echo "成功复制固件文件到 $TARGET_DIR/firmware"
+              echo "固件内容:"
               ls -lh firmware/
               
-              echo \"FIRMWARE=\$TARGET_DIR/firmware\" > /workdir/firmware_path.env
-              echo \"status=success\" > /workdir/organize_status.env
+              echo "FIRMWARE=$TARGET_DIR/firmware" > /workdir/firmware_path.env
+              echo "status=success" > /workdir/organize_status.env
               break
             else
-              echo \"警告: \$TARGET_DIR 中未找到可用固件文件\"
+              echo "警告: $TARGET_DIR 中未找到可用固件文件"
             fi
           done
           
           # 如果没有找到任何固件文件，使用紧急备用方法
-          if [ ! -f '/workdir/firmware_path.env' ]; then
-            echo '警告：未能在任何目标目录中找到固件文件，使用紧急备用方法'
-            BACKUP_DIR='/workdir/openwrt/bin/targets/generic/backup_firmware'
-            mkdir -p \"\$BACKUP_DIR/firmware\"
+          if [ ! -f "/workdir/firmware_path.env" ]; then
+            echo "警告：未能在任何目标目录中找到固件文件，使用紧急备用方法"
+            BACKUP_DIR="/workdir/openwrt/bin/targets/generic/backup_firmware"
+            mkdir -p "$BACKUP_DIR/firmware"
             
             # 复制所有bin目录下的非包文件
-            find /workdir/openwrt/bin -type f -not -path '*/packages/*' -exec cp -f {} \"\$BACKUP_DIR/firmware/\" \;
+            find /workdir/openwrt/bin -type f -not -path "*/packages/*" -exec cp -f {} "$BACKUP_DIR/firmware/" \;
             
             # 确保至少有一个配置文件
-            if [ -f '/workdir/openwrt/.config' ]; then
-              cp -f /workdir/openwrt/.config \"\$BACKUP_DIR/firmware/config.txt\"
+            if [ -f "/workdir/openwrt/.config" ]; then
+              cp -f /workdir/openwrt/.config "$BACKUP_DIR/firmware/config.txt"
             else
-              echo '# 紧急备用配置' > \"\$BACKUP_DIR/firmware/config.txt\"
+              echo "# 紧急备用配置" > "$BACKUP_DIR/firmware/config.txt"
             fi
             
-            echo \"FIRMWARE=\$BACKUP_DIR/firmware\" > /workdir/firmware_path.env
-            echo \"status=success\" > /workdir/organize_status.env
+            echo "FIRMWARE=$BACKUP_DIR/firmware" > /workdir/firmware_path.env
+            echo "status=success" > /workdir/organize_status.env
           fi
           
           # 创建固件压缩包
-          if [ -f '/workdir/firmware_path.env' ]; then
+          if [ -f "/workdir/firmware_path.env" ]; then
             source /workdir/firmware_path.env
-            cd \$(dirname \"\$FIRMWARE\")
-            zip -r firmware.zip \$(basename \"\$FIRMWARE\")
-            echo \"FIRMWARE_ZIP=\$(dirname \"\$FIRMWARE\")/firmware.zip\" >> /workdir/firmware_path.env
-          fi"
+            cd $(dirname "$FIRMWARE")
+            zip -r firmware.zip $(basename "$FIRMWARE")
+            echo "FIRMWARE_ZIP=$(dirname "$FIRMWARE")/firmware.zip" >> /workdir/firmware_path.env
+          fi
+        '
         
         # 读取环境变量
         if [ -f "${{ env.DOCKER_WORK_DIR }}/firmware_path.env" ]; then
