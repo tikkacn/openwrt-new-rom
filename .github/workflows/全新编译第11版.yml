@@ -363,40 +363,42 @@ jobs:
     - name: 下载软件包
       run: |
         # 在Docker容器中执行下载
-        docker run --rm -v $GITHUB_WORKSPACE:/src -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "cd /workdir/openwrt && \
-          cat > download_with_retry.sh << 'EOFINNER'
+        docker run --rm -v $GITHUB_WORKSPACE:/src -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c '
+          cd /workdir/openwrt
+          cat > download_with_retry.sh << "EOF"
 #!/bin/bash
 set -e
 MAX_RETRIES=3
 RETRY_WAIT=10
 
 retries=0
-until [ \$retries -ge \$MAX_RETRIES ]
+until [ $retries -ge $MAX_RETRIES ]
 do
-  echo \"尝试下载，第 \$((retries+1)) 次，共 \$MAX_RETRIES 次...\"
-  if make download -j8 2>&1 | tee download_attempt_\$retries.log; then
-    echo \"下载成功！\"
+  echo "尝试下载，第 $((retries+1)) 次，共 $MAX_RETRIES 次..."
+  if make download -j8 2>&1 | tee download_attempt_$retries.log; then
+    echo "下载成功!"
     exit 0
   fi
-  retries=\$((retries+1))
-  if [ \$retries -lt \$MAX_RETRIES ]; then
-    echo \"下载失败，等待 \$RETRY_WAIT 秒后重试...\"
-    sleep \$RETRY_WAIT
+  retries=$((retries+1))
+  if [ $retries -lt $MAX_RETRIES ]; then
+    echo "下载失败，等待 $RETRY_WAIT 秒后重试..."
+    sleep $RETRY_WAIT
   fi
 done
 
-echo \"达到最大重试次数，保存日志以分析失败的包...\"
+echo "达到最大重试次数，保存日志以分析失败的包..."
 # 保存最后一次尝试的日志
 mkdir -p logs
-cp download_attempt_\$((\$retries-1)).log logs/download_failures.log
+cp download_attempt_$(($retries-1)).log logs/download_failures.log
 exit 1
-EOFINNER
-          chmod +x download_with_retry.sh && \
-          ./download_with_retry.sh || make download -j1 V=s && \
-          mkdir -p ${{ env.CCACHE_DIR }} && \
-          export CCACHE_DIR=${{ env.CCACHE_DIR }} && \
-          ccache -o max_size=2G && \
-          ccache -z"
+EOF
+          chmod +x download_with_retry.sh
+          ./download_with_retry.sh || make download -j1 V=s
+          mkdir -p ${{ env.CCACHE_DIR }}
+          export CCACHE_DIR=${{ env.CCACHE_DIR }}
+          ccache -o max_size=2G
+          ccache -z
+        '
         
         # 检查下载目录大小
         echo "下载目录大小: $(du -sh ${{ env.DL_DIR }} 2>/dev/null | cut -f1 || echo '目录可能不存在')"
