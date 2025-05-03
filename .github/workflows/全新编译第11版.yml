@@ -1,4 +1,136 @@
-name: 全新编译Docker第11版(优化版)
+- name: 智能编译固件docker版11版本
+      id: compile
+      run: |
+        # 在Docker容器中执行编译
+        docker run --rm -v $GITHUB_WORKSPACE:/src -v ${{ env.DOCKER_WORK_DIR }}:/workdir \
+          -e CCACHE_DIR=${{ env.CCACHE_DIR }} \
+          -e PATH="/usr/lib/ccache:$PATH" \
+          openwrt-builder bash -c "cd /workdir/openwrt && \
+          export BUILD_MODE=${{ env.BUILD_MODE }} && \
+          echo \"编译模式: \$BUILD_MODE\" && \
+          
+          # 定义函数
+          cleanup_temp_files() {
+            echo \"清理临时文件以释放空间...\"
+            find /tmp -type f -delete || true
+            df -h
+          } 
+          
+          save_cache_info() {
+            echo \"保存缓存状态信息...\"
+            mkdir -p ${{ env.BUILD_STATE_DIR }}
+            cp .config ${{ env.BUILD_STATE_DIR }}/config.txt
+            echo \"\$TOOLCHAIN_CONFIG_MD5\" > ${{ env.BUILD_STATE_DIR }}/toolchain.md5
+            echo \"\$PACKAGE_CONFIG_MD5\" > ${{ env.BUILD_STATE_DIR }}/package.md5
+            echo \"保存构建状态完成\"
+          }
+          
+          # 仅提取目标架构相关配置计算哈希值
+          TOOLCHAIN_CONFIG=\$(grep \"^CONFIG_TARGET\" .config | sort)
+          TOOLCHAIN_CONFIG_MD5=\$(echo \"\$TOOLCHAIN_CONFIG\" | md5sum | awk '{print \$1}')
+          PREVIOUS_TOOLCHAIN_MD5=\$(cat ${{ env.BUILD_STATE_DIR }}/toolchain.md5 2>/dev/null || echo \"\")
+          
+          # 仅提取包配置计算哈希值
+          PACKAGE_CONFIG=\$(grep \"^CONFIG_PACKAGE\" .config | sort)
+          PACKAGE_CONFIG_MD5=\$(echo \"\$PACKAGE_CONFIG\" | md5sum | awk '{print \$1}')
+          PREVIOUS_PACKAGE_MD5=\$(cat ${{ env.BUILD_STATE_DIR }}/package.md5 2>/dev/null || echo \"\")
+          
+          # 根据编译模式执行不同的编译流程
+          case \"\$BUILD_MODE\" in
+            full)
+              echo \"执行完全编译流程...\"
+              make clean
+              # 编译工具链
+              echo \"编译工具链...\"
+              make -j\$(nproc) tools/compile V=s || make -j1 V=s tools/compile
+              make -j\$(nproc) toolchain/compile V=s || make -j1 V=s toolchain/compile
+              # 编译完整固件
+              echo \"编译完整固件...\"
+              if ! make -j\$(nproc) V=s; then
+                make -j1 V=s
+              fi
+              ;;
+            
+            packages)
+              echo \"执行包编译流程...\"
+              # 不清理工具链，只清理包
+              make package/clean V=s || make -j1 V=s package/clean
+              # 编译软件包
+              echo \"编译软件包...\"
+              if ! make -j\$(nproc) package/compile V=s; then
+                make -j1 V=s package/compile
+              fi
+              # 创建包索引
+              echo \"创建包索引...\"
+              make -j\$(nproc) package/index V=s || make -j1 V=s package/index
+              # 生成固件
+              echo \"生成固件镜像...\"
+              make -j\$(nproc) target/install V=s || make -j1 V=s target/install
+              ;;
+            
+            incremental)
+              echo \"执行真正的增量编译流程...\"
+              # 只编译已经变化的文件，并生成新固件
+              # 首先，标记所有需要重新构建的包
+              find \$(grep ^CONFIG_PACKAGE .config | grep =y | sed -e 's/CONFIG_PACKAGE_\\([^=]*\\)=y/\\1/' | xargs -n1 -i find package -name {}) -type f -name Makefile | xargs touch
+              # 使用增量编译模式
+              if ! make -j\$(nproc) V=s; then
+                make -j1 V=s
+              fi
+              ;;
+            
+            *)
+              echo \"未知的编译模式，默认执行完全编译...\"
+              if ! make -j\$(nproc) V=s; then
+                make -j1 V=s
+              fi
+              ;;
+          esac
+          
+          # 无论编译结果如何，都确保执行固件生成步骤
+          echo \"确保执行固件生成步骤，无论前面编译是否成功...\"
+          make -j\$(nproc) target/install V=s || make -j1 V=s target/install
+          
+          # 保存缓存信息
+          save_cache_info
+          
+          # 显示CCACHE统计信息
+          ccache -s
+          
+          # 检查固件生成结果
+          echo \"检查固件生成结果:\"
+          find bin/targets -type f -name \"*.bin\" -o -name \"*combined*\" -o -name \"*sysupgrade*\" | xargs ls -lh || echo \"没有找到固件文件！\"
+          
+          # 设置设备名称环境变量
+          DEVICE_NAME=_\$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\\1/' | tr '\\n' '_')
+          echo \"DEVICE_NAME=\$DEVICE_NAME\" > /workdir/device_name.env
+          
+          # 设置文件日期环境变量
+          FILE_DATE=_\$(date +\"%Y%m%d%H%M\")
+          echo \"FILE_DATE=\$FILE_DATE\" > /workdir/file_date.env
+          
+          echo \"status=success\" > /workdir/compile_status.env"
+        
+        # 读取环境变量
+        if [ -f "${{ env.DOCKER_WORK_DIR }}/device_name.env" ]; then
+          source ${{ env.DOCKER_WORK_DIR }}/device_name.env
+          echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_ENV
+        fi
+        
+        if [ -f "${{ env.DOCKER_WORK_DIR }}/file_date.env" ]; then
+          source ${{ env.DOCKER_WORK_DIR }}/file_date.env
+          echo "FILE_DATE=$FILE_DATE" >> $GITHUB_ENV
+        fi
+        
+        if [ -f "${{ env.DOCKER_WORK_DIR }}/compile_status.env" ]; then
+          source ${{ env.DOCKER_WORK_DIR }}/compile_status.env
+          echo "status=$status" >> $GITHUB_OUTPUT
+        else
+          echo "status=failure" >> $GITHUB_OUTPUT
+        fi
+        
+        # 显示编译后的磁盘使用情况
+        df -hname: 全新编译Docker版(优化版)
 
 on:
   workflow_dispatch:
@@ -240,8 +372,7 @@ jobs:
     - name: 克隆源代码并配置
       run: |
         # 在Docker容器中执行克隆操作
-        docker run --rm -v $GITHUB_WORKSPACE:/src -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "\
-          git clone --depth 1 $REPO_URL -b $REPO_BRANCH /workdir/openwrt && \
+        docker run --rm -v $GITHUB_WORKSPACE:/src -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "git clone --depth 1 $REPO_URL -b $REPO_BRANCH /workdir/openwrt && \
           cd /workdir/openwrt && \
           rm -rf .git && \
           mkdir -p ${{ env.TOOLCHAIN_DIR }} ${{ env.DL_DIR }} ${{ env.BUILD_STATE_DIR }} ${{ env.STAMP_DIR }}"
@@ -252,8 +383,7 @@ jobs:
         cp $GITHUB_WORKSPACE/$DIY_P2_SH ${{ env.DOCKER_WORK_DIR }}/
         
         # 下载feeds配置
-        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "\
-          cd /workdir/openwrt && \
+        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "cd /workdir/openwrt && \
           curl -L -o feeds.conf.default '$FEEDS_CONF_URL' || echo '警告：无法下载feeds配置，使用默认配置'"
         
         echo "检查缓存恢复状态："
@@ -272,8 +402,7 @@ jobs:
     - name: 配置编译环境
       run: |
         # 在Docker容器中执行配置
-        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "\
-          cd /workdir/openwrt && \
+        docker run --rm -v $GITHUB_WORKSPACE:/src -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "cd /workdir/openwrt && \
           # 运行自定义脚本
           bash /workdir/diy-part1.sh && \
           # 更新并安装feeds
@@ -312,8 +441,7 @@ jobs:
           make defconfig"
         
         # 显示最终配置
-        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "\
-          cd /workdir/openwrt && \
+        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "cd /workdir/openwrt && \
           echo '最终配置中的镜像生成选项:' && \
           grep -E 'CONFIG_TARGET_ROOTFS|CONFIG_TARGET_IMAGES|CONFIG_GRUB|CONFIG_ISO|CONFIG_EFI' .config || echo '未找到镜像相关配置'"
 
@@ -321,44 +449,44 @@ jobs:
       id: check-changes
       run: |
         # 在Docker容器中执行检查
-        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "\
-          cd /workdir/openwrt && \
+        docker run --rm -v $GITHUB_WORKSPACE:/src -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "cd /workdir/openwrt && \
           mkdir -p ${{ env.BUILD_STATE_DIR }} && \
-          # 检查feeds变化
           find feeds -type f -name 'Makefile' -exec sha256sum {} \; | sort | sha256sum > ${{ env.BUILD_STATE_DIR }}/feeds.sha256 && \
           CURRENT_FEEDS_HASH=\$(cat ${{ env.BUILD_STATE_DIR }}/feeds.sha256 | awk '{print \$1}') && \
           PREVIOUS_FEEDS_HASH=\$(cat ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256 2>/dev/null | awk '{print \$1}' || echo '') && \
           echo '当前 feeds 哈希: '\$CURRENT_FEEDS_HASH && \
           echo '之前 feeds 哈希: '\$PREVIOUS_FEEDS_HASH && \
-          # 检查配置文件变化
           CURRENT_CONFIG_MD5=\$(md5sum .config | awk '{print \$1}') && \
           PREVIOUS_CONFIG_MD5=\$(cat ${{ env.BUILD_STATE_DIR }}/config.md5 2>/dev/null || echo '') && \
           echo '当前配置文件MD5: '\$CURRENT_CONFIG_MD5 && \
           echo '之前配置文件MD5: '\$PREVIOUS_CONFIG_MD5 && \
-          # 确定编译方式
           if [ '${{ github.event.inputs.clean_build }}' = 'true' ]; then \
             echo '强制完全重新编译' && \
             echo 'BUILD_MODE=full' > ${{ env.BUILD_STATE_DIR }}/build_mode.env; \
           elif [ '${{ steps.cache-host-tools.outputs.cache-hit }}' != 'true' ]; then \
             echo '未找到主机工具链缓存，需要完全编译' && \
             echo 'BUILD_MODE=full' > ${{ env.BUILD_STATE_DIR }}/build_mode.env; \
-          elif [ '\$CURRENT_FEEDS_HASH' != '\$PREVIOUS_FEEDS_HASH' ]; then \
+          elif [ \"\$CURRENT_FEEDS_HASH\" != \"\$PREVIOUS_FEEDS_HASH\" ]; then \
             echo 'feeds 已变更，需要重新编译' && \
             echo 'BUILD_MODE=packages' > ${{ env.BUILD_STATE_DIR }}/build_mode.env; \
-          elif [ '\$CURRENT_CONFIG_MD5' != '\$PREVIOUS_CONFIG_MD5' ]; then \
+          elif [ \"\$CURRENT_CONFIG_MD5\" != \"\$PREVIOUS_CONFIG_MD5\" ]; then \
             echo '配置已变更，需要重新编译包' && \
             echo 'BUILD_MODE=packages' > ${{ env.BUILD_STATE_DIR }}/build_mode.env; \
           else \
             echo '配置和源码均未变更，执行最小增量编译' && \
             echo 'BUILD_MODE=incremental' > ${{ env.BUILD_STATE_DIR }}/build_mode.env; \
           fi && \
-          # 保存当前哈希值供下次比较
           cp ${{ env.BUILD_STATE_DIR }}/feeds.sha256 ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256 && \
           echo \"\$CURRENT_CONFIG_MD5\" > ${{ env.BUILD_STATE_DIR }}/config.md5"
         
         # 读取编译模式
-        BUILD_MODE=$(cat ${{ env.BUILD_STATE_DIR }}/build_mode.env | cut -d '=' -f2)
-        echo "BUILD_MODE=$BUILD_MODE" >> $GITHUB_ENV
+        if [ -f "${{ env.BUILD_STATE_DIR }}/build_mode.env" ]; then
+          BUILD_MODE=$(cat ${{ env.BUILD_STATE_DIR }}/build_mode.env | cut -d '=' -f2)
+          echo "BUILD_MODE=$BUILD_MODE" >> $GITHUB_ENV
+        else
+          echo "BUILD_MODE=full" >> $GITHUB_ENV
+          echo "警告：未能读取编译模式，默认使用完全编译"
+        fi
 
     - name: 开启SSH调试
       uses: mxschmitt/action-tmate@v3
@@ -367,48 +495,43 @@ jobs:
     - name: 下载软件包
       run: |
         # 在Docker容器中执行下载
-        docker run --rm -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "\
-          cd /workdir/openwrt && \
-          # 创建下载重试脚本
-          cat > download_with_retry.sh << 'EOF'
-        #!/bin/bash
-        set -e
-        MAX_RETRIES=3
-        RETRY_WAIT=10
-        
-        retries=0
-        until [ \$retries -ge \$MAX_RETRIES ]
-        do
-          echo \"尝试下载，第 \$((retries+1)) 次，共 \$MAX_RETRIES 次...\"
-          if make download -j8 2>&1 | tee download_attempt_\$retries.log; then
-            echo \"下载成功！\"
-            exit 0
-          fi
-          retries=\$((retries+1))
-          if [ \$retries -lt \$MAX_RETRIES ]; then
-            echo \"下载失败，等待 \$RETRY_WAIT 秒后重试...\"
-            sleep \$RETRY_WAIT
-          fi
-        done
-        
-        echo \"达到最大重试次数，保存日志以分析失败的包...\"
-        # 保存最后一次尝试的日志
-        mkdir -p logs
-        cp download_attempt_\$((\$retries-1)).log logs/download_failures.log
-        exit 1
-        EOF
-          && \
+        docker run --rm -v $GITHUB_WORKSPACE:/src -v ${{ env.DOCKER_WORK_DIR }}:/workdir openwrt-builder bash -c "cd /workdir/openwrt && \
+          cat > download_with_retry.sh << 'EOFINNER'
+#!/bin/bash
+set -e
+MAX_RETRIES=3
+RETRY_WAIT=10
+
+retries=0
+until [ \$retries -ge \$MAX_RETRIES ]
+do
+  echo \"尝试下载，第 \$((retries+1)) 次，共 \$MAX_RETRIES 次...\"
+  if make download -j8 2>&1 | tee download_attempt_\$retries.log; then
+    echo \"下载成功！\"
+    exit 0
+  fi
+  retries=\$((retries+1))
+  if [ \$retries -lt \$MAX_RETRIES ]; then
+    echo \"下载失败，等待 \$RETRY_WAIT 秒后重试...\"
+    sleep \$RETRY_WAIT
+  fi
+done
+
+echo \"达到最大重试次数，保存日志以分析失败的包...\"
+# 保存最后一次尝试的日志
+mkdir -p logs
+cp download_attempt_\$((\$retries-1)).log logs/download_failures.log
+exit 1
+EOFINNER
           chmod +x download_with_retry.sh && \
-          # 使用重试脚本进行下载
           ./download_with_retry.sh || make download -j1 V=s && \
-          # 设置CCACHE
           mkdir -p ${{ env.CCACHE_DIR }} && \
           export CCACHE_DIR=${{ env.CCACHE_DIR }} && \
           ccache -o max_size=2G && \
           ccache -z"
         
         # 检查下载目录大小
-        echo "下载目录大小: $(du -sh ${{ env.DL_DIR }} | cut -f1)"
+        echo "下载目录大小: $(du -sh ${{ env.DL_DIR }} 2>/dev/null | cut -f1 || echo '目录可能不存在')"
 
     - name: 智能编译固件
       id: compile
