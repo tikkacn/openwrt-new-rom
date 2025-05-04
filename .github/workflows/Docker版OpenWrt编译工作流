@@ -1,0 +1,492 @@
+name: Docker版OpenWrt编译工作流
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH调试'
+        required: false
+        default: 'false'
+      clean_build:
+        description: '完全重新编译'
+        required: false
+        default: 'false'
+      config_file:
+        description: '配置文件'
+        required: false
+        default: '增量缓存优化.config'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF_URL: https://github.com/tikkacn/openwrt-new-rom/raw/main/feeds.conf.default
+  CONFIG_FILE: ${{ github.event.inputs.config_file || '增量缓存优化.config' }}
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+  DOCKER_BUILDER_IMAGE: openwrt-builder:latest
+  DOCKER_BUILDX_CACHE: /tmp/.buildx-cache
+  # 缓存目录环境变量
+  SOURCE_DIR: /workdir/openwrt
+  CACHE_DIR: /workdir/cache
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@main
+
+    - name: 优化磁盘空间
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 20480
+        swap-size-mb: 5120
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+        build-mount-path: '/workdir'
+
+    - name: 额外清理磁盘空间并检查
+      run: |
+        echo "清理额外磁盘空间..."
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+        sudo rm -rf /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL
+        docker image prune -a -f || true
+        docker system prune -af || true
+        sudo apt-get clean
+        sudo apt-get autoremove -y
+        ROOT_AVAIL=$(df -m /dev/root | tail -1 | awk '{print $4}')
+        echo "根分区可用空间: ${ROOT_AVAIL}MB"
+        df -h
+
+    - name: 创建缓存目录
+      run: |
+        mkdir -p /workdir/openwrt
+        mkdir -p /workdir/cache
+        mkdir -p ${{ env.DOCKER_BUILDX_CACHE }}
+        chmod -R 777 /workdir
+
+    # 准备DIY脚本
+    - name: 准备自定义脚本
+      run: |
+        echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
+        echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
+        chmod +x $GITHUB_WORKSPACE/diy-part1.sh
+        
+        echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
+        echo 'sed -i "s/OpenWrt /OpenWrt_Docker_AutoBuild /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
+        chmod +x $GITHUB_WORKSPACE/diy-part2.sh
+        
+        # 检查配置文件是否存在
+        if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+          echo "警告：配置文件 $CONFIG_FILE 不存在，创建默认配置文件"
+          echo "# 创建默认的最小化配置文件" > $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_TARGET_x86=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_TARGET_x86_64=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
+        fi
+
+    # 设置Docker BuildX
+    - name: 设置Docker BuildX
+      uses: docker/setup-buildx-action@v2
+
+    # 恢复Docker层缓存
+    - name: 恢复Docker缓存
+      uses: actions/cache@v3
+      id: cache-docker
+      with:
+        path: ${{ env.DOCKER_BUILDX_CACHE }}
+        key: docker-buildx-${{ runner.os }}-${{ hashFiles('Dockerfile') || github.run_id }}
+        restore-keys: |
+          docker-buildx-${{ runner.os }}-
+        
+    # 恢复OpenWrt编译缓存
+    - name: 恢复编译缓存
+      uses: actions/cache@v3
+      id: cache-openwrt
+      if: github.event.inputs.clean_build != 'true'
+      with:
+        path: /workdir/cache
+        key: openwrt-cache-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}', env.CONFIG_FILE)) || github.run_id }}
+        restore-keys: |
+          openwrt-cache-${{ env.REPO_BRANCH }}-
+
+    # 创建Dockerfile
+    - name: 创建Dockerfile
+      run: |
+        cat > Dockerfile << 'EOF'
+        FROM ubuntu:22.04
+        
+        ENV DEBIAN_FRONTEND=noninteractive
+        ENV TZ=Asia/Shanghai
+        
+        # 安装编译所需的软件包
+        RUN apt-get update && apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib \
+            g++-multilib gettext genisoimage git gperf haveged help2man intltool \
+            libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
+            libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full \
+            patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync \
+            scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget \
+            xmlto xxd zlib1g-dev \
+            && apt-get clean \
+            && rm -rf /var/lib/apt/lists/* \
+            && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+        
+        # 设置工作目录
+        WORKDIR /openwrt
+        
+        # 设置缓存目录
+        RUN mkdir -p /cache
+        
+        # 设置卷挂载点
+        VOLUME ["/openwrt", "/cache"]
+        
+        # 设置环境变量
+        ENV PATH="/usr/lib/ccache:$PATH"
+        ENV FORCE_UNSAFE_CONFIGURE=1
+        ENV CCACHE_DIR=/cache/ccache
+        
+        # 默认命令
+        CMD ["/bin/bash"]
+        EOF
+
+    # 构建Docker镜像
+    - name: 构建Docker镜像
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: false
+        load: true
+        tags: ${{ env.DOCKER_BUILDER_IMAGE }}
+        cache-from: type=local,src=${{ env.DOCKER_BUILDX_CACHE }}
+        cache-to: type=local,dest=${{ env.DOCKER_BUILDX_CACHE }}-new
+        build-args: |
+          DEBIAN_FRONTEND=noninteractive
+
+    # 移动缓存以防止无限增长
+    - name: 移动缓存
+      run: |
+        rm -rf ${{ env.DOCKER_BUILDX_CACHE }}
+        mv ${{ env.DOCKER_BUILDX_CACHE }}-new ${{ env.DOCKER_BUILDX_CACHE }}
+
+    # 克隆OpenWrt源码
+    - name: 克隆源代码
+      run: |
+        cd /workdir
+        
+        # 如果目录中已经有源码且不是完全重新编译，则跳过克隆
+        if [ -d "openwrt/.git" ] && [ "${{ github.event.inputs.clean_build }}" != "true" ]; then
+          echo "源码目录已存在，跳过克隆"
+        else
+          echo "克隆OpenWrt源码..."
+          rm -rf openwrt
+          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        fi
+        
+        # 确保脚本可执行
+        cd openwrt
+        find . -type f -name "*.sh" -exec chmod +x {} \;
+        
+        # 获取feeds配置
+        curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "警告：无法下载 feeds.conf.default，使用仓库默认配置"
+        cat feeds.conf.default
+        
+        # 复制DIY脚本到OpenWrt目录
+        cp $GITHUB_WORKSPACE/$DIY_P1_SH ./
+        cp $GITHUB_WORKSPACE/$DIY_P2_SH ./
+        
+        # 复制配置文件
+        cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
+        
+        # 创建缓存目录
+        mkdir -p /workdir/cache/dl
+        mkdir -p /workdir/cache/ccache
+        mkdir -p /workdir/cache/staging_dir
+        mkdir -p /workdir/cache/build_dir
+        mkdir -p /workdir/cache/bin
+        
+        # 创建日志目录
+        mkdir -p logs
+
+    # 检查缓存状态
+    - name: 检查缓存状态
+      run: |
+        echo "CONFIG_FILE: $CONFIG_FILE"
+        echo "缓存目录内容:"
+        ls -la /workdir/cache/
+        
+        echo "缓存大小:"
+        du -sh /workdir/cache/* 2>/dev/null || echo "缓存为空"
+        
+        # 配置ccache
+        mkdir -p /workdir/cache/ccache
+        docker run --rm -v /workdir/cache/ccache:/cache/ccache $DOCKER_BUILDER_IMAGE sh -c 'ccache -o cache_dir=/cache/ccache && ccache -o max_size=10G && ccache -z'
+
+    # 运行主要编译流程
+    - name: OpenWrt编译流程
+      id: compile
+      run: |
+        # 创建启动脚本
+        cat > /workdir/build-openwrt.sh << 'EOF'
+        #!/bin/bash
+        
+        set -e
+        
+        echo "配置编译环境..."
+        
+        # 创建必要的软链接
+        if [ ! -e "/openwrt/dl" ] && [ -d "/cache/dl" ]; then
+          ln -sf /cache/dl /openwrt/dl
+        else
+          mkdir -p /openwrt/dl
+          mkdir -p /cache/dl
+          rsync -a /openwrt/dl/ /cache/dl/ || true
+          rm -rf /openwrt/dl
+          ln -sf /cache/dl /openwrt/dl
+        fi
+        
+        # 复制缓存的staging_dir和build_dir（如果存在）
+        if [ -d "/cache/staging_dir" ]; then
+          echo "复制缓存的staging_dir..."
+          mkdir -p /openwrt/staging_dir
+          cp -rf /cache/staging_dir/* /openwrt/staging_dir/ || true
+        fi
+        
+        if [ -d "/cache/build_dir" ]; then
+          echo "复制缓存的build_dir..."
+          mkdir -p /openwrt/build_dir
+          cp -rf /cache/build_dir/* /openwrt/build_dir/ || true
+        fi
+        
+        # 设置ccache
+        export CCACHE_DIR=/cache/ccache
+        ccache -o cache_dir=/cache/ccache
+        ccache -o max_size=10G
+        ccache -z
+        
+        # 显示当前配置
+        cd /openwrt
+        cp .config .config.orig
+        
+        # 更新feeds
+        echo "更新feeds..."
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+        # 运行定制脚本
+        if [ -f "./diy-part1.sh" ]; then
+          echo "运行diy-part1.sh..."
+          chmod +x ./diy-part1.sh
+          ./diy-part1.sh
+        fi
+        
+        # 二次运行feeds确保所有内容都被安装
+        ./scripts/feeds update -i
+        ./scripts/feeds install -a
+        
+        # 运行第二个定制脚本
+        if [ -f "./diy-part2.sh" ]; then
+          echo "运行diy-part2.sh..."
+          chmod +x ./diy-part2.sh
+          ./diy-part2.sh
+        fi
+        
+        # 添加关键固件配置
+        echo "确保包含必要的固件生成配置..."
+        if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then
+          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
+        fi
+        
+        if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then
+          echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
+        fi
+        
+        if ! grep -q "CONFIG_TARGET_ROOTFS_TARGZ=y" .config; then
+          echo "CONFIG_TARGET_ROOTFS_TARGZ=y" >> .config
+        fi
+        
+        # 对于x86平台增加额外的镜像配置
+        if grep -q "CONFIG_TARGET_x86=y" .config; then
+          if ! grep -q "CONFIG_GRUB_IMAGES=y" .config; then
+            echo "CONFIG_GRUB_IMAGES=y" >> .config
+          fi
+          
+          if ! grep -q "CONFIG_TARGET_IMAGES_PAD=y" .config; then
+            echo "CONFIG_TARGET_IMAGES_PAD=y" >> .config
+          fi
+        fi
+        
+        # 增加额外缓存相关配置
+        echo "CONFIG_AUTOREMOVE=n" >> .config
+        echo "CONFIG_AUTOREBUILD=n" >> .config
+        echo "CONFIG_CCACHE=y" >> .config
+        
+        # 生成最终的.config
+        make defconfig
+        
+        # 下载所有依赖
+        echo "下载依赖包..."
+        make download -j8 || make download -j1 V=s
+        
+        # 对下载的包进行有效性检查
+        find dl -size -1024c -exec rm -f {} \;
+        
+        # 编译工具链和固件
+        echo "开始编译..."
+        make -j$(($(nproc) + 1)) || make -j1 V=s
+        
+        # 如果未生成固件，尝试强制生成
+        if [ ! -d "bin/targets" ] || [ -z "$(find bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz")" ]; then
+          echo "未找到固件，尝试强制生成..."
+          make -j1 V=s target/install
+        fi
+        
+        # 保存编译结果到缓存
+        echo "保存编译结果到缓存..."
+        mkdir -p /cache/staging_dir
+        mkdir -p /cache/build_dir
+        mkdir -p /cache/bin
+        
+        # 保存重要的编译缓存
+        cp -rf /openwrt/staging_dir/* /cache/staging_dir/ || true
+        cp -rf /openwrt/build_dir/* /cache/build_dir/ || true
+        cp -rf /openwrt/bin/* /cache/bin/ || true
+        
+        # 显示ccache统计
+        ccache -s
+        
+        echo "编译完成!"
+        EOF
+        
+        chmod +x /workdir/build-openwrt.sh
+        
+        # 运行Docker容器执行编译
+        echo "启动Docker容器执行编译..."
+        docker run --rm \
+          -v /workdir/openwrt:/openwrt \
+          -v /workdir/cache:/cache \
+          -v /workdir/build-openwrt.sh:/build-openwrt.sh \
+          -e FORCE_UNSAFE_CONFIGURE=1 \
+          $DOCKER_BUILDER_IMAGE /build-openwrt.sh
+        
+        # 检查是否成功编译出固件
+        if [ -d "/workdir/openwrt/bin/targets" ]; then
+          find /workdir/openwrt/bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | wc -l
+          if [ "$(find /workdir/openwrt/bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | wc -l)" -gt 0 ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "找到固件文件!"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "未找到固件文件，编译可能失败!"
+          fi
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "未找到targets目录，编译失败!"
+        fi
+        
+        # 设置设备名称和文件日期
+        cd /workdir/openwrt
+        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    # 检查OpenWrt编译结果
+    - name: 检查编译结果
+      run: |
+        echo "编译结果:"
+        find /workdir/openwrt/bin/targets -type f | sort
+        echo "固件文件:"
+        find /workdir/openwrt/bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | xargs ls -lh || echo "未找到固件文件"
+
+    # 开启SSH调试（如需要）
+    - name: 开启SSH调试
+      uses: mxschmitt/action-tmate@v3
+      if: github.event.inputs.ssh == 'true' || steps.compile.outputs.status != 'success'
+
+    # 整理固件文件
+    - name: 整理固件文件
+      id: organize
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd /workdir/openwrt/bin/targets
+        
+        # 查找所有目标目录
+        TARGET_DIRS=$(find . -mindepth 2 -maxdepth 2 -type d)
+        
+        for TARGET_DIR in $TARGET_DIRS; do
+          echo "处理目标目录: $TARGET_DIR"
+          
+          # 创建固件目录
+          mkdir -p $TARGET_DIR/firmware
+          
+          # 复制所有固件文件
+          find $TARGET_DIR -maxdepth 1 -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | xargs -I {} cp {} $TARGET_DIR/firmware/ || true
+          
+          # 复制配置文件
+          cp /workdir/openwrt/.config $TARGET_DIR/firmware/config.txt
+          
+          # 检查是否成功复制了文件
+          if [ -n "$(ls -A $TARGET_DIR/firmware)" ]; then
+            echo "FIRMWARE=$(pwd)/$TARGET_DIR/firmware" >> $GITHUB_ENV
+            echo "status=success" >> $GITHUB_OUTPUT
+            break
+          fi
+        done
+        
+        # 如果没有找到固件，创建通用目录
+        if [ -z "$FIRMWARE" ]; then
+          mkdir -p generic/generic/firmware
+          cp /workdir/openwrt/.config generic/generic/firmware/config.txt
+          # 查找所有可能的固件文件并复制
+          find . -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | xargs -I {} cp {} generic/generic/firmware/ || true
+          echo "FIRMWARE=$(pwd)/generic/generic/firmware" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+        fi
+
+    # 上传固件
+    - name: 上传固件目录
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    # 发布版本
+    - name: 生成发布标签
+      id: tag
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "## OpenWrt Docker构建固件 📦" > release.txt
+        echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
+        echo "📂 固件下载" >> release.txt
+        echo "⚠️ 请在刷机前先做好备份！" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件到Releases
+      uses: softprops/action-gh-release@v2
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: 删除旧的Releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
