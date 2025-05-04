@@ -1,4 +1,4 @@
-name: Docker版OpenWrt编译工作流第11版
+name: Docker版OpenWrt编译工作流
 
 on:
   workflow_dispatch:
@@ -26,11 +26,9 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  DOCKER_BUILDER_IMAGE: openwrt-builder:latest
-  DOCKER_BUILDX_CACHE: /tmp/.buildx-cache
   # 缓存目录环境变量
-  SOURCE_DIR: /workdir/openwrt
-  CACHE_DIR: /workdir/cache
+  WORKDIR: /workdir
+  BUILDER_CACHE: /tmp/.docker-cache
 
 jobs:
   build:
@@ -52,7 +50,7 @@ jobs:
         remove-docker-images: 'true'
         build-mount-path: '/workdir'
 
-    - name: 额外清理磁盘空间并检查
+    - name: 额外清理磁盘空间
       run: |
         echo "清理额外磁盘空间..."
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
@@ -61,18 +59,34 @@ jobs:
         docker system prune -af || true
         sudo apt-get clean
         sudo apt-get autoremove -y
-        ROOT_AVAIL=$(df -m /dev/root | tail -1 | awk '{print $4}')
-        echo "根分区可用空间: ${ROOT_AVAIL}MB"
         df -h
 
-    - name: 创建缓存目录
-      run: |
-        mkdir -p /workdir/openwrt
-        mkdir -p /workdir/cache
-        mkdir -p ${{ env.DOCKER_BUILDX_CACHE }}
-        chmod -R 777 /workdir
+    - name: 设置Docker BuildX
+      uses: docker/setup-buildx-action@v2
+      id: buildx
+      with:
+        install: true
 
-    # 准备DIY脚本
+    - name: 恢复Docker缓存
+      uses: actions/cache@v3
+      id: cache-docker
+      with:
+        path: ${{ env.BUILDER_CACHE }}
+        key: docker-buildx-${{ runner.os }}-${{ hashFiles('Dockerfile.*') }}
+        restore-keys: |
+          docker-buildx-${{ runner.os }}-
+
+    - name: 创建工作目录
+      run: |
+        mkdir -p ${{ env.WORKDIR }}/openwrt
+        mkdir -p ${{ env.WORKDIR }}/cache
+        mkdir -p ${{ env.WORKDIR }}/cache/dl
+        mkdir -p ${{ env.WORKDIR }}/cache/staging_dir
+        mkdir -p ${{ env.WORKDIR }}/cache/build_dir
+        mkdir -p ${{ env.WORKDIR }}/cache/ccache
+        mkdir -p ${{ env.BUILDER_CACHE }}
+        chmod -R 777 ${{ env.WORKDIR }}
+
     - name: 准备自定义脚本
       run: |
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
@@ -93,39 +107,14 @@ jobs:
           echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
         fi
 
-    # 设置Docker BuildX
-    - name: 设置Docker BuildX
-      uses: docker/setup-buildx-action@v2
-
-    # 恢复Docker层缓存
-    - name: 恢复Docker缓存
-      uses: actions/cache@v3
-      id: cache-docker
-      with:
-        path: ${{ env.DOCKER_BUILDX_CACHE }}
-        key: docker-buildx-${{ runner.os }}-${{ hashFiles('Dockerfile') || github.run_id }}
-        restore-keys: |
-          docker-buildx-${{ runner.os }}-
-        
-    # 恢复OpenWrt编译缓存
-    - name: 恢复编译缓存
-      uses: actions/cache@v3
-      id: cache-openwrt
-      if: github.event.inputs.clean_build != 'true'
-      with:
-        path: /workdir/cache
-        key: openwrt-cache-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}', env.CONFIG_FILE)) || github.run_id }}
-        restore-keys: |
-          openwrt-cache-${{ env.REPO_BRANCH }}-
-
-    # 创建Dockerfile
     - name: 创建Dockerfile
       run: |
-        cat > Dockerfile << 'EOF'
+        cat > Dockerfile.openwrt << 'EOF'
         FROM ubuntu:22.04
         
         ENV DEBIAN_FRONTEND=noninteractive
         ENV TZ=Asia/Shanghai
+        ENV FORCE_UNSAFE_CONFIGURE=1
         
         # 安装编译所需的软件包
         RUN apt-get update && apt-get install -y \
@@ -137,183 +126,148 @@ jobs:
             libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full \
             patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync \
             scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget \
-            xmlto xxd zlib1g-dev \
+            xmlto xxd zlib1g-dev xz-utils \
             && apt-get clean \
             && rm -rf /var/lib/apt/lists/* \
-            && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
-        
-        # 设置工作目录
-        WORKDIR /openwrt
-        
-        # 设置缓存目录
-        RUN mkdir -p /cache
+            && mkdir -p /openwrt /cache /cache/dl /cache/staging_dir /cache/build_dir /cache/ccache
         
         # 设置卷挂载点
         VOLUME ["/openwrt", "/cache"]
         
         # 设置环境变量
         ENV PATH="/usr/lib/ccache:$PATH"
-        ENV FORCE_UNSAFE_CONFIGURE=1
         ENV CCACHE_DIR=/cache/ccache
+        
+        # 设置工作目录
+        WORKDIR /openwrt
         
         # 默认命令
         CMD ["/bin/bash"]
         EOF
 
-    # 构建Docker镜像
     - name: 构建Docker镜像
       uses: docker/build-push-action@v4
       with:
         context: .
+        file: ./Dockerfile.openwrt
         push: false
         load: true
-        tags: ${{ env.DOCKER_BUILDER_IMAGE }}
-        cache-from: type=local,src=${{ env.DOCKER_BUILDX_CACHE }}
-        cache-to: type=local,dest=${{ env.DOCKER_BUILDX_CACHE }}-new
-        build-args: |
-          DEBIAN_FRONTEND=noninteractive
+        tags: openwrt-builder:latest
+        cache-from: type=local,src=${{ env.BUILDER_CACHE }}
+        cache-to: type=local,dest=${{ env.BUILDER_CACHE }}-new
 
-    # 移动缓存以防止无限增长
     - name: 移动缓存
       run: |
-        rm -rf ${{ env.DOCKER_BUILDX_CACHE }}
-        mv ${{ env.DOCKER_BUILDX_CACHE }}-new ${{ env.DOCKER_BUILDX_CACHE }}
+        rm -rf ${{ env.BUILDER_CACHE }}
+        mv ${{ env.BUILDER_CACHE }}-new ${{ env.BUILDER_CACHE }}
 
-    # 克隆OpenWrt源码
     - name: 克隆源代码
       run: |
-        cd /workdir
-        
-        # 如果目录中已经有源码且不是完全重新编译，则跳过克隆
-        if [ -d "openwrt/.git" ] && [ "${{ github.event.inputs.clean_build }}" != "true" ]; then
-          echo "源码目录已存在，跳过克隆"
-        else
-          echo "克隆OpenWrt源码..."
+        cd ${{ env.WORKDIR }}
+        if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
+          echo "完全重新编译，删除旧源码..."
           rm -rf openwrt
-          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         fi
         
-        # 确保脚本可执行
-        cd openwrt
-        find . -type f -name "*.sh" -exec chmod +x {} \;
+        if [ ! -d "openwrt/.git" ]; then
+          echo "克隆OpenWrt源码..."
+          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        else
+          echo "更新OpenWrt源码..."
+          cd openwrt
+          git pull
+        fi
         
-        # 获取feeds配置
-        curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "警告：无法下载 feeds.conf.default，使用仓库默认配置"
-        cat feeds.conf.default
+        # 复制配置文件到源码目录
+        cp $GITHUB_WORKSPACE/$CONFIG_FILE ${{ env.WORKDIR }}/openwrt/.config
         
-        # 复制DIY脚本到OpenWrt目录
-        cp $GITHUB_WORKSPACE/$DIY_P1_SH ./
-        cp $GITHUB_WORKSPACE/$DIY_P2_SH ./
-        
-        # 复制配置文件
-        cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
-        
-        # 创建缓存目录
-        mkdir -p /workdir/cache/dl
-        mkdir -p /workdir/cache/ccache
-        mkdir -p /workdir/cache/staging_dir
-        mkdir -p /workdir/cache/build_dir
-        mkdir -p /workdir/cache/bin
-        
-        # 创建日志目录
-        mkdir -p logs
+        # 复制DIY脚本到源码目录
+        cp $GITHUB_WORKSPACE/$DIY_P1_SH ${{ env.WORKDIR }}/openwrt/
+        cp $GITHUB_WORKSPACE/$DIY_P2_SH ${{ env.WORKDIR }}/openwrt/
 
-    # 检查缓存状态
-    - name: 检查缓存状态
-      run: |
-        echo "CONFIG_FILE: $CONFIG_FILE"
-        echo "缓存目录内容:"
-        ls -la /workdir/cache/
-        
-        echo "缓存大小:"
-        du -sh /workdir/cache/* 2>/dev/null || echo "缓存为空"
-        
-        # 配置ccache
-        mkdir -p /workdir/cache/ccache
-        docker run --rm -v /workdir/cache/ccache:/cache/ccache $DOCKER_BUILDER_IMAGE sh -c 'ccache -o cache_dir=/cache/ccache && ccache -o max_size=10G && ccache -z'
-
-    # 运行主要编译流程
     - name: OpenWrt编译流程
       id: compile
       run: |
-        # 创建启动脚本
-        cat > /workdir/build-openwrt.sh << 'EOF'
+        # 创建编译脚本
+        cat > ${{ env.WORKDIR }}/build-openwrt.sh << 'EOF'
         #!/bin/bash
         
-        set -e
+        set -ex
         
-        echo "配置编译环境..."
+        # 输出工作环境信息
+        echo "Docker容器内的工作目录内容:"
+        ls -la /openwrt
+        echo "缓存目录内容:"
+        ls -la /cache
         
-        # 修复mosdns编译问题的预处理
-        if [ -d "/openwrt/feeds/packages/net/mosdns" ]; then
-          echo "添加mosdns编译修复..."
-          # 修改golang-build.sh禁用VCS检查
-          find /openwrt/feeds/packages/lang/golang/ -name "golang-build.sh" -type f -exec sed -i 's/\(go build\)/\1 -buildvcs=false/g' {} \;
-          
-          # 直接修改mosdns的Makefile
-          if [ -f "/openwrt/feeds/packages/net/mosdns/Makefile" ]; then
-            sed -i 's/GO_PKG_LDFLAGS_X:=/GO_BUILD_FLAGS:=-buildvcs=false\nGO_PKG_LDFLAGS_X:=/g' /openwrt/feeds/packages/net/mosdns/Makefile
+        cd /openwrt
+        
+        # 修复Go编译问题 - 预处理
+        echo "添加Go编译修复..."
+        for build_script in $(find ./ -name "golang-build.sh" 2>/dev/null); do
+          echo "修复Go构建脚本: $build_script"
+          sed -i 's/\(go build\)/\1 -buildvcs=false/g' "$build_script" || true
+        done
+        
+        # 创建软链接以使用缓存
+        if [ -d "/cache/dl" ]; then
+          echo "使用下载缓存..."
+          if [ -d "/openwrt/dl" ]; then
+            rsync -a /openwrt/dl/ /cache/dl/ || true
+            rm -rf /openwrt/dl
           fi
-        fi
-        
-        # 创建必要的软链接
-        if [ ! -e "/openwrt/dl" ] && [ -d "/cache/dl" ]; then
-          ln -sf /cache/dl /openwrt/dl
-        else
-          mkdir -p /openwrt/dl
-          mkdir -p /cache/dl
-          rsync -a /openwrt/dl/ /cache/dl/ || true
-          rm -rf /openwrt/dl
           ln -sf /cache/dl /openwrt/dl
         fi
         
-        # 复制缓存的staging_dir和build_dir（如果存在）
-        if [ -d "/cache/staging_dir" ]; then
-          echo "复制缓存的staging_dir..."
+        # 复制构建缓存
+        if [ -d "/cache/staging_dir" ] && [ -n "$(ls -A /cache/staging_dir 2>/dev/null)" ]; then
+          echo "复制staging_dir缓存..."
           mkdir -p /openwrt/staging_dir
           cp -rf /cache/staging_dir/* /openwrt/staging_dir/ || true
         fi
         
-        if [ -d "/cache/build_dir" ]; then
-          echo "复制缓存的build_dir..."
+        if [ -d "/cache/build_dir" ] && [ -n "$(ls -A /cache/build_dir 2>/dev/null)" ]; then
+          echo "复制build_dir缓存..."
           mkdir -p /openwrt/build_dir
           cp -rf /cache/build_dir/* /openwrt/build_dir/ || true
         fi
         
-        # 设置ccache
+        # 配置ccache
         export CCACHE_DIR=/cache/ccache
         ccache -o cache_dir=/cache/ccache
         ccache -o max_size=10G
         ccache -z
-        
-        # 显示当前配置
-        cd /openwrt
-        cp .config .config.orig
         
         # 更新feeds
         echo "更新feeds..."
         ./scripts/feeds update -a
         ./scripts/feeds install -a
         
-        # 运行定制脚本
+        # 运行自定义脚本
         if [ -f "./diy-part1.sh" ]; then
           echo "运行diy-part1.sh..."
           chmod +x ./diy-part1.sh
           ./diy-part1.sh
         fi
         
-        # 二次运行feeds确保所有内容都被安装
-        ./scripts/feeds update -i
+        # 下载feeds.conf.default
+        if [ -n "$FEEDS_CONF_URL" ]; then
+          echo "下载feeds.conf.default..."
+          curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "警告：无法下载feeds.conf.default"
+        fi
+        
+        # 更新feeds (再次)
+        ./scripts/feeds update -a
         ./scripts/feeds install -a
         
-        # 运行第二个定制脚本
+        # 运行第二个自定义脚本
         if [ -f "./diy-part2.sh" ]; then
           echo "运行diy-part2.sh..."
           chmod +x ./diy-part2.sh
           ./diy-part2.sh
         fi
         
-        # 添加关键固件配置
+        # 添加固件必要配置
         echo "确保包含必要的固件生成配置..."
         if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then
           echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
@@ -338,160 +292,117 @@ jobs:
           fi
         fi
         
-        # 增加额外缓存相关配置
+        # 增加缓存相关配置
         echo "CONFIG_AUTOREMOVE=n" >> .config
         echo "CONFIG_AUTOREBUILD=n" >> .config
         echo "CONFIG_CCACHE=y" >> .config
         
-        # 生成最终的.config
+        # 生成defconfig
         make defconfig
         
-        # 下载所有依赖
-        echo "下载依赖包..."
-        make download -j8 || make download -j1 V=s
+        # Go编译问题全局修复 - 特别针对mosdns等包
+        echo "应用Go包全局编译修复..."
         
-        # 对下载的包进行有效性检查
-        find dl -size -1024c -exec rm -f {} \;
-        
-        # 编译工具链和固件，增强错误处理
-        echo "开始编译..."
-        if ! make -j$(($(nproc) + 1)) 2>&1 | tee /tmp/compile.log; then
-          echo "全速编译失败，检查错误..."
-          
-          # 检查是否为mosdns或其他Go软件包错误
-          if grep -q "error obtaining VCS status: exit status 128" /tmp/compile.log || grep -q "golang" /tmp/compile.log; then
-            echo "检测到Go VCS错误，应用全局Go编译修复..."
-            
-            # 对所有Go包应用修复 - 修改golang-build.sh脚本
-            for build_script in $(find /openwrt/feeds -name "golang-build.sh"); do
-              echo "修复 Go 构建脚本: $build_script"
-              sed -i 's/\(\$GOPATH\/bin\/go build\)/\1 -buildvcs=false/g' "$build_script" || true
-              sed -i 's/go build/go build -buildvcs=false/g' "$build_script" || true
-            done
-            
-            # 修改所有相关的Makefile
-            find /openwrt/feeds -name "Makefile" -path "*/golang/*" -o -path "*/net/*" -o -path "*/mosdns/*" | while read -r file; do
-              echo "修复 Makefile: $file"
-              # 添加buildvcs=false到GO_BUILD_FLAGS
-              if grep -q "GO_BUILD_FLAGS" "$file"; then
-                sed -i 's/GO_BUILD_FLAGS:=/GO_BUILD_FLAGS:=-buildvcs=false /g' "$file" || true
-              else
-                sed -i '/GO_PKG/a GO_BUILD_FLAGS:=-buildvcs=false' "$file" || true
-              fi
-            done
-            
-            # 修改相关的golang配置文件
-            if [ -f "/openwrt/feeds/packages/lang/golang/golang/Makefile" ]; then
-              echo "修复 Golang 主 Makefile"
-              # 确保Golang编译时也禁用vcs
-              if ! grep -q "PKG_GO_BUILDFLAGS" "/openwrt/feeds/packages/lang/golang/golang/Makefile"; then
-                sed -i '/PKG_BUILD_DEPENDS/a PKG_GO_BUILDFLAGS:=-buildvcs=false' "/openwrt/feeds/packages/lang/golang/golang/Makefile" || true
-              fi
+        # 修改所有相关的Makefile
+        find ./feeds -name "Makefile" -path "*/golang/*" -o -path "*/net/*" -o -path "*/mosdns/*" 2>/dev/null | while read -r file; do
+          if [ -f "$file" ]; then
+            echo "修复 Makefile: $file"
+            # 添加buildvcs=false到GO_BUILD_FLAGS
+            if grep -q "GO_BUILD_FLAGS" "$file"; then
+              sed -i 's/GO_BUILD_FLAGS:=/GO_BUILD_FLAGS:=-buildvcs=false /g' "$file" || true
+            else
+              sed -i '/GO_PKG/a GO_BUILD_FLAGS:=-buildvcs=false' "$file" || true
             fi
-            
-            # 为mosdns创建补丁文件
-            if [ -d "/openwrt/feeds/packages/net/mosdns" ]; then
-              echo "创建mosdns专用补丁..."
-              mkdir -p /openwrt/tmp/patches
-              cat > /openwrt/tmp/patches/mosdns-fix-vcs.patch << 'EOPATCH'
---- a/Makefile
-+++ b/Makefile
-@@ -8,6 +8,7 @@
- 
- PKG_NAME:=mosdns
- PKG_VERSION:=5.3.3
-+GO_BUILD_FLAGS:=-buildvcs=false
- 
- PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
- PKG_SOURCE_URL:=https://codeload.github.com/IrineSistiana/mosdns/tar.gz/v$(PKG_VERSION)?
-EOPATCH
-              # 应用补丁
-              if [ -f "/openwrt/feeds/packages/net/mosdns/Makefile" ]; then
-                patch -p1 -d "/openwrt/feeds/packages/net/mosdns" < /openwrt/tmp/patches/mosdns-fix-vcs.patch || true
-              fi
-            fi
-            
-            # 重新生成配置以适应修改
-            make defconfig
-            
-            # 再次尝试编译，首先只编译Go相关包
-            echo "尝试单独编译Go包..."
-            find /openwrt/feeds -name "Makefile" -path "*/golang/*" -o -path "*/mosdns/*" | while read -r file; do
-              dir=$(dirname "$file")
-              pkg_name=$(basename "$dir")
-              echo "编译单个包: $pkg_name"
-              make package/$pkg_name/compile V=s || true
-            done
-            
-            # 然后尝试整体编译
-            echo "使用修复后再次尝试编译整个固件..."
-            make -j$(($(nproc) + 1)) || make -j1 V=s
-          else
-            # 如果不是已知错误，尝试单线程编译
-            echo "尝试使用单线程编译..."
-            make -j1 V=s
           fi
+        done
+        
+        # 为mosdns创建特别修复
+        if [ -d "./feeds/packages/net/mosdns" ]; then
+          echo "创建mosdns专用修复..."
+          
+          # 直接修改Makefile
+          if [ -f "./feeds/packages/net/mosdns/Makefile" ]; then
+            if ! grep -q "GO_BUILD_FLAGS" "./feeds/packages/net/mosdns/Makefile"; then
+              sed -i '/PKG_NAME/a GO_BUILD_FLAGS:=-buildvcs=false' "./feeds/packages/net/mosdns/Makefile" || true
+            fi
+          fi
+        fi
+        
+        # 下载依赖
+        echo "下载软件包依赖..."
+        make download -j8 || make download -j1 V=s
+        find dl -size -1024c -exec ls -l {} \; || true
+        find dl -size -1024c -exec rm -f {} \; || true
+        
+        # 编译
+        echo "开始编译..."
+        echo "使用$(nproc)线程进行编译"
+        
+        # 尝试多线程编译
+        if ! make -j$(nproc) V=s 2>&1 | tee /tmp/compile.log; then
+          echo "多线程编译失败，尝试单线程编译..."
+          # 检查是否为Go编译错误
+          if grep -q "error obtaining VCS status: exit status 128" /tmp/compile.log || grep -q "buildvcs" /tmp/compile.log; then
+            echo "检测到Go VCS错误，尝试单独编译Go相关包..."
+            # 先编译Go相关包
+            find ./feeds -name "Makefile" -path "*/golang/*" -o -path "*/mosdns/*" 2>/dev/null | while read -r file; do
+              if [ -f "$file" ]; then
+                dir=$(dirname "$file")
+                pkg_name=$(basename "$dir")
+                echo "编译单个包: $pkg_name"
+                make package/$pkg_name/compile V=s || true
+              fi
+            done
+          fi
+          
+          # 重试单线程编译
+          make -j1 V=s
         fi
         
         # 如果未生成固件，尝试强制生成
-        if [ ! -d "bin/targets" ] || [ -z "$(find bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz")" ]; then
+        if [ ! -d "bin/targets" ] || [ -z "$(find bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" 2>/dev/null)" ]; then
           echo "未找到固件，尝试强制生成..."
-          
-          # 如果缺少了squshfs相关的配置，添加它们
-          if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then
-            echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
-          fi
-          
-          # 对于x86平台增加额外的镜像配置
-          if grep -q "CONFIG_TARGET_x86=y" .config; then
-            if ! grep -q "CONFIG_GRUB_IMAGES=y" .config; then
-              echo "CONFIG_GRUB_IMAGES=y" >> .config
-            fi
-            
-            if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then
-              echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
-            fi
-          fi
-          
           make defconfig
-          echo "强制生成固件镜像..."
           make -j1 V=s target/install || make -j1 V=s target/install || make package/install
         fi
         
-        # 保存编译结果到缓存
+        # 保存缓存
         echo "保存编译结果到缓存..."
         mkdir -p /cache/staging_dir
         mkdir -p /cache/build_dir
-        mkdir -p /cache/bin
         
         # 保存重要的编译缓存
         cp -rf /openwrt/staging_dir/* /cache/staging_dir/ || true
         cp -rf /openwrt/build_dir/* /cache/build_dir/ || true
-        cp -rf /openwrt/bin/* /cache/bin/ || true
         
         # 显示ccache统计
         ccache -s
         
+        # 确认固件是否生成
+        echo "检查固件文件..."
+        find bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | sort
+        
         echo "编译完成!"
         EOF
         
-        chmod +x /workdir/build-openwrt.sh
+        # 确保脚本可执行
+        chmod +x ${{ env.WORKDIR }}/build-openwrt.sh
         
-        # 运行Docker容器执行编译
+        # 执行Docker容器编译
         echo "启动Docker容器执行编译..."
-        docker run --rm \
-          -v /workdir/openwrt:/openwrt \
-          -v /workdir/cache:/cache \
-          -v /workdir/build-openwrt.sh:/build-openwrt.sh \
-          -e FORCE_UNSAFE_CONFIGURE=1 \
-          $DOCKER_BUILDER_IMAGE /build-openwrt.sh
+        docker run --rm -v ${{ env.WORKDIR }}/openwrt:/openwrt \
+                      -v ${{ env.WORKDIR }}/cache:/cache \
+                      -v ${{ env.WORKDIR }}/build-openwrt.sh:/build-openwrt.sh \
+                      -e FEEDS_CONF_URL="${FEEDS_CONF_URL}" \
+                      openwrt-builder:latest /build-openwrt.sh
         
         # 检查是否成功编译出固件
-        if [ -d "/workdir/openwrt/bin/targets" ]; then
-          find /workdir/openwrt/bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | wc -l
-          if [ "$(find /workdir/openwrt/bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | wc -l)" -gt 0 ]; then
+        echo "检查编译结果..."
+        if [ -d "${{ env.WORKDIR }}/openwrt/bin/targets" ]; then
+          FIRMWARE_COUNT=$(find ${{ env.WORKDIR }}/openwrt/bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | wc -l)
+          if [ "$FIRMWARE_COUNT" -gt 0 ]; then
             echo "status=success" >> $GITHUB_OUTPUT
-            echo "找到固件文件!"
+            echo "找到${FIRMWARE_COUNT}个固件文件!"
           else
             echo "status=failed" >> $GITHUB_OUTPUT
             echo "未找到固件文件，编译可能失败!"
@@ -502,19 +413,11 @@ EOPATCH
         fi
         
         # 设置设备名称和文件日期
-        cd /workdir/openwrt
+        cd ${{ env.WORKDIR }}/openwrt
         echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    # 检查OpenWrt编译结果
-    - name: 检查编译结果
-      run: |
-        echo "编译结果:"
-        find /workdir/openwrt/bin/targets -type f | sort
-        echo "固件文件:"
-        find /workdir/openwrt/bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | xargs ls -lh || echo "未找到固件文件"
-
-    # 开启SSH调试（如需要）
+    # 开启SSH调试（如果需要）
     - name: 开启SSH调试
       uses: mxschmitt/action-tmate@v3
       if: github.event.inputs.ssh == 'true' || steps.compile.outputs.status != 'success'
@@ -524,7 +427,10 @@ EOPATCH
       id: organize
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        cd /workdir/openwrt/bin/targets
+        cd ${{ env.WORKDIR }}/openwrt/bin/targets
+        
+        echo "查找固件文件..."
+        find . -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | sort
         
         # 查找所有目标目录
         TARGET_DIRS=$(find . -mindepth 2 -maxdepth 2 -type d)
@@ -539,7 +445,7 @@ EOPATCH
           find $TARGET_DIR -maxdepth 1 -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | xargs -I {} cp {} $TARGET_DIR/firmware/ || true
           
           # 复制配置文件
-          cp /workdir/openwrt/.config $TARGET_DIR/firmware/config.txt
+          cp ${{ env.WORKDIR }}/openwrt/.config $TARGET_DIR/firmware/config.txt
           
           # 检查是否成功复制了文件
           if [ -n "$(ls -A $TARGET_DIR/firmware)" ]; then
@@ -552,7 +458,7 @@ EOPATCH
         # 如果没有找到固件，创建通用目录
         if [ -z "$FIRMWARE" ]; then
           mkdir -p generic/generic/firmware
-          cp /workdir/openwrt/.config generic/generic/firmware/config.txt
+          cp ${{ env.WORKDIR }}/openwrt/.config generic/generic/firmware/config.txt
           # 查找所有可能的固件文件并复制
           find . -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz" | xargs -I {} cp {} generic/generic/firmware/ || true
           echo "FIRMWARE=$(pwd)/generic/generic/firmware" >> $GITHUB_ENV
