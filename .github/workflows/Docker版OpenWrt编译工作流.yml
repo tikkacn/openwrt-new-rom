@@ -244,6 +244,18 @@ jobs:
         
         echo "配置编译环境..."
         
+        # 修复mosdns编译问题的预处理
+        if [ -d "/openwrt/feeds/packages/net/mosdns" ]; then
+          echo "添加mosdns编译修复..."
+          # 修改golang-build.sh禁用VCS检查
+          find /openwrt/feeds/packages/lang/golang/ -name "golang-build.sh" -type f -exec sed -i 's/\(go build\)/\1 -buildvcs=false/g' {} \;
+          
+          # 直接修改mosdns的Makefile
+          if [ -f "/openwrt/feeds/packages/net/mosdns/Makefile" ]; then
+            sed -i 's/GO_PKG_LDFLAGS_X:=/GO_BUILD_FLAGS:=-buildvcs=false\nGO_PKG_LDFLAGS_X:=/g' /openwrt/feeds/packages/net/mosdns/Makefile
+          fi
+        fi
+        
         # 创建必要的软链接
         if [ ! -e "/openwrt/dl" ] && [ -d "/cache/dl" ]; then
           ln -sf /cache/dl /openwrt/dl
@@ -341,14 +353,109 @@ jobs:
         # 对下载的包进行有效性检查
         find dl -size -1024c -exec rm -f {} \;
         
-        # 编译工具链和固件
+        # 编译工具链和固件，增强错误处理
         echo "开始编译..."
-        make -j$(($(nproc) + 1)) || make -j1 V=s
+        if ! make -j$(($(nproc) + 1)) 2>&1 | tee /tmp/compile.log; then
+          echo "全速编译失败，检查错误..."
+          
+          # 检查是否为mosdns或其他Go软件包错误
+          if grep -q "error obtaining VCS status: exit status 128" /tmp/compile.log || grep -q "golang" /tmp/compile.log; then
+            echo "检测到Go VCS错误，应用全局Go编译修复..."
+            
+            # 对所有Go包应用修复 - 修改golang-build.sh脚本
+            for build_script in $(find /openwrt/feeds -name "golang-build.sh"); do
+              echo "修复 Go 构建脚本: $build_script"
+              sed -i 's/\(\$GOPATH\/bin\/go build\)/\1 -buildvcs=false/g' "$build_script" || true
+              sed -i 's/go build/go build -buildvcs=false/g' "$build_script" || true
+            done
+            
+            # 修改所有相关的Makefile
+            find /openwrt/feeds -name "Makefile" -path "*/golang/*" -o -path "*/net/*" -o -path "*/mosdns/*" | while read -r file; do
+              echo "修复 Makefile: $file"
+              # 添加buildvcs=false到GO_BUILD_FLAGS
+              if grep -q "GO_BUILD_FLAGS" "$file"; then
+                sed -i 's/GO_BUILD_FLAGS:=/GO_BUILD_FLAGS:=-buildvcs=false /g' "$file" || true
+              else
+                sed -i '/GO_PKG/a GO_BUILD_FLAGS:=-buildvcs=false' "$file" || true
+              fi
+            done
+            
+            # 修改相关的golang配置文件
+            if [ -f "/openwrt/feeds/packages/lang/golang/golang/Makefile" ]; then
+              echo "修复 Golang 主 Makefile"
+              # 确保Golang编译时也禁用vcs
+              if ! grep -q "PKG_GO_BUILDFLAGS" "/openwrt/feeds/packages/lang/golang/golang/Makefile"; then
+                sed -i '/PKG_BUILD_DEPENDS/a PKG_GO_BUILDFLAGS:=-buildvcs=false' "/openwrt/feeds/packages/lang/golang/golang/Makefile" || true
+              fi
+            fi
+            
+            # 为mosdns创建补丁文件
+            if [ -d "/openwrt/feeds/packages/net/mosdns" ]; then
+              echo "创建mosdns专用补丁..."
+              mkdir -p /openwrt/tmp/patches
+              cat > /openwrt/tmp/patches/mosdns-fix-vcs.patch << 'EOPATCH'
+--- a/Makefile
++++ b/Makefile
+@@ -8,6 +8,7 @@
+ 
+ PKG_NAME:=mosdns
+ PKG_VERSION:=5.3.3
++GO_BUILD_FLAGS:=-buildvcs=false
+ 
+ PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
+ PKG_SOURCE_URL:=https://codeload.github.com/IrineSistiana/mosdns/tar.gz/v$(PKG_VERSION)?
+EOPATCH
+              # 应用补丁
+              if [ -f "/openwrt/feeds/packages/net/mosdns/Makefile" ]; then
+                patch -p1 -d "/openwrt/feeds/packages/net/mosdns" < /openwrt/tmp/patches/mosdns-fix-vcs.patch || true
+              fi
+            fi
+            
+            # 重新生成配置以适应修改
+            make defconfig
+            
+            # 再次尝试编译，首先只编译Go相关包
+            echo "尝试单独编译Go包..."
+            find /openwrt/feeds -name "Makefile" -path "*/golang/*" -o -path "*/mosdns/*" | while read -r file; do
+              dir=$(dirname "$file")
+              pkg_name=$(basename "$dir")
+              echo "编译单个包: $pkg_name"
+              make package/$pkg_name/compile V=s || true
+            done
+            
+            # 然后尝试整体编译
+            echo "使用修复后再次尝试编译整个固件..."
+            make -j$(($(nproc) + 1)) || make -j1 V=s
+          else
+            # 如果不是已知错误，尝试单线程编译
+            echo "尝试使用单线程编译..."
+            make -j1 V=s
+          fi
+        fi
         
         # 如果未生成固件，尝试强制生成
         if [ ! -d "bin/targets" ] || [ -z "$(find bin/targets -type f -name "*sysupgrade*" -o -name "*combined*" -o -name "*.img.gz")" ]; then
           echo "未找到固件，尝试强制生成..."
-          make -j1 V=s target/install
+          
+          # 如果缺少了squshfs相关的配置，添加它们
+          if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then
+            echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
+          fi
+          
+          # 对于x86平台增加额外的镜像配置
+          if grep -q "CONFIG_TARGET_x86=y" .config; then
+            if ! grep -q "CONFIG_GRUB_IMAGES=y" .config; then
+              echo "CONFIG_GRUB_IMAGES=y" >> .config
+            fi
+            
+            if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then
+              echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
+            fi
+          fi
+          
+          make defconfig
+          echo "强制生成固件镜像..."
+          make -j1 V=s target/install || make -j1 V=s target/install || make package/install
         fi
         
         # 保存编译结果到缓存
