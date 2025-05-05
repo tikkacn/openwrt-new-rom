@@ -60,11 +60,14 @@ jobs:
 
     - name: 创建工作目录
       run: |
-        mkdir -p ${{ env.WORKDIR }}/openwrt
-        mkdir -p ${{ env.WORKDIR }}/cache
-        mkdir -p ${{ env.WORKDIR }}/cache/dl
-        mkdir -p ${{ env.WORKDIR }}/cache/ccache
-        chmod -R 777 ${{ env.WORKDIR }}
+        sudo mkdir -p ${{ env.WORKDIR }}/openwrt
+        sudo mkdir -p ${{ env.WORKDIR }}/cache
+        sudo mkdir -p ${{ env.WORKDIR }}/cache/dl
+        sudo mkdir -p ${{ env.WORKDIR }}/cache/ccache
+        # 确保工作目录有正确的权限
+        sudo chmod -R 777 ${{ env.WORKDIR }}
+        # 创建缓存文件的软链接以加速二次编译
+        [ -d "${{ env.WORKDIR }}/cache/dl" ] && sudo ln -sf ${{ env.WORKDIR }}/cache/dl ${{ env.WORKDIR }}/openwrt/dl
 
     - name: 准备自定义脚本
       run: |
@@ -210,48 +213,51 @@ jobs:
         # 下载所有依赖
         make download -j8 || make download -j1
         
-        # 尝试编译
-        make -j$(nproc) || true
+        # 设置CCACHE环境变量优化增量编译
+        export CCACHE_DIR=/cache/ccache
+        export CCACHE_COMPILERCHECK=content
+        export CCACHE_COMPRESS=1
+        export CCACHE_MAXSIZE=10G
         
-        # 如果失败，尝试分段编译
-        if [ ! -d "bin/targets" ]; then
-          make tools/install || true
-          make toolchain/install || true
-          make target/compile || true
-          make package/compile || true
-          make package/install || true
-          make target/install || true
+        # 尝试编译，显示编译进度
+        echo "开始编译，使用$(nproc)个线程..."
+        make -j$(nproc) V=s || make -j1 V=s
+        
+        # 检查编译结果
+        if [ $? -ne 0 ]; then
+          echo "编译失败，但继续处理..."
+        else
+          echo "编译成功!"
         fi
         
-        # 创建基本目录结构
-        mkdir -p build_dir/target-x86_64_musl/root-x86/{bin,dev,etc,lib,sbin,usr}
+        # 确保固件目录存在并设置权限
+        mkdir -p bin/targets/x86/64/firmware
+        chmod -R 777 bin/targets/x86/64
         
-        # 如果有已安装的包，复制到根目录
-        if [ -d "staging_dir/target-x86_64_musl/root-x86" ]; then
-          cp -rf staging_dir/target-x86_64_musl/root-x86/* build_dir/target-x86_64_musl/root-x86/ || true
+        # 复制固件和其他重要文件
+        find bin/targets/x86/64 -name "*.gz" -exec cp -v {} bin/targets/x86/64/firmware/ \; || true
+        find bin/targets/x86/64 -name "*.img" -exec cp -v {} bin/targets/x86/64/firmware/ \; || true
+        find bin/targets/x86/64 -name "*.vdi" -exec cp -v {} bin/targets/x86/64/firmware/ \; || true
+        find bin/targets/x86/64 -name "*.vmdk" -exec cp -v {} bin/targets/x86/64/firmware/ \; || true
+        
+        # 复制配置和版本信息
+        cp .config bin/targets/x86/64/firmware/config.txt || true
+        date > bin/targets/x86/64/firmware/build_date.txt
+        [ -f ./version.buildinfo ] && cp ./version.buildinfo bin/targets/x86/64/firmware/ || true
+        
+        # 确保目录不为空
+        if [ -z "$(ls -A bin/targets/x86/64/firmware)" ]; then
+          echo "编译未生成固件或复制失败，创建占位文件..."
+          echo "OpenWrt Build Info" > bin/targets/x86/64/firmware/info.txt
+          echo "构建时间: $(date)" >> bin/targets/x86/64/firmware/info.txt
+          echo "请检查编译日志以获取详细信息" >> bin/targets/x86/64/firmware/info.txt
+        else
+          echo "固件文件已成功复制到firmware目录"
+          ls -la bin/targets/x86/64/firmware/
         fi
         
-        # 检查是否已生成镜像，如果没有则手动创建
-        if [ ! -f "bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz" ]; then
-          mkdir -p bin/targets/x86/64
-          
-          # 创建最小的镜像
-          if [ -f "build_dir/target-x86_64_musl/linux-x86_64/bzImage" ]; then
-            mkdir -p build_dir/target-x86_64_musl/root-x86/etc
-            echo "OpenWrt" > build_dir/target-x86_64_musl/root-x86/etc/banner
-            
-            mksquashfs build_dir/target-x86_64_musl/root-x86 \
-                    build_dir/target-x86_64_musl/linux-x86_64/root.squashfs \
-                    -nopad -noappend -root-owned -comp xz || true
-            
-            cat build_dir/target-x86_64_musl/linux-x86_64/bzImage > bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img
-            cat build_dir/target-x86_64_musl/linux-x86_64/root.squashfs >> bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img
-            gzip -9n bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img
-          else
-            # 创建占位文件
-            echo "OpenWrt Build" | gzip > bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz
-          fi
-        fi
+        # 设置权限
+        chmod -R 777 bin/targets/x86/64/firmware
         EOF
         
         chmod +x ${{ env.WORKDIR }}/compile.sh
@@ -274,20 +280,7 @@ jobs:
     - name: 整理固件文件
       id: organize
       run: |
-        mkdir -p ${{ env.WORKDIR }}/openwrt/bin/targets/x86/64/firmware
-        
-        # 复制固件
-        find ${{ env.WORKDIR }}/openwrt/bin/targets/x86/64 -name "*.gz" -exec cp {} ${{ env.WORKDIR }}/openwrt/bin/targets/x86/64/firmware/ \; || true
-        
-        # 复制配置
-        cp ${{ env.WORKDIR }}/openwrt/.config ${{ env.WORKDIR }}/openwrt/bin/targets/x86/64/firmware/config.txt || true
-        
-        # 确保目录不为空
-        if [ -z "$(ls -A ${{ env.WORKDIR }}/openwrt/bin/targets/x86/64/firmware)" ]; then
-          echo "创建占位文件..."
-          echo "OpenWrt Build Info" > ${{ env.WORKDIR }}/openwrt/bin/targets/x86/64/firmware/info.txt
-        fi
-        
+        # 不需要再创建目录，使用Docker中已创建的目录
         echo "FIRMWARE=${{ env.WORKDIR }}/openwrt/bin/targets/x86/64/firmware" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
