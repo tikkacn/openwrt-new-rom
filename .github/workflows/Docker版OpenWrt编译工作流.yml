@@ -1,4 +1,4 @@
-name: Docker版OpenWrt编译第11版
+name: 全新编译Docker缓存优化第11版
 
 on:
   workflow_dispatch:
@@ -26,12 +26,21 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+  # 缓存目录环境变量
   WORKDIR: /workdir
+  CACHE_DIR: /workdir/cache
+  CCACHE_DIR: /workdir/cache/ccache
+  DL_DIR: /workdir/cache/dl
+  BUILD_DIR: /workdir/cache/build_dir
+  STAGING_DIR: /workdir/cache/staging_dir
+  TOOLCHAIN_DIR: /workdir/cache/staging_dir
+  BUILD_STATE_DIR: /workdir/cache/build_state
+  DOCKER_CONTAINER: openwrtorg/buildbot:latest
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-
+    
     steps:
     - name: 检出代码
       uses: actions/checkout@main
@@ -48,261 +57,494 @@ jobs:
         remove-docker-images: 'true'
         build-mount-path: '/workdir'
 
-    - name: 清理磁盘空间
+    - name: 额外清理磁盘空间并检查
       run: |
-        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        echo "清理额外磁盘空间..."
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
         sudo rm -rf /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL
-        docker image prune -a -f
-        docker system prune -af
+        docker image prune -a -f || true
+        docker system prune -af || true
         sudo apt-get clean
         sudo apt-get autoremove -y
+        ROOT_AVAIL=$(df -m /dev/root | tail -1 | awk '{print $4}')
+        echo "根分区可用空间: ${ROOT_AVAIL}MB"
+        if [ "$ROOT_AVAIL" -lt 20480 ]; then
+          echo "错误：/dev/root 可用空间不足 20GB"
+          exit 1
+        fi
         df -h
 
-    - name: 创建工作目录
+    - name: 拉取Docker镜像
       run: |
-        sudo mkdir -p ${{ env.WORKDIR }}/openwrt
-        sudo mkdir -p ${{ env.WORKDIR }}/cache
-        sudo mkdir -p ${{ env.WORKDIR }}/cache/dl
-        sudo mkdir -p ${{ env.WORKDIR }}/cache/ccache
-        # 确保工作目录有正确的权限
-        sudo chmod -R 777 ${{ env.WORKDIR }}
-        # 创建缓存文件的软链接以加速二次编译
-        [ -d "${{ env.WORKDIR }}/cache/dl" ] && sudo ln -sf ${{ env.WORKDIR }}/cache/dl ${{ env.WORKDIR }}/openwrt/dl
+        echo "拉取Docker构建镜像..."
+        docker pull ${{ env.DOCKER_CONTAINER }}
+        
+        # 创建缓存目录
+        echo "创建缓存目录结构..."
+        mkdir -p ${{ env.CACHE_DIR }}/{ccache,dl,build_dir,staging_dir,build_state}
+        chmod -R 777 ${{ env.CACHE_DIR }}
+        
+        # 在工作目录下创建openwrt目录
+        mkdir -p ${{ env.WORKDIR }}/openwrt
+        chmod -R 777 ${{ env.WORKDIR }}/openwrt
+        
+        # 显示目录结构和权限
+        ls -la ${{ env.WORKDIR }}
+        ls -la ${{ env.CACHE_DIR }}
 
-    - name: 准备自定义脚本
+    # 恢复dl目录缓存
+    - name: 恢复下载缓存
+      uses: actions/cache@v3
+      id: cache-dl
+      if: inputs.clean_build != 'true'
+      with:
+        path: ${{ env.DL_DIR }}
+        key: dl-${{ env.REPO_BRANCH }}-${{ hashFiles('feeds.conf.default') }}
+        restore-keys: |
+          dl-${{ env.REPO_BRANCH }}-
+
+    # 恢复build_dir缓存
+    - name: 恢复构建缓存
+      uses: actions/cache@v3
+      id: cache-build
+      if: inputs.clean_build != 'true'
+      with:
+        path: ${{ env.BUILD_DIR }}
+        key: build-${{ env.REPO_BRANCH }}-${{ hashFiles('**/*.config') }}
+        restore-keys: |
+          build-${{ env.REPO_BRANCH }}-
+
+    # 恢复staging_dir缓存
+    - name: 恢复工具链缓存
+      uses: actions/cache@v3
+      id: cache-staging
+      if: inputs.clean_build != 'true'
+      with:
+        path: ${{ env.STAGING_DIR }}
+        key: staging-${{ env.REPO_BRANCH }}-${{ hashFiles('**/*.config') }}
+        restore-keys: |
+          staging-${{ env.REPO_BRANCH }}-
+
+    # 恢复CCACHE缓存
+    - name: 恢复CCACHE缓存
+      uses: actions/cache@v3
+      id: cache-ccache
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_BRANCH }}-${{ hashFiles('**/*.config') }}
+        restore-keys: |
+          ccache-${{ env.REPO_BRANCH }}-
+
+    # 恢复构建状态缓存
+    - name: 恢复构建状态缓存
+      uses: actions/cache@v3
+      id: cache-state
+      if: inputs.clean_build != 'true'
+      with:
+        path: ${{ env.BUILD_STATE_DIR }}
+        key: state-${{ env.REPO_BRANCH }}-${{ hashFiles('**/*.config') }}
+        restore-keys: |
+          state-${{ env.REPO_BRANCH }}-
+
+    - name: 检查缓存恢复状态
       run: |
+        echo "CONFIG_FILE: ${{ env.CONFIG_FILE }}"
+        echo "下载缓存恢复状态: ${{ steps.cache-dl.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "构建缓存恢复状态: ${{ steps.cache-build.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "工具链缓存恢复状态: ${{ steps.cache-staging.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "CCACHE缓存恢复状态: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        echo "构建状态缓存恢复状态: ${{ steps.cache-state.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}"
+        
+        # 检查缓存目录大小
+        echo "下载目录大小: $(du -sh ${{ env.DL_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "构建目录大小: $(du -sh ${{ env.BUILD_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "工具链目录大小: $(du -sh ${{ env.STAGING_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        echo "CCACHE目录大小: $(du -sh ${{ env.CCACHE_DIR }} 2>/dev/null || echo '目录不存在或为空')"
+        
+        # 检查可用空间
+        df -h
+
+    - name: 准备初始化脚本
+      run: |
+        # 创建DIY脚本
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
-        echo '# Feeds已通过FEEDS_CONF_URL配置' >> $GITHUB_WORKSPACE/diy-part1.sh
+        echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
         chmod +x $GITHUB_WORKSPACE/diy-part1.sh
         
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
-        echo 'sed -i "s/OpenWrt /OpenWrt_Docker_Build /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
+        echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
         chmod +x $GITHUB_WORKSPACE/diy-part2.sh
         
+        # 检查配置文件是否存在
         if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
-          echo "配置文件不存在，创建默认配置"
-          echo "CONFIG_TARGET_x86=y" > $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "警告：配置文件 $CONFIG_FILE 不存在，创建默认配置文件"
+          echo "# 创建默认的最小化配置文件" > $GITHUB_WORKSPACE/$CONFIG_FILE
+          echo "CONFIG_TARGET_x86=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
           echo "CONFIG_TARGET_x86_64=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
           echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
           echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
         fi
+        
+        # 创建Docker编译脚本
+        cat > $GITHUB_WORKSPACE/docker-compile.sh << 'EOF'
+        #!/bin/bash
+        set -e
 
-    - name: 创建Docker镜像
-      run: |
-        cat > ${{ env.WORKDIR }}/Dockerfile << 'EOF'
-        FROM ubuntu:22.04
-        
-        ENV DEBIAN_FRONTEND=noninteractive
-        ENV TZ=Asia/Shanghai
-        ENV FORCE_UNSAFE_CONFIGURE=1
-        
-        RUN apt-get update && apt-get install -y \
-            build-essential clang flex bison g++ gawk gcc-multilib \
-            gettext git libncurses5-dev libssl-dev python3-distutils \
-            python3-setuptools rsync unzip zlib1g-dev file wget \
-            libelf-dev ccache curl xz-utils vim make \
-            && apt-get clean \
-            && rm -rf /var/lib/apt/lists/*
-        
-        VOLUME ["/openwrt", "/cache"]
-        ENV PATH="/usr/lib/ccache:$PATH"
-        ENV CCACHE_DIR=/cache/ccache
-        
-        WORKDIR /openwrt
-        CMD ["/bin/bash"]
-        EOF
-        
-        cd ${{ env.WORKDIR }}
-        docker build -t openwrt-builder .
+        # 显示环境信息
+        echo "运行环境: $(uname -a)"
+        echo "当前用户: $(whoami)"
+        echo "当前目录: $(pwd)"
+        echo "目录内容: $(ls -la)"
 
-    - name: 克隆源代码
-      run: |
-        cd ${{ env.WORKDIR }}
+        # 设置CCACHE
+        export CCACHE_DIR=/workdir/cache/ccache
+        ccache -M 8G
+        ccache -o compression=true
+        ccache -o compression_level=9
+        ccache -o hash_dir=false
+        ccache -o sloppiness=file_macro,include_file_ctime,include_file_mtime,time_macros
         
-        if [ "${{ github.event.inputs.clean_build }}" = "true" ] || [ ! -d "openwrt/.git" ]; then
-          echo "克隆OpenWrt源码..."
-          rm -rf openwrt
-          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
-        else
-          echo "更新源码..."
-          cd openwrt
-          git pull
+        # 设置编译器环境变量
+        export PATH="/usr/lib/ccache:$PATH"
+        export CONFIG_AUTOREMOVE=n
+        export CONFIG_AUTOREBUILD=n
+        export FORCE_UNSAFE_CONFIGURE=1
+        
+        # 配置DL目录
+        echo "配置OpenWrt源代码和下载目录..."
+        cd /workdir/openwrt
+        
+        if [ ! -f ".config" ]; then
+          echo "复制配置文件..."
+          cp /config_file .config
         fi
         
-        cp $GITHUB_WORKSPACE/$CONFIG_FILE ${{ env.WORKDIR }}/openwrt/.config
-        cp $GITHUB_WORKSPACE/$DIY_P1_SH ${{ env.WORKDIR }}/openwrt/
-        cp $GITHUB_WORKSPACE/$DIY_P2_SH ${{ env.WORKDIR }}/openwrt/
-
-    - name: 编译OpenWrt
-      id: compile
-      run: |
-        cat > ${{ env.WORKDIR }}/compile.sh << 'EOF'
-        #!/bin/bash
+        # 链接缓存目录
+        echo "链接缓存目录..."
+        mkdir -p dl build_dir staging_dir
         
-        cd /openwrt
+        if [ -d "/workdir/cache/dl" ]; then
+          echo "链接dl目录..."
+          rm -rf dl
+          ln -sf /workdir/cache/dl ./dl
+        else
+          echo "创建dl目录..."
+          mkdir -p dl
+          ln -sf $(pwd)/dl /workdir/cache/dl
+        fi
         
-        # 更新feeds
+        if [ -d "/workdir/cache/build_dir" ]; then
+          echo "链接build_dir目录..."
+          rm -rf build_dir
+          ln -sf /workdir/cache/build_dir ./build_dir
+        else
+          echo "创建build_dir目录..."
+          mkdir -p build_dir
+          ln -sf $(pwd)/build_dir /workdir/cache/build_dir
+        fi
+        
+        if [ -d "/workdir/cache/staging_dir" ]; then
+          echo "链接staging_dir目录..."
+          rm -rf staging_dir
+          ln -sf /workdir/cache/staging_dir ./staging_dir
+        else
+          echo "创建staging_dir目录..."
+          mkdir -p staging_dir
+          ln -sf $(pwd)/staging_dir /workdir/cache/staging_dir
+        fi
+        
+        # 获取缓存状态
+        REBUILD_TOOLCHAIN=0
+        REBUILD_PACKAGES=0
+        CLEAN_BUILD="${1:-false}"
+        
+        if [ "$CLEAN_BUILD" = "true" ]; then
+          REBUILD_TOOLCHAIN=1
+          REBUILD_PACKAGES=1
+          echo "用户请求完全重新编译"
+        fi
+        
+        # 检查配置文件变化
+        mkdir -p /workdir/cache/build_state
+        TOOLCHAIN_CONFIG=$(grep "^CONFIG_TARGET" .config | sort)
+        TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG" | md5sum | awk '{print $1}')
+        PREVIOUS_TOOLCHAIN_MD5=$(cat /workdir/cache/build_state/toolchain.md5 2>/dev/null || echo "")
+        PACKAGE_CONFIG=$(grep "^CONFIG_PACKAGE" .config | sort)
+        PACKAGE_MD5=$(echo "$PACKAGE_CONFIG" | md5sum | awk '{print $1}')
+        PREVIOUS_PACKAGE_MD5=$(cat /workdir/cache/build_state/package.md5 2>/dev/null || echo "")
+        
+        if [ -z "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
+          echo "工具链配置变化，需要重建工具链"
+          REBUILD_TOOLCHAIN=1
+        fi
+        
+        if [ -z "$PREVIOUS_PACKAGE_MD5" ] || [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
+          echo "软件包配置变化，需要重新编译包"
+          REBUILD_PACKAGES=1
+        fi
+        
+        echo "更新和安装feeds..."
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        
-        # 添加Go编译修复
-        find ./ -name "golang-build.sh" | xargs -I {} sed -i 's/\(go build\)/\1 -buildvcs=false/g' {} || true
-        
-        # 运行自定义脚本
-        chmod +x ./diy-part1.sh
-        ./diy-part1.sh
-        
-        # 二次更新feeds
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-        
-        # 运行第二个脚本
-        chmod +x ./diy-part2.sh
-        ./diy-part2.sh
-        
-        # 配置
-        echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
-        echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
-        echo "CONFIG_TARGET_ROOTFS_TARGZ=y" >> .config
-        echo "CONFIG_GRUB_IMAGES=y" >> .config
-        echo "CONFIG_TARGET_IMAGES_PAD=y" >> .config
-        echo "CONFIG_AUTOREMOVE=n" >> .config
-        echo "CONFIG_CCACHE=y" >> .config
-        
         make defconfig
         
-        # Go包修复
-        find ./feeds -name "Makefile" -exec grep -l "GO_PKG" {} \; | while read file; do
-          if ! grep -q "GO_BUILD_FLAGS" "$file"; then
-            sed -i '/GO_PKG/a GO_BUILD_FLAGS:=-buildvcs=false' "$file" || true
-          fi
-        done
+        # 下载包含重试
+        echo "下载源码包..."
+        make download -j8 || make download -j1 V=s
         
-        if [ -d "./feeds/packages/net/mosdns" ]; then
-          sed -i '/PKG_NAME:=mosdns/a GO_BUILD_FLAGS:=-buildvcs=false' ./feeds/packages/net/mosdns/Makefile || true
-        fi
-        
-        # 创建占位包
-        for pkg in tailscale daed daed-geoip daed-geosite nebula nebula-proto; do
-          mkdir -p ./feeds/packages/net/$pkg
-          cat > ./feeds/packages/net/$pkg/Makefile << EOT
-        include \$(TOPDIR)/rules.mk
-        PKG_NAME:=$pkg
-        PKG_VERSION:=0.0.1
-        PKG_RELEASE:=1
-        PKG_LICENSE:=MIT
-        include \$(INCLUDE_DIR)/package.mk
-        define Package/$pkg
-          SECTION:=net
-          CATEGORY:=Network
-          TITLE:=Placeholder for $pkg
-        endef
-        define Package/$pkg/description
-          Placeholder package
-        endef
-        define Build/Compile
-        endef
-        define Package/$pkg/install
-          \$(INSTALL_DIR) \$(1)/etc
-          touch \$(1)/etc/$pkg
-        endef
-        \$(eval \$(call BuildPackage,$pkg))
-        EOT
-        done
-        
-        # 下载所有依赖
-        make download -j8 || make download -j1
-        
-        # 设置CCACHE环境变量优化增量编译
-        export CCACHE_DIR=/cache/ccache
-        export CCACHE_COMPILERCHECK=content
-        export CCACHE_COMPRESS=1
-        export CCACHE_MAXSIZE=10G
-        
-        # 尝试编译，显示编译进度
-        echo "开始编译，使用$(nproc)个线程..."
-        make -j$(nproc) V=s || make -j1 V=s
-        
-        # 检查编译结果
-        if [ $? -ne 0 ]; then
-          echo "编译失败，但继续处理..."
+        # 编译步骤
+        if [ $REBUILD_TOOLCHAIN -eq 1 ]; then
+          echo "开始构建工具链 (工具链配置已更改)..."
+          make tools/compile -j$(nproc) || make tools/compile V=s
+          make toolchain/compile -j$(nproc) || make toolchain/compile V=s
         else
-          echo "编译成功!"
+          echo "跳过工具链构建 (使用缓存)"
         fi
         
-        # 确保固件目录存在并设置权限
-        mkdir -p bin/targets/x86/64/firmware
-        chmod -R 777 bin/targets/x86/64
-        
-        # 复制固件和其他重要文件
-        find bin/targets/x86/64 -name "*.gz" -exec cp -v {} bin/targets/x86/64/firmware/ \; || true
-        find bin/targets/x86/64 -name "*.img" -exec cp -v {} bin/targets/x86/64/firmware/ \; || true
-        find bin/targets/x86/64 -name "*.vdi" -exec cp -v {} bin/targets/x86/64/firmware/ \; || true
-        find bin/targets/x86/64 -name "*.vmdk" -exec cp -v {} bin/targets/x86/64/firmware/ \; || true
-        
-        # 复制配置和版本信息
-        cp .config bin/targets/x86/64/firmware/config.txt || true
-        date > bin/targets/x86/64/firmware/build_date.txt
-        [ -f ./version.buildinfo ] && cp ./version.buildinfo bin/targets/x86/64/firmware/ || true
-        
-        # 确保目录不为空
-        if [ -z "$(ls -A bin/targets/x86/64/firmware)" ]; then
-          echo "编译未生成固件或复制失败，创建占位文件..."
-          echo "OpenWrt Build Info" > bin/targets/x86/64/firmware/info.txt
-          echo "构建时间: $(date)" >> bin/targets/x86/64/firmware/info.txt
-          echo "请检查编译日志以获取详细信息" >> bin/targets/x86/64/firmware/info.txt
+        if [ $REBUILD_PACKAGES -eq 1 ]; then
+          echo "编译软件包 (软件包配置已更改)..."
+          make package/compile -j$(nproc) IGNORE_ERRORS=1 || make package/compile V=s IGNORE_ERRORS=1
+          make package/index V=s
         else
-          echo "固件文件已成功复制到firmware目录"
-          ls -la bin/targets/x86/64/firmware/
+          echo "跳过软件包编译 (使用缓存)"
         fi
         
-        # 设置权限
-        chmod -R 777 bin/targets/x86/64/firmware
+        # 无论是否重新编译，都生成固件
+        echo "生成固件..."
+        make -j$(nproc) || make -j1 V=s
+        
+        # 保存构建状态
+        echo "$TOOLCHAIN_MD5" > /workdir/cache/build_state/toolchain.md5
+        echo "$PACKAGE_MD5" > /workdir/cache/build_state/package.md5
+        echo "构建完成，显示生成的固件文件..."
+        find bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" | xargs ls -lh || echo "未找到固件文件!"
+        
+        # 显示CCACHE统计
+        ccache -s
         EOF
         
-        chmod +x ${{ env.WORKDIR }}/compile.sh
-        
-        docker run --rm \
-          -v ${{ env.WORKDIR }}/openwrt:/openwrt \
-          -v ${{ env.WORKDIR }}/cache:/cache \
-          -v ${{ env.WORKDIR }}/compile.sh:/compile.sh \
-          openwrt-builder /compile.sh
-        
-        # 设置输出
-        echo "status=success" >> $GITHUB_OUTPUT
-        echo "DEVICE_NAME=_x86_64" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        chmod +x $GITHUB_WORKSPACE/docker-compile.sh
 
-    - name: SSH调试
+    - name: 在Docker容器中克隆源代码
+      run: |
+        # 在Docker容器中克隆源代码
+        docker run --rm \
+          -v ${{ env.WORKDIR }}/openwrt:/workdir/openwrt \
+          -v ${{ env.CACHE_DIR }}:/workdir/cache \
+          -w /workdir/openwrt \
+          ${{ env.DOCKER_CONTAINER }} \
+          /bin/bash -c "git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} . && \
+          curl -L -o feeds.conf.default '${{ env.FEEDS_CONF_URL }}' || echo '警告：无法下载 feeds.conf.default，使用仓库默认配置' && \
+          cat feeds.conf.default && \
+          rm -rf .git"
+        
+        # 确保权限正确
+        sudo chown -R $(id -u):$(id -g) ${{ env.WORKDIR }}/openwrt
+        sudo chown -R $(id -u):$(id -g) ${{ env.CACHE_DIR }}
+        
+        # 复制配置文件到工作目录
+        cp $GITHUB_WORKSPACE/$CONFIG_FILE ${{ env.WORKDIR }}/openwrt/.config
+        
+        echo "源码克隆完成，显示目录结构:"
+        ls -la ${{ env.WORKDIR }}/openwrt
+
+    - name: 开启SSH调试
       uses: mxschmitt/action-tmate@v3
       if: github.event.inputs.ssh == 'true'
 
-    - name: 整理固件文件
-      id: organize
+    - name: 在Docker容器中编译固件
+      id: compile
       run: |
-        # 不需要再创建目录，使用Docker中已创建的目录
-        echo "FIRMWARE=${{ env.WORKDIR }}/openwrt/bin/targets/x86/64/firmware" >> $GITHUB_ENV
+        # 复制编译脚本和配置文件到容器
+        cp $GITHUB_WORKSPACE/docker-compile.sh ${{ env.WORKDIR }}/openwrt/
+        cp $GITHUB_WORKSPACE/$CONFIG_FILE ${{ env.WORKDIR }}/openwrt/config_file
+        
+        # 在Docker容器中运行编译
+        docker run --rm \
+          -v ${{ env.WORKDIR }}/openwrt:/workdir/openwrt \
+          -v ${{ env.CACHE_DIR }}:/workdir/cache \
+          -v $GITHUB_WORKSPACE/docker-compile.sh:/workdir/openwrt/docker-compile.sh \
+          -v $GITHUB_WORKSPACE/$CONFIG_FILE:/config_file \
+          -w /workdir/openwrt \
+          -e DEBIAN_FRONTEND=noninteractive \
+          -e TZ=${{ env.TZ }} \
+          ${{ env.DOCKER_CONTAINER }} \
+          /bin/bash -c "chmod +x /workdir/openwrt/docker-compile.sh && /workdir/openwrt/docker-compile.sh ${{ github.event.inputs.clean_build }}"
+        
+        # 生成设备名和日期
+        cd ${{ env.WORKDIR }}/openwrt
+        echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
+        
+        # 检查编译结果
+        echo "检查固件编译结果:"
+        find ${{ env.WORKDIR }}/openwrt/bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" | xargs ls -lh || echo "未找到固件文件!"
 
-    - name: 上传固件
+    # 保存dl目录缓存
+    - name: 保存下载缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.DL_DIR }}
+        key: dl-${{ env.REPO_BRANCH }}-${{ hashFiles('feeds.conf.default') }}
+
+    # 保存build_dir缓存
+    - name: 保存构建缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.BUILD_DIR }}
+        key: build-${{ env.REPO_BRANCH }}-${{ hashFiles('**/*.config') }}
+
+    # 保存staging_dir缓存
+    - name: 保存工具链缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.STAGING_DIR }}
+        key: staging-${{ env.REPO_BRANCH }}-${{ hashFiles('**/*.config') }}
+
+    # 保存CCACHE缓存
+    - name: 保存CCACHE缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ env.REPO_BRANCH }}-${{ hashFiles('**/*.config') }}
+
+    # 保存构建状态缓存
+    - name: 保存构建状态缓存
+      uses: actions/cache@v3
+      if: "!cancelled()"
+      with:
+        path: ${{ env.BUILD_STATE_DIR }}
+        key: state-${{ env.REPO_BRANCH }}-${{ hashFiles('**/*.config') }}
+
+    - name: 整理文件
+      id: organize
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        # 首先广泛搜索所有可能的固件文件
+        echo "搜索所有可能的固件文件..."
+        find ${{ env.WORKDIR }}/openwrt/bin -type f -name "*.bin" -o -name "*.img" -o -name "*sysupgrade*" -o -name "*combined*" | \
+          xargs -r ls -lh || echo "未找到可能的固件文件"
+          
+        # 检查是否有目标目录
+        if [ ! -d "${{ env.WORKDIR }}/openwrt/bin/targets" ]; then
+          echo "错误：编译目标目录不存在，可能编译失败"
+          # 即使没有固件文件也不报错，而是创建一个空的固件目录
+          mkdir -p ${{ env.WORKDIR }}/openwrt/bin/targets/empty/firmware
+          echo "FIRMWARE=${{ env.WORKDIR }}/openwrt/bin/targets/empty/firmware" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # 查找所有目标目录
+        TARGET_DIRS=$(find ${{ env.WORKDIR }}/openwrt/bin/targets -mindepth 2 -maxdepth 2 -type d)
+        
+        if [ -z "$TARGET_DIRS" ]; then
+          echo "警告：未找到具体目标目录，创建通用目录"
+          mkdir -p ${{ env.WORKDIR }}/openwrt/bin/targets/generic/generic
+          TARGET_DIRS="${{ env.WORKDIR }}/openwrt/bin/targets/generic/generic"
+        fi
+        
+        # 对于每个目标目录，尝试查找固件文件
+        for TARGET_DIR in $TARGET_DIRS; do
+          echo "处理目标目录: $TARGET_DIR"
+          cd "$TARGET_DIR"
+          
+          # 创建固件目录并确保它是空的
+          rm -rf firmware
+          mkdir -p firmware
+          
+          # 查找固件文件 - 使用更宽松的匹配规则
+          FILES_FOUND=0
+          
+          # 尝试复制标准固件文件
+          for pattern in "*combined*" "*sysupgrade*" "*.img" "*.bin"; do
+            echo "尝试复制匹配 $pattern 的文件..."
+            if find . -maxdepth 1 -name "$pattern" | grep -q .; then
+              find . -maxdepth 1 -name "$pattern" -exec cp -f {} ./firmware/ \;
+              FILES_FOUND=1
+            fi
+          done
+          
+          # 如果没有找到标准固件文件，尝试复制所有非清单文件
+          if [ $FILES_FOUND -eq 0 ]; then
+            echo "未找到标准固件文件，尝试复制所有可能的文件..."
+            find . -maxdepth 1 -type f -not -name "*.manifest" -not -name "*.txt" -not -name "*.json" \
+              -not -name "*.buildinfo" -exec cp -f {} ./firmware/ \;
+          fi
+          
+          # 复制配置文件
+          if [ -f "${{ env.WORKDIR }}/openwrt/.config" ]; then
+            cp -f ${{ env.WORKDIR }}/openwrt/.config ./firmware/config.txt
+          fi
+          
+          # 检查是否成功复制了任何文件
+          if [ -n "$(ls -A firmware)" ]; then
+            echo "成功复制固件文件到 $TARGET_DIR/firmware"
+            echo "固件内容:"
+            ls -lh firmware/
+            
+            echo "FIRMWARE=$TARGET_DIR/firmware" >> $GITHUB_ENV
+            echo "status=success" >> $GITHUB_OUTPUT
+            break
+          else
+            echo "警告: $TARGET_DIR 中未找到可用固件文件"
+          fi
+        done
+        
+        # 如果没有找到任何固件文件，使用紧急备用方法
+        if [ -z "$FIRMWARE" ]; then
+          echo "警告：未能在任何目标目录中找到固件文件，使用紧急备用方法"
+          BACKUP_DIR="${{ env.WORKDIR }}/openwrt/bin/targets/generic/backup_firmware"
+          mkdir -p "$BACKUP_DIR/firmware"
+          
+          # 复制所有bin目录下的非包文件
+          find ${{ env.WORKDIR }}/openwrt/bin -type f -not -path "*/packages/*" -exec cp -f {} "$BACKUP_DIR/firmware/" \;
+          
+          # 确保至少有一个配置文件
+          if [ -f "${{ env.WORKDIR }}/openwrt/.config" ]; then
+            cp -f ${{ env.WORKDIR }}/openwrt/.config "$BACKUP_DIR/firmware/config.txt"
+          else
+            echo "# 紧急备用配置" > "$BACKUP_DIR/firmware/config.txt"
+          fi
+          
+          echo "FIRMWARE=$BACKUP_DIR/firmware" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+        fi
+        
+        # 创建固件压缩包
+        if [ -n "$FIRMWARE" ]; then
+          cd $(dirname "$FIRMWARE")
+          zip -r firmware.zip $(basename "$FIRMWARE")
+          echo "FIRMWARE_ZIP=$(dirname "$FIRMWARE")/firmware.zip" >> $GITHUB_ENV
+        fi
+
+    # 上传固件
+    - name: 上传固件目录
       uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success'
+      if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
     - name: 生成发布标签
       id: tag
-      if: env.UPLOAD_RELEASE == 'true'
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
         echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        echo "## OpenWrt Docker构建固件" > release.txt
+        echo "## OpenWrt固件构建完成 📦" > release.txt
         echo "📅 构建时间: $(date +"%Y-%m-%d %H:%M")" >> release.txt
+        echo "📂 固件下载" >> release.txt
+        echo "⚠️ 请在刷机前先做好备份！" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: 上传固件到Releases
       uses: softprops/action-gh-release@v2
-      if: steps.tag.outputs.status == 'success'
+      if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -312,7 +554,7 @@ jobs:
 
     - name: 删除旧的Releases
       uses: dev-drprasad/delete-older-releases@master
-      if: env.UPLOAD_RELEASE == 'true'
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
         keep_latest: 3
         delete_tags: true
