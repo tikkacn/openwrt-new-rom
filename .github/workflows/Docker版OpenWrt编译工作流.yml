@@ -35,7 +35,8 @@ env:
   STAGING_DIR: /workdir/cache/staging_dir
   TOOLCHAIN_DIR: /workdir/cache/staging_dir
   BUILD_STATE_DIR: /workdir/cache/build_state
-  DOCKER_CONTAINER: openwrtorg/buildbot:latest
+  # 使用更可靠的Docker镜像
+  DOCKER_CONTAINER: mwarning/openwrt-builder:latest
 
 jobs:
   build:
@@ -77,7 +78,54 @@ jobs:
     - name: 拉取Docker镜像
       run: |
         echo "拉取Docker构建镜像..."
-        docker pull ${{ env.DOCKER_CONTAINER }}
+        # 先尝试拉取镜像，如果失败则安装本地依赖
+        if ! docker pull ${{ env.DOCKER_CONTAINER }}; then
+          echo "Docker镜像拉取失败，创建本地构建环境..."
+          # 创建一个简单的Dockerfile
+          cat > Dockerfile << 'EOF'
+FROM debian:11
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    ccache \
+    clang \
+    cmake \
+    curl \
+    file \
+    g++ \
+    gawk \
+    gcc \
+    gettext \
+    git \
+    libelf-dev \
+    libncurses5-dev \
+    libssl-dev \
+    make \
+    msmtp \
+    perl \
+    python3 \
+    python3-pip \
+    rsync \
+    unzip \
+    wget \
+    zlib1g-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 添加一个用户以避免权限问题
+RUN useradd -m builder -u 1000 \
+    && echo "builder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/builder \
+    && chmod 0440 /etc/sudoers.d/builder
+
+USER builder
+WORKDIR /home/builder
+
+ENV PATH="/usr/lib/ccache:${PATH}"
+EOF
+          docker build -t local/openwrt-builder:latest .
+          # 使用本地构建的镜像
+          echo "DOCKER_CONTAINER=local/openwrt-builder:latest" >> $GITHUB_ENV
+        fi
         
         # 创建缓存目录
         echo "创建缓存目录结构..."
@@ -197,7 +245,7 @@ jobs:
         echo "目录内容: $(ls -la)"
 
         # 设置CCACHE
-        export CCACHE_DIR=/workdir/cache/ccache
+        export CCACHE_DIR=/home/builder/cache/ccache
         ccache -M 8G
         ccache -o compression=true
         ccache -o compression_level=9
@@ -212,7 +260,7 @@ jobs:
         
         # 配置DL目录
         echo "配置OpenWrt源代码和下载目录..."
-        cd /workdir/openwrt
+        cd /home/builder/openwrt
         
         if [ ! -f ".config" ]; then
           echo "复制配置文件..."
@@ -223,34 +271,34 @@ jobs:
         echo "链接缓存目录..."
         mkdir -p dl build_dir staging_dir
         
-        if [ -d "/workdir/cache/dl" ]; then
+        if [ -d "/home/builder/cache/dl" ]; then
           echo "链接dl目录..."
           rm -rf dl
-          ln -sf /workdir/cache/dl ./dl
+          ln -sf /home/builder/cache/dl ./dl
         else
           echo "创建dl目录..."
           mkdir -p dl
-          ln -sf $(pwd)/dl /workdir/cache/dl
+          ln -sf $(pwd)/dl /home/builder/cache/dl
         fi
         
-        if [ -d "/workdir/cache/build_dir" ]; then
+        if [ -d "/home/builder/cache/build_dir" ]; then
           echo "链接build_dir目录..."
           rm -rf build_dir
-          ln -sf /workdir/cache/build_dir ./build_dir
+          ln -sf /home/builder/cache/build_dir ./build_dir
         else
           echo "创建build_dir目录..."
           mkdir -p build_dir
-          ln -sf $(pwd)/build_dir /workdir/cache/build_dir
+          ln -sf $(pwd)/build_dir /home/builder/cache/build_dir
         fi
         
-        if [ -d "/workdir/cache/staging_dir" ]; then
+        if [ -d "/home/builder/cache/staging_dir" ]; then
           echo "链接staging_dir目录..."
           rm -rf staging_dir
-          ln -sf /workdir/cache/staging_dir ./staging_dir
+          ln -sf /home/builder/cache/staging_dir ./staging_dir
         else
           echo "创建staging_dir目录..."
           mkdir -p staging_dir
-          ln -sf $(pwd)/staging_dir /workdir/cache/staging_dir
+          ln -sf $(pwd)/staging_dir /home/builder/cache/staging_dir
         fi
         
         # 获取缓存状态
@@ -265,13 +313,13 @@ jobs:
         fi
         
         # 检查配置文件变化
-        mkdir -p /workdir/cache/build_state
+        mkdir -p /home/builder/cache/build_state
         TOOLCHAIN_CONFIG=$(grep "^CONFIG_TARGET" .config | sort)
         TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG" | md5sum | awk '{print $1}')
-        PREVIOUS_TOOLCHAIN_MD5=$(cat /workdir/cache/build_state/toolchain.md5 2>/dev/null || echo "")
+        PREVIOUS_TOOLCHAIN_MD5=$(cat /home/builder/cache/build_state/toolchain.md5 2>/dev/null || echo "")
         PACKAGE_CONFIG=$(grep "^CONFIG_PACKAGE" .config | sort)
         PACKAGE_MD5=$(echo "$PACKAGE_CONFIG" | md5sum | awk '{print $1}')
-        PREVIOUS_PACKAGE_MD5=$(cat /workdir/cache/build_state/package.md5 2>/dev/null || echo "")
+        PREVIOUS_PACKAGE_MD5=$(cat /home/builder/cache/build_state/package.md5 2>/dev/null || echo "")
         
         if [ -z "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
           echo "工具链配置变化，需要重建工具链"
@@ -314,8 +362,8 @@ jobs:
         make -j$(nproc) || make -j1 V=s
         
         # 保存构建状态
-        echo "$TOOLCHAIN_MD5" > /workdir/cache/build_state/toolchain.md5
-        echo "$PACKAGE_MD5" > /workdir/cache/build_state/package.md5
+        echo "$TOOLCHAIN_MD5" > /home/builder/cache/build_state/toolchain.md5
+        echo "$PACKAGE_MD5" > /home/builder/cache/build_state/package.md5
         echo "构建完成，显示生成的固件文件..."
         find bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" | xargs ls -lh || echo "未找到固件文件!"
         
@@ -329,9 +377,9 @@ jobs:
       run: |
         # 在Docker容器中克隆源代码
         docker run --rm \
-          -v ${{ env.WORKDIR }}/openwrt:/workdir/openwrt \
-          -v ${{ env.CACHE_DIR }}:/workdir/cache \
-          -w /workdir/openwrt \
+          -v ${{ env.WORKDIR }}/openwrt:/home/builder/openwrt \
+          -v ${{ env.CACHE_DIR }}:/home/builder/cache \
+          -w /home/builder/openwrt \
           ${{ env.DOCKER_CONTAINER }} \
           /bin/bash -c "git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} . && \
           curl -L -o feeds.conf.default '${{ env.FEEDS_CONF_URL }}' || echo '警告：无法下载 feeds.conf.default，使用仓库默认配置' && \
@@ -361,15 +409,15 @@ jobs:
         
         # 在Docker容器中运行编译
         docker run --rm \
-          -v ${{ env.WORKDIR }}/openwrt:/workdir/openwrt \
-          -v ${{ env.CACHE_DIR }}:/workdir/cache \
-          -v $GITHUB_WORKSPACE/docker-compile.sh:/workdir/openwrt/docker-compile.sh \
+          -v ${{ env.WORKDIR }}/openwrt:/home/builder/openwrt \
+          -v ${{ env.CACHE_DIR }}:/home/builder/cache \
+          -v $GITHUB_WORKSPACE/docker-compile.sh:/home/builder/openwrt/docker-compile.sh \
           -v $GITHUB_WORKSPACE/$CONFIG_FILE:/config_file \
-          -w /workdir/openwrt \
+          -w /home/builder/openwrt \
           -e DEBIAN_FRONTEND=noninteractive \
           -e TZ=${{ env.TZ }} \
           ${{ env.DOCKER_CONTAINER }} \
-          /bin/bash -c "chmod +x /workdir/openwrt/docker-compile.sh && /workdir/openwrt/docker-compile.sh ${{ github.event.inputs.clean_build }}"
+          /bin/bash -c "chmod +x /home/builder/openwrt/docker-compile.sh && /home/builder/openwrt/docker-compile.sh ${{ github.event.inputs.clean_build }}"
         
         # 生成设备名和日期
         cd ${{ env.WORKDIR }}/openwrt
