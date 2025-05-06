@@ -75,54 +75,57 @@ jobs:
         fi
         df -h
 
-    - name: 拉取Docker镜像
+    - name: 创建Dockerfile
       run: |
-        echo "拉取Docker构建镜像..."
-        # 先尝试拉取镜像，如果失败则安装本地依赖
-        if ! docker pull ${{ env.DOCKER_CONTAINER }}; then
-          echo "Docker镜像拉取失败，创建本地构建环境..."
-          # 创建一个简单的Dockerfile
-          cat > Dockerfile << EOF
+        # 创建一个单独的Dockerfile文件而不是内联
+        cat > Dockerfile << 'EOF'
 FROM debian:11
 
-RUN apt-get update && apt-get install -y \\
-    build-essential \\
-    ccache \\
-    clang \\
-    cmake \\
-    curl \\
-    file \\
-    g++ \\
-    gawk \\
-    gcc \\
-    gettext \\
-    git \\
-    libelf-dev \\
-    libncurses5-dev \\
-    libssl-dev \\
-    make \\
-    msmtp \\
-    perl \\
-    python3 \\
-    python3-pip \\
-    rsync \\
-    unzip \\
-    wget \\
-    zlib1g-dev \\
-    && apt-get clean \\
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    ccache \
+    clang \
+    cmake \
+    curl \
+    file \
+    g++ \
+    gawk \
+    gcc \
+    gettext \
+    git \
+    libelf-dev \
+    libncurses5-dev \
+    libssl-dev \
+    make \
+    msmtp \
+    perl \
+    python3 \
+    python3-pip \
+    rsync \
+    unzip \
+    wget \
+    zlib1g-dev \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # 添加一个用户以避免权限问题
-RUN useradd -m builder -u 1000 \\
-    && echo "builder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/builder \\
+RUN useradd -m builder -u 1000 \
+    && echo "builder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/builder \
     && chmod 0440 /etc/sudoers.d/builder
 
 USER builder
 WORKDIR /home/builder
 
-ENV PATH="/usr/lib/ccache:\${PATH}"
+ENV PATH="/usr/lib/ccache:${PATH}"
 EOF
-          docker build -t local/openwrt-builder:latest .
+
+    - name: 拉取Docker镜像
+      run: |
+        echo "拉取Docker构建镜像..."
+        # 先尝试拉取镜像，如果失败则创建本地镜像
+        if ! docker pull ${{ env.DOCKER_CONTAINER }}; then
+          echo "Docker镜像拉取失败，创建本地构建环境..."
+          docker build -t local/openwrt-builder:latest -f Dockerfile .
           # 使用本地构建的镜像
           echo "DOCKER_CONTAINER=local/openwrt-builder:latest" >> $GITHUB_ENV
         fi
@@ -212,7 +215,7 @@ EOF
         # 检查可用空间
         df -h
 
-    - name: 准备初始化脚本
+    - name: 创建编译脚本
       run: |
         # 创建DIY脚本
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
@@ -233,7 +236,7 @@ EOF
           echo "CONFIG_PACKAGE_luci=y" >> $GITHUB_WORKSPACE/$CONFIG_FILE
         fi
         
-        # 创建Docker编译脚本
+        # 创建Docker编译脚本 - 使用单引号避免变量替换问题
         cat > $GITHUB_WORKSPACE/docker-compile.sh << 'EOF'
 #!/bin/bash
 set -e
