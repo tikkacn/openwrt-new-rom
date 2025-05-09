@@ -189,6 +189,7 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_P2_SH
         echo "CONFIG_AUTOREMOVE=n" >> .config
         echo "CONFIG_AUTOREBUILD=n" >> .config
+        echo "CONFIG_SIGNED_PACKAGES=n" >> .config # <--- 修改点1：禁用软件包签名
         echo "确保包含必要的固件生成配置..."
         # ... (省略了部分固件配置确保逻辑，与原版一致) ...
         if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config; fi
@@ -413,12 +414,10 @@ jobs:
           echo ">>> CCACHE: Statistics at END of compile_firmware function:" | tee -a ${{ env.DEBUG_LOG_FILE }}
           ccache -s | tee -a ${{ env.DEBUG_LOG_FILE }}
 
-          if [ $? -eq 0 ]; then
-            echo "compile_firmware函数判断为成功" | tee -a ${{ env.DEBUG_LOG_FILE }}
-          else
-            echo "compile_firmware函数判断为失败" | tee -a ${{ env.DEBUG_LOG_FILE }}
-            # exit 1 # 保持原来的逻辑，如果这里退出，后续的status=success可能不会执行
-          fi
+          # 返回 make 命令的退出状态，而不是函数本身的退出状态
+          # (除非 make 成功但后续 save_cache_info 等失败，但这些通常不应该导致函数失败)
+          # 保持原有逻辑，如果 make 失败，则整个 compile_firmware 应该反映这个失败
+          return $? 
         }
         
         MAX_RETRIES=3 # 下载重试参数
@@ -453,8 +452,8 @@ jobs:
         else
           echo "Config appears unchanged, checking feeds_changed for package build decision..." | tee -a ${{ env.DEBUG_LOG_FILE }}
           if [ "${{ env.feeds_changed }}" = "true" ]; then
-             echo "feeds_changed is true, setting DO_PACKAGE_BUILD=1" | tee -a ${{ env.DEBUG_LOG_FILE }}
-             DO_PACKAGE_BUILD=1 # 如果仅 feeds 变化，也触发包编译
+              echo "feeds_changed is true, setting DO_PACKAGE_BUILD=1" | tee -a ${{ env.DEBUG_LOG_FILE }}
+              DO_PACKAGE_BUILD=1 # 如果仅 feeds 变化，也触发包编译
           fi
         fi
         echo "Final DO_FULL_BUILD: $DO_FULL_BUILD" | tee -a ${{ env.DEBUG_LOG_FILE }}
@@ -462,11 +461,8 @@ jobs:
         echo "--- End Debug Log: Build Decision Variables ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
 
         compile_firmware # 调用编译函数
-
-        # 确保 compile_firmware 的退出状态被正确处理
-        # 如果 compile_firmware 内部 exit 1, 这里可能不会执行
-        # 但我们希望即使编译失败也尽可能记录日志和上传
-        compile_status=$? 
+        
+        compile_status=$?  # <--- 修改点2：移除了 'local'
         if [ $compile_status -ne 0 ]; then
           echo "compile_firmware exited with status $compile_status" | tee -a ${{ env.DEBUG_LOG_FILE }}
           echo "status=failure" >> $GITHUB_OUTPUT
@@ -480,11 +476,6 @@ jobs:
         ccache -s | tee -a ${{ env.DEBUG_LOG_FILE }}
         df -h | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "--- Debug Log: Compile Step End ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        # 如果 compile_firmware 内部 exit 1, 脚本可能已经终止
-        # 为了确保后续步骤（如上传debug log）执行，避免在这里直接 exit 1 除非必要
-
-    # ... (后续步骤如 检查固件生成结果, 检查工具链大小, 保存缓存等保持不变) ...
-    # 但要确保这些步骤在编译失败时也能合理执行或跳过，特别是缓存保存步骤
 
     - name: 检查固件生成结果 # (保持不变)
       run: |
@@ -603,7 +594,7 @@ jobs:
           cd $(dirname "$FIRMWARE"); zip -r firmware.zip $(basename "$FIRMWARE");
           echo "FIRMWARE_ZIP=$(dirname "$FIRMWARE")/firmware.zip" >> $GITHUB_ENV; # FIRMWARE_ZIP 指向 zip 文件
         elif [ -n "$FIRMWARE" ] && [ ! -d "$FIRMWARE" ]; then # 如果 FIRMWARE 不是目录，可能是单个文件
-           echo "警告: FIRMWARE 环境变量 ($FIRMWARE) 不是一个目录，无法创建 zip 包。"
+            echo "警告: FIRMWARE 环境变量 ($FIRMWARE) 不是一个目录，无法创建 zip 包。"
         fi
 
     - name: 上传固件目录
@@ -633,7 +624,7 @@ jobs:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
         # files: ${{ env.FIRMWARE }}/* # 如果FIRMWARE是目录
-        files: ${{ env.FIRMWARE_ZIP || env.FIRMWARE }}/* # 优先上传zip中的所有文件，或FIRMWARE目录下的所有文件
+        files: ${{ env.FIRMWARE_ZIP || format('{0}/*', env.FIRMWARE) }} # 优先上传zip中的所有文件，或FIRMWARE目录下的所有文件
 
     - name: 删除旧的Releases # (保持不变)
       uses: dev-drprasad/delete-older-releases@master
