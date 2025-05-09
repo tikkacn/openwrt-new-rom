@@ -466,7 +466,7 @@ jobs:
         # 确保 compile_firmware 的退出状态被正确处理
         # 如果 compile_firmware 内部 exit 1, 这里可能不会执行
         # 但我们希望即使编译失败也尽可能记录日志和上传
-        local compile_status=$? 
+        compile_status=$? 
         if [ $compile_status -ne 0 ]; then
           echo "compile_firmware exited with status $compile_status" | tee -a ${{ env.DEBUG_LOG_FILE }}
           echo "status=failure" >> $GITHUB_OUTPUT
