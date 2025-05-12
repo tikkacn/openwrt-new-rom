@@ -463,14 +463,10 @@ jobs:
 
         compile_firmware # 调用编译函数
 
-        # 确保 compile_firmware 的退出状态被正确处理
-        # 如果 compile_firmware 内部 exit 1, 这里可能不会执行
-        # 但我们希望即使编译失败也尽可能记录日志和上传
         compile_status=$? 
         if [ $compile_status -ne 0 ]; then
           echo "compile_firmware exited with status $compile_status" | tee -a ${{ env.DEBUG_LOG_FILE }}
           echo "status=failure" >> $GITHUB_OUTPUT
-          # exit $compile_status # 保持原来的逻辑，如果这里退出，后续的status=success可能不会执行
         else
           echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_')" >> $GITHUB_ENV
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
@@ -480,11 +476,6 @@ jobs:
         ccache -s | tee -a ${{ env.DEBUG_LOG_FILE }}
         df -h | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "--- Debug Log: Compile Step End ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        # 如果 compile_firmware 内部 exit 1, 脚本可能已经终止
-        # 为了确保后续步骤（如上传debug log）执行，避免在这里直接 exit 1 除非必要
-
-    # ... (后续步骤如 检查固件生成结果, 检查工具链大小, 保存缓存等保持不变) ...
-    # 但要确保这些步骤在编译失败时也能合理执行或跳过，特别是缓存保存步骤
 
     - name: 检查固件生成结果 # (保持不变)
       run: |
@@ -507,17 +498,56 @@ jobs:
           find /workdir/openwrt/bin/targets -type f -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" | xargs ls -lh || echo "仍然未找到固件文件";
         fi
 
-    - name: 备份缓存前检查工具链大小 # (保持不变)
+    # MODIFIED STEP STARTS HERE
+    - name: 备份缓存前检查工具链和各构建目录大小
       if: "!cancelled()"
       run: |
-        echo "编译完成，检查工具链大小..." | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "工具链目录大小: $(du -sh ${{ env.TOOLCHAIN_DIR }} 2>/dev/null || echo '目录不存在或为空')" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        # ... 其他 du -sh 命令也加入 tee -a ...
+        echo "编译完成，详细检查工具链和各构建缓存目录大小..." | tee -a ${{ env.DEBUG_LOG_FILE }}
+        
+        # Detailed sizes for main GitHub Actions log visibility
+        echo ""
+        echo "--- 详细目录大小检查 (du -sh) ---"
+        CURRENT_DATE_WITH_TZ=$(date +"%Y-%m-%d %H:%M:%S %Z")
+        echo "检查时间: $CURRENT_DATE_WITH_TZ"
+        echo "--------------------------------------------------"
+        
+        check_and_log_size() {
+            local dir_path="$1"
+            local dir_desc="$2"
+            local size_output
+            local readable_size="未知或目录不存在"
+
+            if [ -e "${dir_path}" ]; then # Check if path exists (file or directory)
+                readable_size=$(du -sh "${dir_path}" | awk '{print $1}')
+                echo "$dir_desc (${dir_path}): ${readable_size}"
+            else
+                echo "$dir_desc (${dir_path}): 目录不存在或为空"
+            fi
+            # Log to DEBUG_LOG_FILE
+            echo "${dir_desc} (${dir_path}): ${readable_size}" | sed "s/^/[DEBUG_LOG] /" >> ${{ env.DEBUG_LOG_FILE }}
+        }
+
+        check_and_log_size "${{ env.TOOLCHAIN_DIR }}" "1. 工具链安装目录 (TOOLCHAIN_DIR)"
+        check_and_log_size "${{ env.TOOLCHAIN_BUILD_DIR }}" "2. 工具链构建目录 (TOOLCHAIN_BUILD_DIR)"
+        check_and_log_size "${{ env.PACKAGES_DIR }}" "3. 编译包输出目录 (PACKAGES_DIR)"
+        check_and_log_size "${{ env.CCACHE_DIR }}" "4. CCACHE目录 (CCACHE_DIR)"
+        check_and_log_size "/workdir/openwrt/build_dir/host/" "5. 主机工具构建目录 (/workdir/openwrt/build_dir/host/)"
+        check_and_log_size "/workdir/openwrt/build_dir/" "6. 整个 OpenWrt build_dir 目录 (参考)"
+        check_and_log_size "${{ env.BUILD_STATE_DIR }}" "7. 构建状态目录 (BUILD_STATE_DIR)"
+        
+        echo "--------------------------------------------------"
+        echo "--- 详细目录大小检查结束 ---"
+        echo ""
+
+        # Original functionality: create cache_timestamp.txt
         mkdir -p ${{ env.BUILD_STATE_DIR }}
-        echo "缓存创建时间: $(date)" > ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
+        echo "缓存创建/检查时间: $CURRENT_DATE_WITH_TZ" > ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
         echo "运行ID: ${{ github.run_id }}" >> ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
         echo "构建分支: ${{ env.REPO_BRANCH }}" >> ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt
-
+        echo "[DEBUG_LOG] 已更新缓存时间戳文件: ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt" >> ${{ env.DEBUG_LOG_FILE }}
+        echo "已更新缓存时间戳文件: ${{ env.BUILD_STATE_DIR }}/cache_timestamp.txt"
+    # MODIFIED STEP ENDS HERE
+        
     - name: 保存工具链缓存 # (保持不变)
       uses: actions/cache@v3
       if: "!cancelled()"
@@ -566,11 +596,11 @@ jobs:
         path: |
           ${{ env.DEBUG_LOG_FILE }}
           ${{ env.CCACHE_LOGFILE }}
+          /workdir/openwrt/logs/ # 也上传 make 的输出日志
         retention-days: 7 # 保留7天
 
     - name: 整理文件 # (保持不变)
       id: organize
-      # 确保 compile step 的 output status 被正确引用
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         # ... (整理文件脚本保持不变) ...
@@ -632,10 +662,7 @@ jobs:
       with:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
-        # files: ${{ env.FIRMWARE }}/* # 如果FIRMWARE是目录
-        files: ${{ env.FIRMWARE_ZIP || env.FIRMWARE }}/* # 优先上传zip中的所有文件，或FIRMWARE目录下的所有文件
-
-    - name: 删除旧的Releases # (保持不变)
+        files: ${{ env.FIRMWARE_ZIP || env.FIRMWARE }}/* - name: 删除旧的Releases # (保持不变)
       uses: dev-drprasad/delete-older-releases@master
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
