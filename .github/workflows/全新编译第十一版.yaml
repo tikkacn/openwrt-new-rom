@@ -662,7 +662,10 @@ jobs:
       with:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE_ZIP || env.FIRMWARE }}/* - name: 删除旧的Releases # (保持不变)
+        # files: ${{ env.FIRMWARE }}/* # 如果FIRMWARE是目录
+        files: ${{ env.FIRMWARE_ZIP || env.FIRMWARE }}/* # 优先上传zip中的所有文件，或FIRMWARE目录下的所有文件
+
+    - name: 删除旧的Releases # (保持不变)    # <--- 这一行需要另起一行并正确缩进
       uses: dev-drprasad/delete-older-releases@master
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
