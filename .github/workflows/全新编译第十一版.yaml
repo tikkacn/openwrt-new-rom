@@ -107,15 +107,19 @@ jobs:
         df -h
 
     - name: 克隆源代码并配置 Feeds
-      working-directory: /workdir
+      working-directory: /workdir # 确保此步骤的工作目录是 /workdir
       run: |
+        echo "正在清理可能已存在的 /workdir/openwrt 目录..."
+        rm -rf /workdir/openwrt  # <--- 新增此行来删除旧目录
+        echo "克隆新的源代码到 /workdir/openwrt..."
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-        cd openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt # 创建符号链接，以便后续步骤通过 $GITHUB_WORKSPACE/openwrt 访问
+        cd openwrt # 进入新克隆的目录
         find . -type f -name "*.sh" -exec chmod +x {} \;
         curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "警告：无法下载 feeds.conf.default，使用仓库默认配置"
         cat feeds.conf.default
-        rm -rf .git
+        rm -rf .git # 从新克隆的目录中移除 .git 以减少空间和避免干扰
+        # 创建后续步骤可能需要的目录，确保它们存在
         mkdir -p ${{ env.PACKAGES_DIR }} ${{ env.TOOLCHAIN_DIR }} ${{ env.TOOLCHAIN_BUILD_DIR }} ${{ env.HOST_BUILD_DIR_PATH }} ${{ env.BUILD_STATE_DIR }}
         mkdir -p logs
 
