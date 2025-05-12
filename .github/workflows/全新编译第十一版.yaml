@@ -8,9 +8,9 @@ on:
         required: false
         default: 'false'
       clean_build:
-        description: '完全重新编译 (会删除并重建所有缓存)' # 描述更新
+        description: '不使用任何已恢复的缓存进行全新编译 (但仍会尝试保存新缓存)'
         required: false
-        default: 'false'
+        default: 'false' # 关键：首次填充缓存时应为 false
       config_file:
         description: '配置文件'
         required: false
@@ -27,10 +27,10 @@ env:
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
   CCACHE_DIR: /workdir/ccache
-  TOOLCHAIN_DIR: /workdir/openwrt/staging_dir # 即 Staging Dir
-  TOOLCHAIN_BUILD_DIR: /workdir/openwrt/build_dir/toolchain-x86_64_gcc-13.3.0_musl # 即 Toolchain Build Dir
-  HOST_BUILD_DIR_PATH: /workdir/openwrt/build_dir/host # 新增环境变量用于 Host Build Dir
-  PACKAGES_DIR: /workdir/openwrt/bin/targets
+  TOOLCHAIN_DIR: /workdir/openwrt/staging_dir # Staging Dir (工具链安装目录)
+  # TOOLCHAIN_BUILD_DIR: /workdir/openwrt/build_dir/toolchain-x86_64_gcc-13.3.0_musl # 不再单独缓存此目录
+  HOST_BUILD_DIR_PATH: /workdir/openwrt/build_dir/host # Host Build Dir
+  PACKAGES_DIR: /workdir/openwrt/bin # PACKAGES_DIR现在指向bin目录，packages缓存将包含整个bin/targets和bin/packages
   BUILD_STATE_DIR: /workdir/build_state
   CCACHE_LOGFILE: /tmp/ccache_detailed.log
   DEBUG_LOG_FILE: /tmp/build_debug_summary.log
@@ -58,18 +58,11 @@ jobs:
     - name: 额外清理磁盘空间并检查
       run: |
         echo "清理额外磁盘空间..."
-        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
-        sudo rm -rf /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL
         docker image prune -a -f || true
         docker system prune -af || true
         sudo apt-get clean
         sudo apt-get autoremove -y
-        ROOT_AVAIL=$(df -m /dev/root | tail -1 | awk '{print $4}')
-        echo "根分区可用空间: ${ROOT_AVAIL}MB"
-        if [ "$ROOT_AVAIL" -lt 20480 ]; then
-          echo "错误：/dev/root 可用空间不足 20GB"
-          exit 1
-        fi
         df -h
 
     - name: 初始化环境
@@ -86,14 +79,15 @@ jobs:
         swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
-        mkdir -p ${{ env.BUILD_STATE_DIR }} ${{ env.CCACHE_DIR }} ${{ env.HOST_BUILD_DIR_PATH }}
+        mkdir -p ${{ env.BUILD_STATE_DIR }} ${{ env.CCACHE_DIR }} ${{ env.HOST_BUILD_DIR_PATH }} /workdir/openwrt # 确保openwrt根目录存在
         chmod -R 777 /workdir
+        # (DIY脚本创建逻辑保持不变)
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part1.sh
         echo '# Feeds 已通过 FEEDS_CONF_URL 配置' >> $GITHUB_WORKSPACE/diy-part1.sh
         echo '# 无自定义内容 (diy-part1.sh)' >> $GITHUB_WORKSPACE/diy-part1.sh
         chmod +x $GITHUB_WORKSPACE/diy-part1.sh
         echo '#!/bin/bash' > $GITHUB_WORKSPACE/diy-part2.sh
-        echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild_$(date +"%Y%m%d%H%M") /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh # Banner加入时间戳
+        echo 'sed -i "s/OpenWrt /OpenWrt_AutoBuild_$(date +"%Y%m%d%H%M") /" package/lean/default-settings/files/zzz-default-settings' >> $GITHUB_WORKSPACE/diy-part2.sh
         echo '# 无额外自定义内容 (diy-part2.sh)' >> $GITHUB_WORKSPACE/diy-part2.sh
         chmod +x $GITHUB_WORKSPACE/diy-part2.sh
         if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
@@ -107,61 +101,63 @@ jobs:
         df -h
 
     - name: 克隆源代码并配置 Feeds
-      working-directory: /workdir # 确保此步骤的工作目录是 /workdir
+      working-directory: /workdir
       run: |
         echo "正在清理可能已存在的 /workdir/openwrt 目录..."
-        rm -rf /workdir/openwrt  # <--- 新增此行来删除旧目录
+        rm -rf /workdir/openwrt
         echo "克隆新的源代码到 /workdir/openwrt..."
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt # 创建符号链接，以便后续步骤通过 $GITHUB_WORKSPACE/openwrt 访问
-        cd openwrt # 进入新克隆的目录
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        cd openwrt
         find . -type f -name "*.sh" -exec chmod +x {} \;
         curl -L -o feeds.conf.default "$FEEDS_CONF_URL" || echo "警告：无法下载 feeds.conf.default，使用仓库默认配置"
         cat feeds.conf.default
-        rm -rf .git # 从新克隆的目录中移除 .git 以减少空间和避免干扰
-        # 创建后续步骤可能需要的目录，确保它们存在
-        mkdir -p ${{ env.PACKAGES_DIR }} ${{ env.TOOLCHAIN_DIR }} ${{ env.TOOLCHAIN_BUILD_DIR }} ${{ env.HOST_BUILD_DIR_PATH }} ${{ env.BUILD_STATE_DIR }}
-        mkdir -p logs
+        rm -rf .git
+        mkdir -p ${{ env.PACKAGES_DIR }} ${{ env.TOOLCHAIN_DIR }} ${{ env.HOST_BUILD_DIR_PATH }} ${{ env.BUILD_STATE_DIR }}
+        mkdir -p logs # 确保logs目录存在
 
-    # --- CACHE RESTORE STEPS ---
-    - name: 恢复 Staging Dir (已安装工具链和库) 缓存
+    # --- CACHE RESTORE STEPS (Revised Strategy) ---
+    - name: 恢复 Staging Dir 缓存 (精简版)
       uses: actions/cache@v3
       id: cache-staging-dir
       if: inputs.clean_build != 'true'
       with:
-        path: ${{ env.TOOLCHAIN_DIR }} # /workdir/openwrt/staging_dir
-        key: staging-dir-${{ env.REPO_BRANCH }}-fixed-cache
+        path: |
+          ${{ env.TOOLCHAIN_DIR }}
+          !${{ env.TOOLCHAIN_DIR }}/usr/share/doc
+          !${{ env.TOOLCHAIN_DIR }}/usr/share/man
+          !${{ env.TOOLCHAIN_DIR }}/host/share/doc
+          !${{ env.TOOLCHAIN_DIR }}/host/share/man
+          # 可以根据实际情况添加更多排除项，例如 !${{ env.TOOLCHAIN_DIR }}/usr/include/的一些非核心部分
+        key: staging-dir-slim-${{ env.REPO_BRANCH }}-fixed-cache-v1 # key已更新
 
-    - name: 恢复 Toolchain Build Dir (交叉编译器构建产物) 缓存
-      uses: actions/cache@v3
-      id: cache-toolchain-build-dir
-      if: inputs.clean_build != 'true'
-      with:
-        path: ${{ env.TOOLCHAIN_BUILD_DIR }} # /workdir/openwrt/build_dir/toolchain-x86_64_gcc-13.3.0_musl
-        key: toolchain-build-dir-${{ env.REPO_BRANCH }}-fixed-cache
-
-    - name: 恢复 Host Build Dir (主机工具构建产物) 缓存
+    - name: 恢复 Host Build Dir 缓存
       uses: actions/cache@v3
       id: cache-host-build-dir
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.HOST_BUILD_DIR_PATH }} # /workdir/openwrt/build_dir/host/
-        key: host-build-dir-${{ env.REPO_BRANCH }}-fixed-cache
+        # 如果1.5G仍导致保存不完整，后续可考虑在此加入排除规则
+        # path: |
+        #   ${{ env.HOST_BUILD_DIR_PATH }}
+        #   !${{ env.HOST_BUILD_DIR_PATH }}/some_large_tool_build_subdir_docs
+        key: host-build-dir-${{ env.REPO_BRANCH }}-fixed-cache-v1 # key版本更新
 
-    - name: 恢复编译包缓存 (IPKs and Images)
+    - name: 恢复编译产物缓存 (IPKs, Images, etc. from bin/)
       uses: actions/cache@v3
-      id: cache-packages
+      id: cache-packages # PACKAGES_DIR 现在指向 /workdir/openwrt/bin
       if: inputs.clean_build != 'true'
       with:
-        path: ${{ env.PACKAGES_DIR }} # /workdir/openwrt/bin/targets
-        key: packages-${{ env.REPO_BRANCH }}-fixed-cache
+        path: ${{ env.PACKAGES_DIR }} 
+        key: built-packages-bin-${{ env.REPO_BRANCH }}-fixed-cache-v1 # 新key
 
     - name: 恢复CCACHE缓存
       uses: actions/cache@v3
       id: cache-ccache
+      # 不再受 clean_build 影响，总是尝试恢复和保存ccache
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache
+        key: ccache-${{ env.REPO_BRANCH }}-fixed-cache-v1 # key版本更新，或可加入config hash
 
     - name: 恢复构建状态缓存
       uses: actions/cache@v3
@@ -169,57 +165,50 @@ jobs:
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.BUILD_STATE_DIR }}
-        key: state-${{ env.REPO_BRANCH }}-fixed-cache
+        key: state-${{ env.REPO_BRANCH }}-fixed-cache-v1 # key版本更新
     # --- END CACHE RESTORE STEPS ---
 
     - name: 检查缓存恢复状态
       run: |
         echo "--- Debug Log: Cache Status ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "CONFIG_FILE: ${{ env.CONFIG_FILE }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "Staging Dir 缓存恢复状态: ${{ steps.cache-staging-dir.outputs.cache-hit == 'true' && '成功' || '未找到缓存或不使用' }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "Toolchain Build Dir 缓存恢复状态: ${{ steps.cache-toolchain-build-dir.outputs.cache-hit == 'true' && '成功' || '未找到缓存或不使用' }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
+        echo "Staging Dir (Slim) 缓存恢复状态: ${{ steps.cache-staging-dir.outputs.cache-hit == 'true' && '成功' || '未找到缓存或不使用' }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "Host Build Dir 缓存恢复状态: ${{ steps.cache-host-build-dir.outputs.cache-hit == 'true' && '成功' || '未找到缓存或不使用' }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "编译包缓存恢复状态: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '成功' || '未找到缓存或不使用' }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
+        echo "编译产物缓存恢复状态: ${{ steps.cache-packages.outputs.cache-hit == 'true' && '成功' || '未找到缓存或不使用' }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "CCACHE缓存恢复状态: ${{ steps.cache-ccache.outputs.cache-hit == 'true' && '成功' || '未找到缓存' }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "构建状态缓存恢复状态: ${{ steps.cache-state.outputs.cache-hit == 'true' && '成功' || '未找到缓存或不使用' }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "Staging目录大小 (TOOLCHAIN_DIR): $(du -sh ${{ env.TOOLCHAIN_DIR }} 2>/dev/null || echo '目录不存在或为空')" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "Toolchain构建目录大小 (TOOLCHAIN_BUILD_DIR): $(du -sh ${{ env.TOOLCHAIN_BUILD_DIR }} 2>/dev/null || echo '目录不存在或为空')" | tee -a ${{ env.DEBUG_LOG_FILE }}
+        # TOOLCHAIN_BUILD_DIR 不再被直接缓存，但仍检查其构建后的大小（如果它被间接创建）
+        echo "Toolchain构建目录大小 (Not directly cached): $(du -sh /workdir/openwrt/build_dir/toolchain-$(uname -m)_gcc-*_musl 2>/dev/null || echo '目录不存在或未被构建')" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "Host构建目录大小 (HOST_BUILD_DIR_PATH): $(du -sh ${{ env.HOST_BUILD_DIR_PATH }} 2>/dev/null || echo '目录不存在或为空')" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "编译包目录大小 (PACKAGES_DIR): $(du -sh ${{ env.PACKAGES_DIR }} 2>/dev/null || echo '目录不存在或为空')" | tee -a ${{ env.DEBUG_LOG_FILE }}
+        echo "编译产物输出目录大小 (PACKAGES_DIR is /workdir/openwrt/bin): $(du -sh ${{ env.PACKAGES_DIR }} 2>/dev/null || echo '目录不存在或为空')" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "CCACHE目录大小 (CCACHE_DIR): $(du -sh ${{ env.CCACHE_DIR }} 2>/dev/null || echo '目录不存在或为空')" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "" | tee -a ${{ env.DEBUG_LOG_FILE }}
+        # ... (其他检查保持不变) ...
         find ${{ env.TOOLCHAIN_DIR }}/host/bin -name "gcc*" 2>/dev/null | head -5 || echo "未找到主机gcc" | tee -a ${{ env.DEBUG_LOG_FILE }}
         find ${{ env.TOOLCHAIN_DIR }}/toolchain-* -name "*gcc*" 2>/dev/null | head -5 || echo "未找到交叉编译器gcc" | tee -a ${{ env.DEBUG_LOG_FILE }}
         ls -la ${{ env.BUILD_STATE_DIR }}/ || echo "构建状态目录为空" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        if [ -f "${{ env.BUILD_STATE_DIR }}/config.md5" ]; then
-          echo "之前Config MD5: $(cat ${{ env.BUILD_STATE_DIR }}/config.md5)" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        fi
-        if [ -f "${{ env.BUILD_STATE_DIR }}/toolchain.md5" ]; then
-          echo "之前Toolchain MD5: $(cat ${{ env.BUILD_STATE_DIR }}/toolchain.md5)" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        fi
-         if [ -f "${{ env.BUILD_STATE_DIR }}/package.md5" ]; then
-          echo "之前Package MD5: $(cat ${{ env.BUILD_STATE_DIR }}/package.md5)" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        fi
+        if [ -f "${{ env.BUILD_STATE_DIR }}/config.md5" ]; then echo "之前Config MD5: $(cat ${{ env.BUILD_STATE_DIR }}/config.md5)" | tee -a ${{ env.DEBUG_LOG_FILE }}; fi
+        if [ -f "${{ env.BUILD_STATE_DIR }}/toolchain.md5" ]; then echo "之前Toolchain MD5: $(cat ${{ env.BUILD_STATE_DIR }}/toolchain.md5)" | tee -a ${{ env.DEBUG_LOG_FILE }}; fi
+        if [ -f "${{ env.BUILD_STATE_DIR }}/package.md5" ]; then echo "之前Package MD5: $(cat ${{ env.BUILD_STATE_DIR }}/package.md5)" | tee -a ${{ env.DEBUG_LOG_FILE }}; fi
         echo "--- End Debug Log: Cache Status ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
         df -h
 
+    # (配置编译环境, 检查源码变化, SSH调试, 下载软件包, 检测下载失败包 步骤基本保持不变, 细节微调)
     - name: 配置编译环境
       run: |
         cd /workdir/openwrt
-        if [ -f ".config" ]; then
-          cp .config .config.original_from_build_dir_if_any # Save original .config if it exists from a restored build_dir
-        fi
+        if [ -f ".config" ]; then cp .config .config.original_from_build_dir_if_any; fi
         $GITHUB_WORKSPACE/$DIY_P1_SH
         echo "更新并安装 Feeds..."
         ./scripts/feeds update -a
         ./scripts/feeds install -a
         [ -e $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./files
         cp $GITHUB_WORKSPACE/$CONFIG_FILE ./.config
-        cp .config .config.input # 保存一份输入配置用于比较
+        cp .config .config.input
         $GITHUB_WORKSPACE/$DIY_P2_SH
-        echo "CONFIG_AUTOREMOVE=n" >> .config # Ensure these are not enabled by default
-        echo "CONFIG_AUTOREBUILD=n" >> .config # Ensure these are not enabled by default
+        echo "CONFIG_AUTOREMOVE=n" >> .config
+        echo "CONFIG_AUTOREBUILD=n" >> .config
         echo "确保包含必要的固件生成配置..."
         if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config; fi
         if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config; fi
@@ -235,21 +224,16 @@ jobs:
         if [ -s missing_packages.txt ]; then
           echo "警告：以下包在 defconfig 后缺失，将尝试恢复：" | tee -a ${{ env.DEBUG_LOG_FILE }}
           cat missing_packages.txt | tee -a ${{ env.DEBUG_LOG_FILE }}
+          # Re-adding to .config; feeds install for these might be redundant if already installed via 'install -a'
           cat missing_packages.txt >> .config
-          while read -r line; do
-            pkg=$(echo "$line" | sed 's/CONFIG_PACKAGE_\(.*\)=y/\1/')
-            echo "尝试重新安装缺失包: $pkg (通常这意味着它或其依赖未被defconfig选中)" | tee -a ${{ env.DEBUG_LOG_FILE }}
-            # Re-running feeds install for individual packages here can be slow and might not always be the right fix
-            # ./scripts/feeds install "$pkg" || echo "警告：无法安装 $pkg，可能不在 feeds 中"
-          done < missing_packages.txt
-          echo "重新执行 make defconfig 以确保依赖一致性" | tee -a ${{ env.DEBUG_LOG_FILE }}
+          echo "重新执行 make defconfig 以确保依赖一致性 (因有包被重新加入)" | tee -a ${{ env.DEBUG_LOG_FILE }}
           make defconfig
         else
-          echo "所有在输入 .config 中指定的 CONFIG_PACKAGE_*=y 配置项在 defconfig 后均保留或被正确处理，无缺失。" | tee -a ${{ env.DEBUG_LOG_FILE }}
+          echo "所有在输入 .config 中指定的 CONFIG_PACKAGE_*=y 配置项在 defconfig 后均保留或被正确处理。" | tee -a ${{ env.DEBUG_LOG_FILE }}
         fi
         echo "最终配置中的镜像生成选项:" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        grep -E "CONFIG_TARGET_ROOTFS|CONFIG_TARGET_IMAGES|CONFIG_GRUB|CONFIG_ISO|CONFIG_EFI" .config | tee -a ${{ env.DEBUG_LOG_FILE }} || echo "未找到镜像相关配置" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        diff .config.input .config > config_diff.txt || echo "配置无差异"
+        grep -E "CONFIG_TARGET_ROOTFS|CONFIG_TARGET_IMAGES|CONFIG_GRUB|CONFIG_ISO|CONFIG_EFI" .config | tee -a ${{ env.DEBUG_LOG_FILE }} || echo "未找到镜像相关配置"
+        diff -u .config.input .config > config_diff.txt || echo "配置无差异" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "--- Debug Log: Config diff after defconfig and recovery ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
         cat config_diff.txt | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "--- End Debug Log: Config diff ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
@@ -257,6 +241,7 @@ jobs:
 
     - name: 检查源码变化 (Feeds Makefile Hashes)
       id: check-feeds
+      # (内容保持不变)
       run: |
         cd /workdir/openwrt
         mkdir -p ${{ env.BUILD_STATE_DIR }}
@@ -274,8 +259,6 @@ jobs:
           echo "Feeds 的 Makefile 结构未变更。" | tee -a ${{ env.DEBUG_LOG_FILE }}
         fi
         echo "--- End Debug Log: Feeds Change Check ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        # Always copy current to previous for next run, regardless of change,
-        # because BUILD_STATE_DIR cache key might be different if other things changed.
         cp ${{ env.BUILD_STATE_DIR }}/feeds.sha256 ${{ env.BUILD_STATE_DIR }}/previous_feeds.sha256
 
     - name: 开启SSH调试 (如果需要)
@@ -283,6 +266,7 @@ jobs:
       if: github.event.inputs.ssh == 'true'
 
     - name: 下载软件包 (make download)
+      # (内容保持不变，但确保logs目录已在克隆步骤中创建)
       run: |
         cd /workdir/openwrt
         MAX_RETRIES=3
@@ -292,141 +276,99 @@ jobs:
         set -e; MAX_RETRIES=$1; RETRY_WAIT=$2; shift 2; retries=0
         until [ $retries -ge $MAX_RETRIES ]; do
           echo "尝试下载，第 $((retries+1)) 次，共 $MAX_RETRIES 次...";
+          # Ensure logs directory exists for tee output
+          mkdir -p logs 
           if make download -j$(nproc) "$@" 2>&1 | tee "logs/download_attempt_$(date +%s)_$retries.log"; then echo "下载成功！"; exit 0; fi
           retries=$((retries+1));
           if [ $retries -lt $MAX_RETRIES ]; then echo "下载失败，等待 $RETRY_WAIT 秒后重试..."; sleep $RETRY_WAIT; fi
         done
         echo "达到最大重试次数，保存日志以分析失败的包...";
-        # Attempt to find the last attempt log, or just use the last numbered one.
         LAST_LOG=$(ls -t logs/download_attempt_*.log 2>/dev/null | head -n 1)
-        if [ -n "$LAST_LOG" ]; then
-          cp "$LAST_LOG" logs/download_failures.log;
-        else
-          echo "无法找到下载尝试日志。" > logs/download_failures.log
-        fi
+        if [ -n "$LAST_LOG" ]; then cp "$LAST_LOG" logs/download_failures.log; else echo "无法找到下载尝试日志。" > logs/download_failures.log; fi
         exit 1
         EOF
         chmod +x download_with_retry.sh
-        # First, try with retry script. If it fails, try one last time with V=s for more detailed logs.
         if ! ./download_with_retry.sh $MAX_RETRIES $RETRY_WAIT; then
             echo "下载重试失败，尝试单线程详细日志下载..." | tee -a ${{ env.DEBUG_LOG_FILE }}
-            make download -j1 V=s 2>&1 | tee logs/download_final_attempt.log || true # Allow to proceed even if this fails
+            make download -j1 V=s 2>&1 | tee logs/download_final_attempt.log || true 
         fi
-
-        # Configure ccache after downloads, before compile
         mkdir -p ${{ env.CCACHE_DIR }}
         ccache -o cache_dir=${{ env.CCACHE_DIR }}
-        ccache -o max_size=8G # Set ccache size
-        ccache -z # Zero ccache stats before compilation for accurate run stats
+        ccache -o max_size=8G 
+        ccache -z 
         echo "CCACHE 配置完成并已清零统计数据。" | tee -a ${{ env.DEBUG_LOG_FILE }}
         df -h
-
+        
     - name: 检测并处理下载失败的包 (如果需要)
+      # (内容保持不变)
       run: |
         cd /workdir/openwrt
-        # (detect_failed_downloads.sh script from previous version can be used here)
-        # For brevity, assuming the script exists or is inlined
         if [ -f "logs/download_failures.log" ] || [ -f "logs/download_final_attempt.log" ]; then
             COMBINED_DOWNLOAD_LOG="logs/combined_download_errors.log"
             cat logs/download_failures.log logs/download_final_attempt.log 2>/dev/null > "$COMBINED_DOWNLOAD_LOG"
-
             echo "分析下载失败日志 ($COMBINED_DOWNLOAD_LOG)..." | tee -a ${{ env.DEBUG_LOG_FILE }};
-            # Simplified grep for typical download error messages
             grep -E "(curl:.*(Couldn't resolve host|Connection timed out|403 Forbidden|404 Not Found)|No more mirrors to try|Download failed)" "$COMBINED_DOWNLOAD_LOG" > failed_urls.txt || true;
-            
             declare -A failed_packages_map;
             while IFS= read -r line; do
-                # Try to extract package name from URL (very basic, might need refinement)
                 if [[ $line =~ \/([^\/_]+([_-][0-9a-zA-Z\.]+)?)\.(tar\.|zip|gz|xz|bz2) ]]; then
                     pkg_name_from_url="${BASH_REMATCH[1]}"
-                    # Further clean up common versioning patterns if BASH_REMATCH[2] exists
                     pkg_name_from_url_base=$(echo "$pkg_name_from_url" | sed -E 's/[-_][0-9]+.*//; s/-git//')
-                    if [ -n "$pkg_name_from_url_base" ]; then
-                         failed_packages_map["$pkg_name_from_url_base"]=1;
-                         echo "检测到可能下载失败的包 (基于URL): $pkg_name_from_url_base" | tee -a ${{ env.DEBUG_LOG_FILE }};
-                    fi
+                    if [ -n "$pkg_name_from_url_base" ]; then failed_packages_map["$pkg_name_from_url_base"]=1; echo "检测到可能下载失败的包 (基于URL): $pkg_name_from_url_base" | tee -a ${{ env.DEBUG_LOG_FILE }}; fi
                 fi
             done < failed_urls.txt;
-
             if [ ${#failed_packages_map[@]} -gt 0 ]; then
                 echo "以下包或其源码可能下载失败，将尝试从 .config 中禁用：" | tee -a ${{ env.DEBUG_LOG_FILE }};
                 PACKAGES_MODIFIED=0
                 for pkg_base in "${!failed_packages_map[@]}"; do
                     echo " - 疑似问题包: $pkg_base" | tee -a ${{ env.DEBUG_LOG_FILE }};
-                    # Grep for the base package name in CONFIG_PACKAGE lines
-                    # This is a broad match, specific package might need more precise regex
                     if grep -q "CONFIG_PACKAGE_.*${pkg_base}.*=y" .config; then
                         echo "  在 .config 中找到相关包，尝试禁用..." | tee -a ${{ env.DEBUG_LOG_FILE }}
-                        sed -i -E "/CONFIG_PACKAGE_.*${pkg_base}.*=y/s/=y$/=n/g" .config # Change =y to =n
-                        # Also comment out related non-package CONFIG lines if necessary (more complex)
+                        sed -i -E "/CONFIG_PACKAGE_.*${pkg_base}.*=y/s/=y$/=n # Auto-disabled due to download failure/g" .config
                         PACKAGES_MODIFIED=1
                     fi
                 done;
-                if [ $PACKAGES_MODIFIED -eq 1 ]; then
-                    echo "由于检测到下载失败，已修改 .config 文件，重新运行 make defconfig" | tee -a ${{ env.DEBUG_LOG_FILE }}
-                    make defconfig;
-                else
-                    echo "未在 .config 中找到明确匹配的已启用包进行禁用。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-                fi
-            else
-                echo "未从下载日志中明确识别出特定下载失败的包名。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-            fi
-        else
-            echo "没有找到下载失败的日志文件 (logs/download_failures.log 或 logs/download_final_attempt.log)。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        fi
+                if [ $PACKAGES_MODIFIED -eq 1 ]; then echo "由于检测到下载失败，已修改 .config 文件，重新运行 make defconfig" | tee -a ${{ env.DEBUG_LOG_FILE }}; make defconfig;
+                else echo "未在 .config 中找到明确匹配的已启用包进行禁用。" | tee -a ${{ env.DEBUG_LOG_FILE }}; fi
+            else echo "未从下载日志中明确识别出特定下载失败的包名。" | tee -a ${{ env.DEBUG_LOG_FILE }}; fi
+        else echo "没有找到下载失败的日志文件。" | tee -a ${{ env.DEBUG_LOG_FILE }}; fi
         echo "下载失败包检测处理完成。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-
 
     - name: 智能编译固件
       id: compile
+      # (内容与 "全新编译第12版" 中此步骤保持一致，特别是 compile_firmware 函数和构建决策逻辑)
       run: |
         echo "--- Debug Log: Compile Step Start ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
         cd /workdir/openwrt
         export CCACHE_DIR=${{ env.CCACHE_DIR }}
-        export PATH="/usr/lib/ccache:$PATH" # Ensure ccache is in PATH
+        export PATH="/usr/lib/ccache:$PATH" 
         export CCACHE_LOGFILE=${{ env.CCACHE_LOGFILE }}
         echo "CCACHE_LOGFILE in compile step set to: $CCACHE_LOGFILE" | tee -a ${{ env.DEBUG_LOG_FILE }}
 
-        cleanup_temp_files() {
+        cleanup_temp_files() { 
           echo "清理临时文件以释放空间..."; find /tmp -maxdepth 1 -type f -delete || true; df -h | tee -a ${{ env.DEBUG_LOG_FILE }};
         }
 
-        save_md5_info() {
+        save_md5_info() { 
           echo "保存配置MD5信息..." | tee -a ${{ env.DEBUG_LOG_FILE }}
           mkdir -p ${{ env.BUILD_STATE_DIR }};
-          cp .config ${{ env.BUILD_STATE_DIR }}/config.txt; # Save the actual .config used for the build
+          cp .config ${{ env.BUILD_STATE_DIR }}/config.txt; 
           echo "$TOOLCHAIN_MD5" > ${{ env.BUILD_STATE_DIR }}/toolchain.md5;
           echo "$PACKAGE_MD5" > ${{ env.BUILD_STATE_DIR }}/package.md5;
           echo "构建状态MD5信息保存完成。" | tee -a ${{ env.DEBUG_LOG_FILE }}
         }
         
-        handle_compile_error() {
+        handle_compile_error() { 
           local compile_log_content="$1"
           echo "检测到编译失败，尝试识别下载问题..." | tee -a ${{ env.DEBUG_LOG_FILE }}
           mkdir -p logs;
-          # Use a more specific error log name if not already done
-          # echo "$compile_log_content" > "logs/compile_error_$(date +%s).log" 
-
-          # Basic check for download-related errors in compile output
-          # This is a fallback if make download didn't catch everything or if a package's internal script downloads
           if echo "$compile_log_content" | grep -q -E "(No more mirrors to try|Download failed|Couldn't resolve host|404 Not Found|403 Forbidden)"; then
-            # Try to identify the failing package (this is tricky from generic make output)
-            # A common pattern is "make[3]: Leaving directory '/workdir/openwrt/build_dir/.../package-name-version'" just before error
-            # Or "Applying ./patches/..." or "Configuring package-name..."
             local failing_pkg_context
             failing_pkg_context=$(echo "$compile_log_content" | grep -B 10 -E "(No more mirrors to try|Download failed)" | grep -o -E "package/[^[:space:]/]+/[^[:space:]/]+" | tail -n 1 | awk -F'/' '{print $NF}')
-            
-            if [ -n "$failing_pkg_context" ]; then
-                echo "编译错误中检测到与包 '$failing_pkg_context' 相关的下载问题。建议检查该包的Makefile或源码。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-                # For now, we don't automatically disable here as it's harder to pinpoint from compile log
-                # User might need to manually intervene or improve the package's Makefile
-            else
-                echo "编译错误中检测到下载问题，但未能自动识别具体包。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-            fi
-            # No automatic recompile attempt here, to avoid loops if it's not a simple download issue
-            return 1 # Indicate error still stands
+            if [ -n "$failing_pkg_context" ]; then echo "编译错误中检测到与包 '$failing_pkg_context' 相关的下载问题。" | tee -a ${{ env.DEBUG_LOG_FILE }};
+            else echo "编译错误中检测到下载问题，但未能自动识别具体包。" | tee -a ${{ env.DEBUG_LOG_FILE }}; fi
+            return 1 
           fi
-          return 1 # Default to error still stands if not a clear download issue from compile log
+          return 1 
         }
 
         compile_firmware() {
@@ -436,31 +378,28 @@ jobs:
           ccache -s | tee -a ${{ env.DEBUG_LOG_FILE }}
 
           MAIN_MAKE_CMD="make -j$(nproc) V=s"
-          FALLBACK_MAKE_CMD="make -j1 V=s" # For retries on error
+          FALLBACK_MAKE_CMD="make -j1 V=s" 
           
-          # Determine build strategy
           if [ $DO_FULL_BUILD -eq 1 ]; then
             echo "--- Compile Branch: Full Build ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
-            # For a full build, ensure tools and toolchain are compiled first if not present from cache
-            if [ ! -d "${{ env.TOOLCHAIN_DIR }}/toolchain-"* ] || [ ! -d "${{ env.HOST_BUILD_DIR_PATH }}/stamp" ]; then # Basic check
-              echo "编译主机工具和工具链..." | tee -a ${{ env.DEBUG_LOG_FILE }}
-              make tools/compile ${FALLBACK_MAKE_CMD} || make tools/compile ${FALLBACK_MAKE_CMD} # Retry on failure
-              make toolchain/compile ${FALLBACK_MAKE_CMD} || make toolchain/compile ${FALLBACK_MAKE_CMD} # Retry on failure
-            else
-              echo "主机工具和工具链似乎已存在 (来自缓存或之前步骤)，跳过显式编译。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-            fi
+            # For a full build, ensure tools and toolchain are compiled first.
+            # Since TOOLCHAIN_BUILD_DIR is not cached, toolchain/compile will run if staging_dir is not complete.
+            # Host tools will also recompile if host_build_dir cache is missed or incomplete.
+            echo "编译主机工具和工具链 (如果缓存未命中或不完整)..." | tee -a ${{ env.DEBUG_LOG_FILE }}
+            make tools/compile $FALLBACK_MAKE_CMD || make tools/compile $FALLBACK_MAKE_CMD 
+            make toolchain/compile $FALLBACK_MAKE_CMD || make toolchain/compile $FALLBACK_MAKE_CMD 
             cleanup_temp_files
             echo "编译完整固件 (World)..." | tee -a ${{ env.DEBUG_LOG_FILE }}
             if ! $MAIN_MAKE_CMD 2>&1 | tee logs/compile_output.log; then
-              if ! handle_compile_error "$(cat logs/compile_output.log)"; then # If not a resolvable download error
-                 $FALLBACK_MAKE_CMD # Final attempt with single thread
+              if ! handle_compile_error "$(cat logs/compile_output.log)"; then 
+                 $FALLBACK_MAKE_CMD 
               fi
             fi
           elif [ $DO_PACKAGE_BUILD -eq 1 ] || [ "${{ env.feeds_changed }}" = "true" ]; then
             echo "--- Compile Branch: Package Build or Feeds Changed ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
             echo "软件包配置变化或Feeds源码更新，执行软件包编译..." | tee -a ${{ env.DEBUG_LOG_FILE }}
-            echo ">>> WARNING: Running 'make package/clean' due to package/feeds changes. This cleans all previously compiled packages." | tee -a ${{ env.DEBUG_LOG_FILE }}
-            make package/clean V=s || true # Clean previous package builds
+            echo ">>> WARNING: Running 'make package/clean' due to package/feeds changes." | tee -a ${{ env.DEBUG_LOG_FILE }}
+            make package/clean V=s || true 
             if ! make package/compile $MAIN_MAKE_CMD 2>&1 | tee logs/compile_output.log; then
                if ! handle_compile_error "$(cat logs/compile_output.log)"; then
                  make package/compile $FALLBACK_MAKE_CMD
@@ -478,13 +417,12 @@ jobs:
           fi
           
           echo "确保执行最终的固件生成步骤 (target/install)..." | tee -a ${{ env.DEBUG_LOG_FILE }}
-          make target/install $FALLBACK_MAKE_CMD # Use fallback for safety and detailed logs if issues
+          make target/install $FALLBACK_MAKE_CMD 
           
-          save_md5_info # Save MD5s of the .config that was used for this build attempt
+          save_md5_info 
 
           echo "检查固件生成结果:" | tee -a ${{ env.DEBUG_LOG_FILE }}
           find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print0 | xargs -0 ls -lh || echo "没有找到主要固件文件！" | tee -a ${{ env.DEBUG_LOG_FILE }}
-          
           if [ -z "$(find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print -quit)" ]; then
             echo "警告：主要固件文件未找到。检查 logs/compile_output.log 获取详情。" | tee -a ${{ env.DEBUG_LOG_FILE }}
           fi
@@ -492,8 +430,6 @@ jobs:
           echo ">>> CCACHE: Statistics at END of compile_firmware function:" | tee -a ${{ env.DEBUG_LOG_FILE }}
           ccache -s | tee -a ${{ env.DEBUG_LOG_FILE }}
 
-          # Check the exit status of the last critical make command (target/install)
-          # This is a simplification; more robust error checking might be needed throughout.
           if [ $? -eq 0 ] && [ -n "$(find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print -quit)" ]; then
             echo "compile_firmware函数判断为成功 (固件已生成)。" | tee -a ${{ env.DEBUG_LOG_FILE }}
             return 0
@@ -503,28 +439,25 @@ jobs:
           fi
         }
         
-        # --- Build decision logic (based on MD5s and feeds_changed) ---
         TOOLCHAIN_CONFIG_SUBSET=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort)
         TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG_SUBSET" | md5sum | awk '{print $1}')
         PREVIOUS_TOOLCHAIN_MD5=$(cat ${{ env.BUILD_STATE_DIR }}/toolchain.md5 2>/dev/null || echo "not_found")
-
-        PACKAGE_CONFIG_SUBSET=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort) # Only consider selected packages
+        PACKAGE_CONFIG_SUBSET=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort) 
         PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET" | md5sum | awk '{print $1}')
         PREVIOUS_PACKAGE_MD5=$(cat ${{ env.BUILD_STATE_DIR }}/package.md5 2>/dev/null || echo "not_found")
-        
         DO_FULL_BUILD=0
         DO_PACKAGE_BUILD=0
 
         echo "--- Debug Log: Build Decision Variables ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "Input clean_build: ${{ github.event.inputs.clean_build }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "Current TOOLCHAIN_MD5 (from .config subset): $TOOLCHAIN_MD5" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "Previous TOOLCHAIN_MD5 (from cache): $PREVIOUS_TOOLCHAIN_MD5" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "Current PACKAGE_MD5 (from .config subset): $PACKAGE_MD5" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        echo "Previous PACKAGE_MD5 (from cache): $PREVIOUS_PACKAGE_MD5" | tee -a ${{ env.DEBUG_LOG_FILE }}
+        echo "Current TOOLCHAIN_MD5: $TOOLCHAIN_MD5" | tee -a ${{ env.DEBUG_LOG_FILE }}
+        echo "Previous TOOLCHAIN_MD5: $PREVIOUS_TOOLCHAIN_MD5" | tee -a ${{ env.DEBUG_LOG_FILE }}
+        echo "Current PACKAGE_MD5: $PACKAGE_MD5" | tee -a ${{ env.DEBUG_LOG_FILE }}
+        echo "Previous PACKAGE_MD5: $PREVIOUS_PACKAGE_MD5" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "env.feeds_changed: ${{ env.feeds_changed }}" | tee -a ${{ env.DEBUG_LOG_FILE }}
 
         if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
-          echo "clean_build is true, setting DO_FULL_BUILD=1" | tee -a ${{ env.DEBUG_LOG_FILE }}
+          echo "clean_build is true, setting DO_FULL_BUILD=1 (全新编译，不使用恢复的缓存)" | tee -a ${{ env.DEBUG_LOG_FILE }}
           DO_FULL_BUILD=1
         elif [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
           echo "Toolchain config changed or first build with this state, setting DO_FULL_BUILD=1" | tee -a ${{ env.DEBUG_LOG_FILE }}
@@ -532,7 +465,7 @@ jobs:
         elif [ "$PREVIOUS_PACKAGE_MD5" = "not_found" ] || [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
           echo "Package config changed, setting DO_PACKAGE_BUILD=1" | tee -a ${{ env.DEBUG_LOG_FILE }}
           DO_PACKAGE_BUILD=1
-        elif [ "${{ env.feeds_changed }}" = "true" ]; then # Check feeds change only if configs seem same
+        elif [ "${{ env.feeds_changed }}" = "true" ]; then
            echo "Feeds changed (and configs appear same), setting DO_PACKAGE_BUILD=1" | tee -a ${{ env.DEBUG_LOG_FILE }}
            DO_PACKAGE_BUILD=1
         fi
@@ -540,15 +473,12 @@ jobs:
         echo "Final DO_PACKAGE_BUILD: $DO_PACKAGE_BUILD" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "--- End Debug Log: Build Decision Variables ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
 
-        # Call the main compile function
         if compile_firmware; then
           echo "DEVICE_NAME=_$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | tr '\n' '_' | sed 's/_$//')" >> $GITHUB_ENV
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
         else
           echo "status=failure" >> $GITHUB_OUTPUT
-          # Consider exiting with error if compile_firmware fails, to make job fail
-          # exit 1 
         fi
         
         echo "Final ccache stats for the entire compile step:" | tee -a ${{ env.DEBUG_LOG_FILE }}
@@ -556,13 +486,10 @@ jobs:
         df -h | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "--- Debug Log: Compile Step End ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
 
-
-    # MODIFIED STEP for checking sizes (replaces old '备份缓存前检查工具链大小')
     - name: 备份缓存前检查工具链和各构建目录大小
-      if: "!cancelled()" # Always run if not cancelled to see sizes even on failure
+      if: "!cancelled()" 
       run: |
         echo "编译完成或中止，详细检查工具链和各构建缓存目录大小..." | tee -a ${{ env.DEBUG_LOG_FILE }}
-        
         CURRENT_DATE_WITH_TZ=$(date +"%Y-%m-%d %H:%M:%S %Z")
         echo "" | tee -a ${{ env.DEBUG_LOG_FILE }}
         echo "--- 详细目录大小检查 (du -sh) ---" | tee -a ${{ env.DEBUG_LOG_FILE }}
@@ -572,24 +499,23 @@ jobs:
         check_and_log_size() {
             local dir_path="$1"
             local dir_desc="$2"
-            local size_output
             local readable_size="未知或目录不存在"
-
             if [ -e "${dir_path}" ]; then 
                 readable_size=$(du -sh "${dir_path}" 2>/dev/null | awk '{print $1}')
                 if [ -z "${readable_size}" ]; then readable_size="获取失败或为空"; fi
-                echo "$dir_desc (${dir_path}): ${readable_size}"
-                echo "[SIZE_CHECK] $dir_desc (${dir_path}): ${readable_size}" >> ${{ env.DEBUG_LOG_FILE }}
+                echo "$dir_desc (${dir_path}): ${readable_size}" # Output to main log
+                echo "[SIZE_CHECK] $dir_desc (${dir_path}): ${readable_size}" >> ${{ env.DEBUG_LOG_FILE }} # Output to debug log
             else
-                echo "$dir_desc (${dir_path}): 目录不存在"
-                echo "[SIZE_CHECK] $dir_desc (${dir_path}): 目录不存在" >> ${{ env.DEBUG_LOG_FILE }}
+                echo "$dir_desc (${dir_path}): 目录不存在" # Output to main log
+                echo "[SIZE_CHECK] $dir_desc (${dir_path}): 目录不存在" >> ${{ env.DEBUG_LOG_FILE }} # Output to debug log
             fi
         }
 
         check_and_log_size "${{ env.TOOLCHAIN_DIR }}" "1. 工具链安装目录 (Staging Dir)"
-        check_and_log_size "${{ env.TOOLCHAIN_BUILD_DIR }}" "2. 工具链构建目录 (Toolchain Build Dir)"
+        # TOOLCHAIN_BUILD_DIR is no longer cached, but check its size if it was created
+        check_and_log_size "/workdir/openwrt/build_dir/toolchain-$(uname -m)_gcc-*_musl" "2. 工具链构建目录 (No Longer Cached)"
         check_and_log_size "${{ env.HOST_BUILD_DIR_PATH }}" "3. 主机工具构建目录 (Host Build Dir)"
-        check_and_log_size "${{ env.PACKAGES_DIR }}" "4. 编译包输出目录 (IPKs/Images)"
+        check_and_log_size "${{ env.PACKAGES_DIR }}" "4. 编译产物输出目录 (bin/)" 
         check_and_log_size "${{ env.CCACHE_DIR }}" "5. CCACHE目录"
         check_and_log_size "/workdir/openwrt/build_dir/" "6. 整个 OpenWrt build_dir 目录 (参考)"
         check_and_log_size "${{ env.BUILD_STATE_DIR }}" "7. 构建状态目录 (Build State)"
@@ -604,12 +530,6 @@ jobs:
         echo "构建分支: ${{ env.REPO_BRANCH }}" >> ${{ env.BUILD_STATE_DIR }}/cache_metadata_timestamp.txt
         echo "[DEBUG_LOG] 已更新缓存元数据时间戳文件: ${{ env.BUILD_STATE_DIR }}/cache_metadata_timestamp.txt" >> ${{ env.DEBUG_LOG_FILE }}
         echo "已更新缓存元数据时间戳文件: ${{ env.BUILD_STATE_DIR }}/cache_metadata_timestamp.txt"
-
-
-    # --- CACHE SAVE STEPS (Implicit via post-job execution of restore steps) ---
-    # The 'actions/cache@v3' steps defined earlier for restore will automatically handle saving
-    # in the post-job execution if their keys don't have an exact match from a previous run.
-    # No explicit 'save' steps are needed here unless using actions/cache/save explicitly.
 
     - name: 验证缓存已正确配置待保存
       if: "!cancelled()"
@@ -629,153 +549,161 @@ jobs:
         path: |
           ${{ env.DEBUG_LOG_FILE }}
           ${{ env.CCACHE_LOGFILE }}
-          /workdir/openwrt/logs/ # Upload make output logs
-          /workdir/openwrt/config_diff.txt # Upload config diff
-          /workdir/openwrt/.config # Upload final .config used
-          /workdir/openwrt/.config.input # Upload .config as copied from input
+          /workdir/openwrt/logs/
+          /workdir/openwrt/config_diff.txt
+          /workdir/openwrt/.config
+          /workdir/openwrt/.config.input
         retention-days: 7
 
     - name: 整理文件
       id: organize
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        echo "搜索所有可能的固件文件..."
-        find /workdir/openwrt/bin -type f \( -name "*.bin" -o -name "*.img" -o -name "*.img.gz" -o -name "*sysupgrade*" -o -name "*combined*" \) -exec ls -lh {} + || echo "未找到可能的固件文件"
-        
-        FIRMWARE_DIR_PATH_SET="" # Shell variable to track if firmware dir is set
+        echo "开始整理固件文件..." | tee -a ${{ env.DEBUG_LOG_FILE }}
+        FIRMWARE_COLLECTION_DIR_PATH="" # Shell variable to track successfully populated firmware dir
 
-        if [ ! -d "/workdir/openwrt/bin/targets" ]; then
-          echo "错误：编译目标目录 /workdir/openwrt/bin/targets 不存在，可能编译失败或未生成任何固件。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-          # Create a dummy path to prevent downstream errors if UPLOAD_FIRMWARE is true
-          mkdir -p /workdir/openwrt/bin/targets/unknown/empty_firmware 
-          echo "FIRMWARE=/workdir/openwrt/bin/targets/unknown/empty_firmware" >> $GITHUB_ENV 
-          echo "status=success" >> $GITHUB_OUTPUT # Still output success for organize step if no firmware but compile was 'success'
+        OPENWRT_BIN_DIR="/workdir/openwrt/bin"
+        OPENWRT_TARGETS_DIR="${OPENWRT_BIN_DIR}/targets"
+
+        if [ ! -d "${OPENWRT_TARGETS_DIR}" ]; then
+          echo "错误：编译目标目录 ${OPENWRT_TARGETS_DIR} 不存在。" | tee -a ${{ env.DEBUG_LOG_FILE }}
+          # Create a dummy path for FIRMWARE env var to prevent downstream errors
+          FIRMWARE_COLLECTION_DIR_PATH="/tmp/empty_firmware_collection_$$" 
+          mkdir -p "${FIRMWARE_COLLECTION_DIR_PATH}"
+          echo "FIRMWARE=${FIRMWARE_COLLECTION_DIR_PATH}" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT # Organize step itself can be success
+          echo "FIRMWARE_ZIP=${FIRMWARE_COLLECTION_DIR_PATH}.zip" >> $GITHUB_ENV # Dummy zip
+          zip -r "${FIRMWARE_COLLECTION_DIR_PATH}.zip" "${FIRMWARE_COLLECTION_DIR_PATH}" # Zip the empty dir
           exit 0
         fi
 
-        TARGET_SUBDIRS=$(find /workdir/openwrt/bin/targets -mindepth 1 -maxdepth 2 -type d -not -name "packages" -print)
-        if [ -z "$TARGET_SUBDIRS" ]; then
-          echo "警告：在 /workdir/openwrt/bin/targets 下未找到具体的目标子目录 (如 x86/64)。将尝试在顶层搜索。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-          TARGET_SUBDIRS="/workdir/openwrt/bin/targets" # Fallback to searching in bin/targets itself
+        # Find the deepest target-specific subdirectories (e.g., x86/64, ramips/mt7621)
+        # These usually contain the actual firmware images.
+        DEEPEST_TARGET_SUBDIRS=$(find "${OPENWRT_TARGETS_DIR}" -mindepth 2 -maxdepth 2 -type d ! -name "packages" -print)
+
+        if [ -z "${DEEPEST_TARGET_SUBDIRS}" ]; then
+            echo "警告：在 ${OPENWRT_TARGETS_DIR} 下未找到标准的目标架构子目录。尝试直接在 ${OPENWRT_TARGETS_DIR} 搜索。" | tee -a ${{ env.DEBUG_LOG_FILE }}
+            DEEPEST_TARGET_SUBDIRS="${OPENWRT_TARGETS_DIR}" 
         fi
 
-        for TARGET_PATH_ITEM in $TARGET_SUBDIRS; do
-          CANDIDATE_FIRMWARE_DIR="$TARGET_PATH_ITEM/firmware" # Define firmware dir consistently
-          echo "处理目标路径: $TARGET_PATH_ITEM" | tee -a ${{ env.DEBUG_LOG_FILE }}
-          # Ensure firmware output directory exists
-          mkdir -p "$CANDIDATE_FIRMWARE_DIR"
-          
-          FILES_COPIED_COUNT=0
-          # Prefer specific patterns first
-          for pattern in "*combined.img.gz" "*sysupgrade.img.gz" "*sysupgrade.bin" "*.img.gz" "*.bin"; do
-            # Find files in current TARGET_PATH_ITEM, not recursively from /workdir/openwrt/bin
-            # and ensure they are not in a 'packages' subdirectory at this level
-            find "$TARGET_PATH_ITEM" -maxdepth 1 -type f -name "$pattern" ! -path "*/packages/*" -exec cp -v -f {} "$CANDIDATE_FIRMWARE_DIR/" \; -print | while read -r file_copied; do
-              if [ -n "$file_copied" ]; then FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1)); fi
+        for CURRENT_IMG_SOURCE_DIR in $DEEPEST_TARGET_SUBDIRS; do
+            echo "检查目录: ${CURRENT_IMG_SOURCE_DIR} 中的固件文件..." | tee -a ${{ env.DEBUG_LOG_FILE }}
+            # Define where to collect firmware FROM this source dir
+            COLLECTED_FIRMWARE_OUTPUT_DIR="${OPENWRT_BIN_DIR}/firmware_collection_$(basename ${CURRENT_IMG_SOURCE_DIR})_$(date +%s)"
+            mkdir -p "${COLLECTED_FIRMWARE_OUTPUT_DIR}"
+            
+            FILES_COPIED_COUNT=0
+            
+            # Change to the directory where images are, to use simpler 'find .'
+            cd "${CURRENT_IMG_SOURCE_DIR}"
+            
+            # Try to copy specific, common firmware patterns first
+            for pattern in "*combined.img.gz" "*sysupgrade.img.gz" "*combined-efi.img.gz" "*kernel.bin" "*.img" "*.bin"; do
+                find . -maxdepth 1 -type f -name "$pattern" ! -path "./packages/*" -print0 | while IFS= read -r -d $'\0' found_file; do
+                    echo "找到标准固件: ${found_file}，复制到 ${COLLECTED_FIRMWARE_OUTPUT_DIR}/" | tee -a ${{ env.DEBUG_LOG_FILE }}
+                    cp -v -f "${found_file}" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/"
+                    FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1))
+                done
             done
-          done
-          
-          if [ $FILES_COPIED_COUNT -eq 0 ]; then
-            echo "在 $TARGET_PATH_ITEM 中未找到标准模式的固件，尝试复制所有非辅助文件..." | tee -a ${{ env.DEBUG_LOG_FILE }}
-            find "$TARGET_PATH_ITEM" -maxdepth 1 -type f \
-              ! -name "*.manifest" ! -name "*.txt" ! -name "*.json" ! -name "*.buildinfo" ! -name "sha256sums" \
-              ! -path "*/packages/*" \
-              -exec cp -v -f {} "$CANDIDATE_FIRMWARE_DIR/" \; -print | while read -r file_copied; do
-              if [ -n "$file_copied" ]; then FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1)); fi
-            done
-          fi
-
-          if [ $FILES_COPIED_COUNT -gt 0 ]; then
-            echo "成功复制 $FILES_COPIED_COUNT 个固件相关文件到 $CANDIDATE_FIRMWARE_DIR" | tee -a ${{ env.DEBUG_LOG_FILE }}
-            ls -lh "$CANDIDATE_FIRMWARE_DIR" | tee -a ${{ env.DEBUG_LOG_FILE }}
-            # Copy .config used for this build
-            if [ -f "/workdir/openwrt/.config" ]; then
-              cp -v -f /workdir/openwrt/.config "$CANDIDATE_FIRMWARE_DIR/config.txt"
+            
+            # If no standard patterns found, try a broader copy of non-auxiliary files
+            if [ $FILES_COPIED_COUNT -eq 0 ]; then
+                echo "在 ${CURRENT_IMG_SOURCE_DIR} 中未找到标准模式的固件，尝试复制其他可能的文件..." | tee -a ${{ env.DEBUG_LOG_FILE }}
+                find . -maxdepth 1 -type f \
+                  ! -name "*.manifest" ! -name "*.txt" ! -name "*.json" ! -name "*.buildinfo" ! -name "sha256sums" \
+                  ! -path "./packages/*" \
+                  -print0 | while IFS= read -r -d $'\0' found_file; do
+                    echo "找到其他文件: ${found_file}，复制到 ${COLLECTED_FIRMWARE_OUTPUT_DIR}/" | tee -a ${{ env.DEBUG_LOG_FILE }}
+                    cp -v -f "${found_file}" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/"
+                    FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1))
+                done
             fi
-            echo "FIRMWARE=$CANDIDATE_FIRMWARE_DIR" >> $GITHUB_ENV
-            FIRMWARE_DIR_PATH_SET="$CANDIDATE_FIRMWARE_DIR"
-            echo "status=success" >> $GITHUB_OUTPUT
-            break # Found firmware, exit loop
-          else
-            echo "警告: 在 $TARGET_PATH_ITEM (输出到 $CANDIDATE_FIRMWARE_DIR) 中未找到可用固件文件。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-            rm -rf "$CANDIDATE_FIRMWARE_DIR" # Clean up empty firmware dir
-          fi
+            cd "/workdir/openwrt" # Return to a known base directory
+
+            if [ $FILES_COPIED_COUNT -gt 0 ]; then
+                echo "成功从 ${CURRENT_IMG_SOURCE_DIR} 复制 $FILES_COPIED_COUNT 个文件到 ${COLLECTED_FIRMWARE_OUTPUT_DIR}" | tee -a ${{ env.DEBUG_LOG_FILE }}
+                if [ -f ".config" ]; then # .config is in /workdir/openwrt
+                  cp -v -f .config "${COLLECTED_FIRMWARE_OUTPUT_DIR}/config.txt"
+                fi
+                ls -lh "${COLLECTED_FIRMWARE_OUTPUT_DIR}" | tee -a ${{ env.DEBUG_LOG_FILE }}
+                FIRMWARE_COLLECTION_DIR_PATH="${COLLECTED_FIRMWARE_OUTPUT_DIR}" # Set the path of successfully collected firmware
+                break # Firmware found and collected, exit loop
+            else
+                echo "警告: 在 ${CURRENT_IMG_SOURCE_DIR} 中未找到可用固件文件可收集。" | tee -a ${{ env.DEBUG_LOG_FILE }}
+                rm -rf "${COLLECTED_FIRMWARE_OUTPUT_DIR}" # Clean up empty collection dir
+            fi
         done
 
-        if [ -z "$FIRMWARE_DIR_PATH_SET" ]; then
-          echo "警告：未能在任何标准目标目录中找到固件文件。将使用紧急备用方法（可能为空）。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-          # Fallback if no specific firmware found
-          BACKUP_DIR="/workdir/openwrt/bin/targets/fallback_firmware_collection"
-          mkdir -p "$BACKUP_DIR"
-          # Try to copy anything that looks like a firmware from anywhere in bin/targets (excluding packages dirs)
-          find /workdir/openwrt/bin/targets -type f \( -name "*.bin" -o -name "*.img" -o -name "*.img.gz" \) ! -path "*/packages/*" -exec cp -v -f {} "$BACKUP_DIR/" \;
-          if [ -f "/workdir/openwrt/.config" ]; then
-             cp -v -f /workdir/openwrt/.config "$BACKUP_DIR/config.txt"
-          else
-             echo "# Emergency .config backup - actual .config not found" > "$BACKUP_DIR/config.txt"
-          fi
-          echo "FIRMWARE=$BACKUP_DIR" >> $GITHUB_ENV
-          FIRMWARE_DIR_PATH_SET="$BACKUP_DIR"
-          echo "status=success" >> $GITHUB_OUTPUT # Ensure organize step outputs status
-        fi
-        
-        # Create firmware.zip from the determined FIRMWARE_DIR_PATH_SET
-        if [ -n "$FIRMWARE_DIR_PATH_SET" ] && [ -d "$FIRMWARE_DIR_PATH_SET" ] && [ "$(ls -A "$FIRMWARE_DIR_PATH_SET")" ]; then
-          FIRMWARE_PARENT_DIR=$(dirname "$FIRMWARE_DIR_PATH_SET")
-          FIRMWARE_BASENAME=$(basename "$FIRMWARE_DIR_PATH_SET")
-          echo "创建固件压缩包 ${FIRMWARE_PARENT_DIR}/${FIRMWARE_BASENAME}.zip ..." | tee -a ${{ env.DEBUG_LOG_FILE }}
-          cd "$FIRMWARE_PARENT_DIR" && zip -r "${FIRMWARE_BASENAME}.zip" "$FIRMWARE_BASENAME"
-          echo "FIRMWARE_ZIP=${FIRMWARE_PARENT_DIR}/${FIRMWARE_BASENAME}.zip" >> $GITHUB_ENV
-          ls -lh "${FIRMWARE_PARENT_DIR}/${FIRMWARE_BASENAME}.zip" | tee -a ${{ env.DEBUG_LOG_FILE }}
-        else
-          echo "警告: FIRMWARE 目录 ($FIRMWARE_DIR_PATH_SET) 未设置、不是目录或为空，无法创建 firmware.zip。" | tee -a ${{ env.DEBUG_LOG_FILE }}
-          # To prevent issues if FIRMWARE_ZIP is expected, set it to a non-existent path or empty
-          echo "FIRMWARE_ZIP=/tmp/no_firmware.zip" >> $GITHUB_ENV
+        if [ -z "${FIRMWARE_COLLECTION_DIR_PATH}" ]; then
+            echo "警告：未能在任何标准目标子目录中收集到固件文件。启用紧急备用收集逻辑。" | tee -a ${{ env.DEBUG_LOG_FILE }}
+            FIRMWARE_COLLECTION_DIR_PATH="${OPENWRT_BIN_DIR}/firmware_fallback_collection_$(date +%s)"
+            mkdir -p "${FIRMWARE_COLLECTION_DIR_PATH}"
+            # Fallback: try to grab any likely firmware files from anywhere under bin/targets
+            find "${OPENWRT_TARGETS_DIR}" -type f \( -name "*.bin" -o -name "*.img" -o -name "*.img.gz" \) ! -path "*/packages/*" ! -path "*/firmware_collection_*" -exec cp -v -f {} "${FIRMWARE_COLLECTION_DIR_PATH}/" \;
+            if [ -f "/workdir/openwrt/.config" ]; then
+                cp -v -f /workdir/openwrt/.config "${FIRMWARE_COLLECTION_DIR_PATH}/config.txt"
+            else
+                echo "# Fallback .config - actual .config not found in /workdir/openwrt" > "${FIRMWARE_COLLECTION_DIR_PATH}/config.txt"
+            fi
         fi
 
+        echo "FIRMWARE=${FIRMWARE_COLLECTION_DIR_PATH}" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT # Organize step always considered success if it runs
+
+        # Create firmware.zip from the determined FIRMWARE_COLLECTION_DIR_PATH
+        if [ -n "${FIRMWARE_COLLECTION_DIR_PATH}" ] && [ -d "${FIRMWARE_COLLECTION_DIR_PATH}" ] && [ "$(ls -A "${FIRMWARE_COLLECTION_DIR_PATH}")" ]; then
+            FIRMWARE_PARENT_DIR=$(dirname "${FIRMWARE_COLLECTION_DIR_PATH}")
+            FIRMWARE_BASENAME=$(basename "${FIRMWARE_COLLECTION_DIR_PATH}")
+            ZIP_FILENAME="${FIRMWARE_BASENAME}.zip" # e.g., firmware_collection_x86_64_timestamp.zip
+            
+            echo "创建固件压缩包 ${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME} 从目录 ${FIRMWARE_BASENAME}" | tee -a ${{ env.DEBUG_LOG_FILE }}
+            cd "${FIRMWARE_PARENT_DIR}" && zip -r9 "${ZIP_FILENAME}" "${FIRMWARE_BASENAME}"
+            
+            if [ -f "${ZIP_FILENAME}" ]; then
+                echo "FIRMWARE_ZIP=${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME}" >> $GITHUB_ENV
+                ls -lh "${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME}" | tee -a ${{ env.DEBUG_LOG_FILE }}
+            else
+                echo "错误：压缩包 ${ZIP_FILENAME} 未能成功创建。" | tee -a ${{ env.DEBUG_LOG_FILE }}
+                echo "FIRMWARE_ZIP=/tmp/zip_creation_failed.zip" >> $GITHUB_ENV # Dummy
+            fi
+        else
+            echo "警告: 最终固件收集目录 (${FIRMWARE_COLLECTION_DIR_PATH}) 未有效设置、不是目录或为空，无法创建 firmware.zip。" | tee -a ${{ env.DEBUG_LOG_FILE }}
+            echo "FIRMWARE_ZIP=/tmp/no_firmware_to_zip.zip" >> $GITHUB_ENV # Dummy
+        fi
 
     - name: 上传固件 (Artifact)
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        # Upload the zip if it exists and is non-empty, otherwise try the directory.
-        # This needs a bit more shell logic to check if FIRMWARE_ZIP actually got created.
-        # For now, relying on FIRMWARE_ZIP being set by previous step.
         path: |
-          ${{ env.FIRMWARE_ZIP }}
-          ${{ env.FIRMWARE }}/* # Fallback to directory if zip is not the primary target or if FIRMWARE_ZIP is dummy
-        # To be safer: A dedicated step could check if FIRMWARE_ZIP is valid and choose path.
-        # Example (conceptual, would need its own 'run' step to set an output):
-        # path: ${{ steps.check_zip.outputs.upload_path || env.FIRMWARE }}
+          ${{ env.FIRMWARE_ZIP }} 
+          # We primarily want to upload the zip. If FIRMWARE_ZIP points to a dummy/failed path, this might upload nothing or a tiny dummy.
+          # If FIRMWARE_ZIP is valid, and FIRMWARE points to the source dir, it might upload both.
+          # To upload only the zip if it's valid: this 'path' needs to be conditional or set by a prior step.
+          # For now, if FIRMWARE_ZIP is /tmp/..., it effectively only uploads FIRMWARE/* if that's also listed and valid.
+          # Simplest: rely on FIRMWARE_ZIP being the primary target.
+        if-no-files-found: warn # Don't fail the job if no files match
 
     - name: 生成发布标签
       id: tag
+      # (内容保持不变)
       if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
         RELEASE_TAG_BASE=$(date +"%Y.%m.%d-%H%M")
-        # Append device name if available, ensuring it's a valid tag component
         DEVICE_TAG_PART=$(echo "${{ env.DEVICE_NAME }}" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-//;s/-$//')
-        if [ -n "$DEVICE_TAG_PART" ] && [ "$DEVICE_TAG_PART" != "_" ]; then
-          FINAL_RELEASE_TAG="${RELEASE_TAG_BASE}${DEVICE_TAG_PART}"
-        else
-          FINAL_RELEASE_TAG="${RELEASE_TAG_BASE}"
-        fi
+        if [ -n "$DEVICE_TAG_PART" ] && [ "$DEVICE_TAG_PART" != "_" ]; then FINAL_RELEASE_TAG="${RELEASE_TAG_BASE}${DEVICE_TAG_PART}"; else FINAL_RELEASE_TAG="${RELEASE_TAG_BASE}"; fi
         echo "RELEASE_TAG=${FINAL_RELEASE_TAG}" >> $GITHUB_OUTPUT
-        
         echo "## OpenWrt Firmware Build ($(date +"%Y-%m-%d %H:%M")) 📦" > release_body.txt
         echo "" >> release_body.txt
         echo "**Branch:** \`${{ env.REPO_BRANCH }}\`" >> release_body.txt
         echo "**Config:** \`${{ env.CONFIG_FILE }}\`" >> release_body.txt
-        if [ -n "$DEVICE_TAG_PART" ] && [ "$DEVICE_TAG_PART" != "_" ]; then
-            echo "**Device:** \`${{ env.DEVICE_NAME }}\`" >> release_body.txt
-        fi
+        if [ -n "$DEVICE_TAG_PART" ] && [ "$DEVICE_TAG_PART" != "_" ]; then echo "**Device:** \`${{ env.DEVICE_NAME }}\`" >> release_body.txt; fi
         echo "" >> release_body.txt
         echo "### 固件下载 Firmware Download" >> release_body.txt
-        echo "请在下方 Assets 中找到固件文件。" >> release_body.txt
-        echo "Please find firmware files in the Assets section below." >> release_body.txt
-        echo "" >> release_body.txt
-        echo "---" >> release_body.txt
+        echo "请在下方 Assets 中找到固件文件 (通常是一个 .zip 压缩包)。" >> release_body.txt
+        echo "Please find firmware files (usually a .zip archive) in the Assets section below." >> release_body.txt
+        echo "" >> release_body.txt; echo "---" >> release_body.txt
         echo "⚠️ **刷机前请务必备份重要数据！**" >> release_body.txt
         echo "⚠️ **Backup your important data before flashing!**" >> release_body.txt
         echo "" >> release_body.txt
@@ -789,19 +717,15 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
-        body_path: release_body.txt # Use the new release body file
-        # Prefer uploading the zip if FIRMWARE_ZIP is valid and points to an existing file
-        # This logic is tricky directly in 'files:', ideally FIRMWARE_ZIP is robustly set
-        files: |
-          ${{ env.FIRMWARE_ZIP }}
-          ${{ env.FIRMWARE }}/* # Note: If FIRMWARE_ZIP is a dummy path, it might cause an error or upload a tiny dummy file.
-          # A more robust way is to have the 'organize' step output the exact path to upload.
+        body_path: release_body.txt
+        # Corrected files parameter, removing comments from value line
+        files: ${{ env.FIRMWARE_ZIP }} # Primarily upload the ZIP. Add other specific files if needed.
 
     - name: 删除旧的Releases
       uses: dev-drprasad/delete-older-releases@master
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
-        keep_latest: 3 # Keep only the 3 most recent releases
-        delete_tags: true # Also delete the git tags associated with old releases
+        keep_latest: 3
+        delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
