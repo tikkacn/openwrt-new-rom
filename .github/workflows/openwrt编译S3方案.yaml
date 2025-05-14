@@ -144,17 +144,43 @@ jobs:
     - name: 克隆源代码并创建基础目录结构 (Clone Source & Setup Dirs)
       working-directory: /workdir 
       run: |
-        echo "正在清理可能已存在的 /workdir/openwrt 目录..."
-        rm -rf /workdir/openwrt
-        echo "克隆新的源代码到 /workdir/openwrt..."
+        echo "当前工作目录: $(pwd)" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        echo "GITHUB_WORKSPACE 路径是: ${{ env.GITHUB_WORKSPACE }}" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        echo "列出 GITHUB_WORKSPACE 的内容和权限:" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        ls -la ${{ env.GITHUB_WORKSPACE }} | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+
+        echo "清理 S3 缓存的目标目录的实际源码位置 /workdir/openwrt ..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        rm -rf /workdir/openwrt 
+
+        echo "清理 GITHUB_WORKSPACE 下可能已存在的旧 openwrt 链接或目录..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        rm -rf ${{ env.GITHUB_WORKSPACE }}/openwrt # <--- 关键修改：明确先删除目标链接/目录
+
+        echo "克隆新的源代码到 /workdir/openwrt..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
-        ln -sf /workdir/openwrt ${{ env.GITHUB_WORKSPACE }}/openwrt 
-        cd openwrt 
-        mkdir -p ${{ env.S3_TARGET_STAGING_DIR_PATH }} ${{ env.S3_TARGET_HOST_BUILD_DIR_PATH }} ${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }} \
+        
+        echo "创建从 GITHUB_WORKSPACE/openwrt 到 /workdir/openwrt 的符号链接..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        # 使用 -v (verbose) 参数查看详细输出，-s (symbolic), -f (force)
+        ln -svf /workdir/openwrt ${{ env.GITHUB_WORKSPACE }}/openwrt | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        
+        cd openwrt # 进入 /workdir/openwrt
+        echo "当前已进入 $(pwd)" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+
+        find . -type f -name "*.sh" -exec chmod +x {} \;
+        echo "下载 feeds.conf.default..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        curl -L -o feeds.conf.default "${{ env.FEEDS_CONF_URL }}" || echo "警告：无法下载 feeds.conf.default，可能使用仓库默认或无feeds配置" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        echo "feeds.conf.default 内容：" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        cat feeds.conf.default | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        
+        echo "从克隆的源码中移除 .git 目录..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        rm -rf .git 
+        
+        echo "创建后续步骤可能需要的目录..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        mkdir -p ${{ env.PACKAGES_BIN_DIR_PATH }} ${{ env.S3_TARGET_STAGING_DIR_PATH }} \
+                   ${{ env.S3_TARGET_HOST_BUILD_DIR_PATH }} ${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }} \
                    ${{ env.S3_TARGET_DL_DIR_PATH }} \
-                   ${{ env.PACKAGES_BIN_DIR_PATH }} ${{ env.BUILD_STATE_DIR_PATH }} ${{ env.CCACHE_DIR_PATH }}
+                   ${{ env.BUILD_STATE_DIR_PATH }} ${{ env.CCACHE_DIR_PATH }}
         mkdir -p logs 
-        echo "基础目录结构创建/确认完毕。"
+        echo "基础目录结构创建/确认完毕。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
 
     # --- GitHub Actions Cache Restore (Small Caches) ---
     - name: 恢复编译产物缓存 (bin/ 目录)
