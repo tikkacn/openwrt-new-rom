@@ -1,4 +1,4 @@
-name: 全新编译第12版(Gemini-S3Cache)
+name: 全新编译第12版(S3Cache)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: false
         default: 'false'
       clean_build:
-        description: '全新编译，不使用任何恢复的缓存 (包括S3和Actions Cache)。仍会尝试保存新缓存到S3和Actions Cache。'
+        description: '全新编译，不使用任何恢复的缓存。首次S3填充时应为false。'
         required: false
         default: 'false' 
       config_file:
@@ -44,7 +44,6 @@ env:
   S3_TOOLCHAIN_BUILD_DIR_ARCHIVE_FILENAME: toolchain_build_dir_cache.tar.zst
   S3_DL_DIR_ARCHIVE_FILENAME: dl_dir_cache.tar.zst
   
-  # S3_PATH_PREFIX_KEY 将在下面的步骤中动态设置
   S3_CONFIG_SNAPSHOT_FILENAME: latest_successful_build.config 
 
   CCACHE_LOGFILE_PATH: /tmp/ccache_detailed.log
@@ -56,19 +55,24 @@ jobs:
 
     steps:
     - name: 检出代码 (Checkout)
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
     - name: 设置 S3 缓存路径前缀 (Set S3 Cache Path Prefix)
+      id: set_s3_prefix 
       run: |
         s3_prefix_from_secret="${{ secrets.S3_CACHE_PATH_PREFIX }}"
+        final_s3_prefix=""
         if [ -n "$s3_prefix_from_secret" ]; then
-          echo "S3_PATH_PREFIX_KEY=$s3_prefix_from_secret" >> $GITHUB_ENV
-          echo "使用来自 Secret 'S3_CACHE_PATH_PREFIX' 的S3路径前缀: $s3_prefix_from_secret" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          final_s3_prefix="$s3_prefix_from_secret"
+          echo "使用来自 Secret 'S3_CACHE_PATH_PREFIX' 的S3路径前缀: $final_s3_prefix" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         else
+          # REPO_BRANCH 在顶级 env 中定义，此处可安全引用
           default_prefix="openwrt-caches/${{ env.REPO_BRANCH }}"
-          echo "S3_PATH_PREFIX_KEY=$default_prefix" >> $GITHUB_ENV
-          echo "使用默认S3路径前缀: $default_prefix" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          final_s3_prefix="$default_prefix"
+          echo "使用默认S3路径前缀: $final_s3_prefix" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         fi
+        echo "S3_PATH_PREFIX_KEY=${final_s3_prefix}" >> $GITHUB_ENV
+        echo "s3_prefix=${final_s3_prefix}" >> $GITHUB_OUTPUT
 
     - name: 优化磁盘空间 (Maximize Build Space)
       uses: easimon/maximize-build-space@master
@@ -103,28 +107,34 @@ jobs:
         libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf \
         python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
         swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev \
-        awscli 
+        awscli jq
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         mkdir -p ${{ env.BUILD_STATE_DIR_PATH }} ${{ env.CCACHE_DIR_PATH }} /workdir/openwrt 
         chmod -R 777 /workdir
         
-        CONFIG_FILE_ON_RUNNER="${GITHUB_WORKSPACE}/${{ env.CONFIG_FILE_NAME }}"
-        DIY_P1_SH_ON_RUNNER="${GITHUB_WORKSPACE}/${{ env.DIY_P1_SH_NAME }}"
-        DIY_P2_SH_ON_RUNNER="${GITHUB_WORKSPACE}/${{ env.DIY_P2_SH_NAME }}"
+        # 使用 github.workspace 引用仓库根目录下的文件
+        CONFIG_FILE_ON_RUNNER="${{ github.workspace }}/${{ env.CONFIG_FILE_NAME }}"
+        DIY_P1_SH_ON_RUNNER="${{ github.workspace }}/${{ env.DIY_P1_SH_NAME }}"
+        DIY_P2_SH_ON_RUNNER="${{ github.workspace }}/${{ env.DIY_P2_SH_NAME }}"
 
         echo '#!/bin/bash' > "${DIY_P1_SH_ON_RUNNER}"
+        echo "set -eo pipefail" >> "${DIY_P1_SH_ON_RUNNER}"
         echo "echo '[INFO] Running default diy-part1.sh. FEEDS_CONF_URL is: ${{ env.FEEDS_CONF_URL }}'" >> "${DIY_P1_SH_ON_RUNNER}"
         chmod +x "${DIY_P1_SH_ON_RUNNER}"
 
         echo '#!/bin/bash' > "${DIY_P2_SH_ON_RUNNER}"
+        echo "set -eo pipefail" >> "${DIY_P2_SH_ON_RUNNER}"
         echo 'BANNER_DATE=$(date +"%Y%m%d%H%M")' >> "${DIY_P2_SH_ON_RUNNER}"
-        echo 'sed -i "s/OpenWrt /OpenWrt_S3Build_${BANNER_DATE} /" package/lean/default-settings/files/zzz-default-settings' >> "${DIY_P2_SH_ON_RUNNER}"
+        # 确保 package/lean/default-settings/files 目录存在，如果不存在，sed 会报错
+        echo 'mkdir -p package/lean/default-settings/files' >> "${DIY_P2_SH_ON_RUNNER}"
+        echo 'touch package/lean/default-settings/files/zzz-default-settings' >> "${DIY_P2_SH_ON_RUNNER}"
+        echo 'sed -i "s/OpenWrt /OpenWrt_S3Build_${BANNER_DATE} /" package/lean/default-settings/files/zzz-default-settings || echo "Banner sed command failed or target file not found."' >> "${DIY_P2_SH_ON_RUNNER}"
         echo "echo '[INFO] Running default diy-part2.sh (Banner updated).'" >> "${DIY_P2_SH_ON_RUNNER}"
         chmod +x "${DIY_P2_SH_ON_RUNNER}"
         
         if [ ! -f "${CONFIG_FILE_ON_RUNNER}" ]; then
-          echo "警告：配置文件 ${CONFIG_FILE_ON_RUNNER} 不存在，创建默认配置文件"
+          echo "警告：配置文件 ${CONFIG_FILE_ON_RUNNER} 不存在，创建默认配置文件" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
           echo "# Default minimal .config created by workflow" > "${CONFIG_FILE_ON_RUNNER}"
           echo "CONFIG_TARGET_x86=y" >> "${CONFIG_FILE_ON_RUNNER}"
           echo "CONFIG_TARGET_x86_64=y" >> "${CONFIG_FILE_ON_RUNNER}"
@@ -145,42 +155,38 @@ jobs:
       working-directory: /workdir 
       run: |
         echo "当前工作目录: $(pwd)" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-        echo "GITHUB_WORKSPACE 路径是: ${{ env.GITHUB_WORKSPACE }}" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-        echo "列出 GITHUB_WORKSPACE 的内容和权限:" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-        ls -la ${{ env.GITHUB_WORKSPACE }} | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        echo "github.workspace 路径是: ${{ github.workspace }}" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        ls -la ${{ github.workspace }} | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
 
-        echo "清理 S3 缓存的目标目录的实际源码位置 /workdir/openwrt ..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        echo "清理 /workdir/openwrt ..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         rm -rf /workdir/openwrt 
 
-        echo "清理 GITHUB_WORKSPACE 下可能已存在的旧 openwrt 链接或目录..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-        rm -rf ${{ env.GITHUB_WORKSPACE }}/openwrt # <--- 关键修改：明确先删除目标链接/目录
+        echo "清理 ${{ github.workspace }}/openwrt (如果存在)..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        rm -rf ${{ github.workspace }}/openwrt 
 
         echo "克隆新的源代码到 /workdir/openwrt..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
         
-        echo "创建从 GITHUB_WORKSPACE/openwrt 到 /workdir/openwrt 的符号链接..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-        # 使用 -v (verbose) 参数查看详细输出，-s (symbolic), -f (force)
-        ln -svf /workdir/openwrt ${{ env.GITHUB_WORKSPACE }}/openwrt | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        echo "创建符号链接: ${{ github.workspace }}/openwrt -> /workdir/openwrt" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        ln -svf /workdir/openwrt ${{ github.workspace }}/openwrt | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         
-        cd openwrt # 进入 /workdir/openwrt
+        cd openwrt 
         echo "当前已进入 $(pwd)" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        
+        # 创建 S3 缓存对应的目标目录及其他缓存目录
+        mkdir -p ${{ env.S3_TARGET_STAGING_DIR_PATH }} ${{ env.S3_TARGET_HOST_BUILD_DIR_PATH }} ${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }} \
+                   ${{ env.S3_TARGET_DL_DIR_PATH }} \
+                   ${{ env.PACKAGES_BIN_DIR_PATH }} ${{ env.BUILD_STATE_DIR_PATH }} ${{ env.CCACHE_DIR_PATH }}
+        mkdir -p logs 
+        echo "基础目录结构创建/确认完毕。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
 
-        find . -type f -name "*.sh" -exec chmod +x {} \;
         echo "下载 feeds.conf.default..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-        curl -L -o feeds.conf.default "${{ env.FEEDS_CONF_URL }}" || echo "警告：无法下载 feeds.conf.default，可能使用仓库默认或无feeds配置" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        curl -L -o feeds.conf.default "${{ env.FEEDS_CONF_URL }}" || echo "警告：无法下载 feeds.conf.default" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         echo "feeds.conf.default 内容：" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         cat feeds.conf.default | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         
         echo "从克隆的源码中移除 .git 目录..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         rm -rf .git 
-        
-        echo "创建后续步骤可能需要的目录..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-        mkdir -p ${{ env.PACKAGES_BIN_DIR_PATH }} ${{ env.S3_TARGET_STAGING_DIR_PATH }} \
-                   ${{ env.S3_TARGET_HOST_BUILD_DIR_PATH }} ${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }} \
-                   ${{ env.S3_TARGET_DL_DIR_PATH }} \
-                   ${{ env.BUILD_STATE_DIR_PATH }} ${{ env.CCACHE_DIR_PATH }}
-        mkdir -p logs 
-        echo "基础目录结构创建/确认完毕。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
 
     # --- GitHub Actions Cache Restore (Small Caches) ---
     - name: 恢复编译产物缓存 (bin/ 目录)
@@ -189,14 +195,14 @@ jobs:
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.PACKAGES_BIN_DIR_PATH }} 
-        key: packages-bin-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', env.GITHUB_WORKSPACE, env.CONFIG_FILE_NAME)) }}-v1 
+        key: packages-bin-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE_NAME)) }}-v1 
 
     - name: 恢复CCACHE缓存
       uses: actions/cache@v3
       id: cache-ccache
       with: 
         path: ${{ env.CCACHE_DIR_PATH }}
-        key: ccache-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', env.GITHUB_WORKSPACE, env.CONFIG_FILE_NAME)) }}-v1
+        key: ccache-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE_NAME)) }}-v1
 
     - name: 恢复构建状态缓存
       uses: actions/cache@v3
@@ -204,7 +210,7 @@ jobs:
       if: inputs.clean_build != 'true'
       with:
         path: ${{ env.BUILD_STATE_DIR_PATH }}
-        key: state-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', env.GITHUB_WORKSPACE, env.CONFIG_FILE_NAME)) }}-v1
+        key: state-${{ env.REPO_BRANCH }}-${{ hashFiles(format('{0}/{1}', github.workspace, env.CONFIG_FILE_NAME)) }}-v1
     # --- END GitHub Actions Cache Restore ---
 
     # --- S3 Cache Restore (Large Caches) ---
@@ -213,7 +219,7 @@ jobs:
       working-directory: /workdir/openwrt 
       run: |
         S3_BUCKET_NAME="${{ secrets.AWS_S3_BUCKET_NAME }}"
-        S3_FULL_PREFIX="${{ env.S3_PATH_PREFIX_KEY }}" # This is now set by the 'Set S3 Cache Path Prefix' step
+        S3_FULL_PREFIX="${{ env.S3_PATH_PREFIX_KEY }}" 
         OPENWRT_ROOT_DIR=$(pwd) 
 
         if [ -z "$S3_BUCKET_NAME" ]; then
@@ -229,7 +235,7 @@ jobs:
           local local_archive_on_runner="./${s3_archive_filename}" 
 
           echo "尝试从 S3 下载: s3://${S3_BUCKET_NAME}/${s3_object_key} 到 ${local_archive_on_runner} ..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-          if aws s3 cp "s3://${S3_BUCKET_NAME}/${s3_object_key}" "${local_archive_on_runner}" --quiet; then
+          if aws s3 cp "s3://${S3_BUCKET_NAME}/${s3_object_key}" "${local_archive_on_runner}" --no-progress; then
             echo "下载 ${s3_archive_filename} 成功. 开始解压..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
             if [ -d "${target_abs_dir_path}" ]; then
               echo "删除已存在的目录: ${target_abs_dir_path}" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -276,29 +282,26 @@ jobs:
     - name: 配置编译环境 (Configure Build Environment)
       run: |
         cd /workdir/openwrt
-        CONFIG_FILE_ON_RUNNER="${GITHUB_WORKSPACE}/${{ env.CONFIG_FILE_NAME }}"
-        DIY_P1_SH_ON_RUNNER="${GITHUB_WORKSPACE}/${{ env.DIY_P1_SH_NAME }}"
-        DIY_P2_SH_ON_RUNNER="${GITHUB_WORKSPACE}/${{ env.DIY_P2_SH_NAME }}"
+        CONFIG_FILE_ON_RUNNER="${{ github.workspace }}/${{ env.CONFIG_FILE_NAME }}" 
+        DIY_P1_SH_ON_RUNNER="${{ github.workspace }}/${{ env.DIY_P1_SH_NAME }}"     
+        DIY_P2_SH_ON_RUNNER="${{ github.workspace }}/${{ env.DIY_P2_SH_NAME }}"     
 
-        # If .config exists (e.g. from S3 cache of a full build_dir or if a previous step created it)
-        # and we are not doing a clean build, we might prefer it.
-        # However, current logic copies the repo's config file over any restored .config.
         if [ -f ".config" ] && [ "${{ inputs.clean_build }}" != "true" ]; then 
-          echo "检测到已存在的 .config (可能来自S3缓存恢复), 输入的配置文件将覆盖它。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          echo "检测到已存在的 .config (可能来自S3缓存恢复), 输入的配置文件 (${CONFIG_FILE_ON_RUNNER}) 将覆盖它。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         fi
 
-        $DIY_P1_SH_ON_RUNNER
+        "${DIY_P1_SH_ON_RUNNER}" 
         echo "更新并安装 Feeds..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        if [ -e "${GITHUB_WORKSPACE}/files" ]; then
+        if [ -e "${{ github.workspace }}/files" ]; then 
           echo "复制自定义文件 files/ ..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-          cp -r "${GITHUB_WORKSPACE}/files" ./
+          cp -r "${{ github.workspace }}/files" ./
         fi
         echo "使用配置文件: ${CONFIG_FILE_ON_RUNNER}" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         cp "${CONFIG_FILE_ON_RUNNER}" ./.config
         cp .config .config.input 
-        $DIY_P2_SH_ON_RUNNER
+        "${DIY_P2_SH_ON_RUNNER}" 
         
         echo "CONFIG_AUTOREMOVE=y" >> .config 
         echo "CONFIG_AUTOREBUILD=y" >> .config 
@@ -327,7 +330,7 @@ jobs:
           echo "所有在输入 .config 中指定的 CONFIG_PACKAGE_*=y 配置项在 defconfig 后均保留或被正确处理。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         fi
         diff -u .config.input .config > config_diff.txt || echo "配置文件 (.config.input vs .config) 无差异" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-        echo "Config diff 已保存到 config_diff.txt" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+        echo "Config diff 已保存到 config_diff.txt (上传到 Artifacts)" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         df -h | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
 
     - name: 检查源码变化 (Feeds Makefile Hashes)
@@ -447,7 +450,7 @@ jobs:
           local make_log_content="$1"
           local make_command_failed="$2"
           echo "编译命令 '$make_command_failed' 失败。日志如下：" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-          echo "$make_log_content" >> ${{ env.DEBUG_LOG_FILE_PATH }} # Append to main debug log
+          echo "$make_log_content" >> ${{ env.DEBUG_LOG_FILE_PATH }} 
           if echo "$make_log_content" | grep -q -E "(No more mirrors to try|Download failed|Couldn't resolve host|404 Not Found|403 Forbidden)"; then
             echo "错误似乎与下载相关，但下载步骤应已处理。请检查包的Makefile。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
           fi
@@ -464,7 +467,6 @@ jobs:
           MAIN_MAKE_CMD="make -j${MAKE_JOBS} V=s"
           FALLBACK_MAKE_CMD="make -j1 V=s" 
           
-          # Use a timestamped log file for each compile_firmware invocation's main output
           COMPILE_OUTPUT_LOG="logs/compile_output_$(date +%Y%m%d_%H%M%S).log"
           echo "详细编译日志将输出到: ${COMPILE_OUTPUT_LOG}" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
           
@@ -504,7 +506,7 @@ jobs:
           fi
           
           echo "所有编译分支执行完毕，确保执行最终的固件生成步骤 (target/install)..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-          make target/install $FALLBACK_MAKE_CMD 2>&1 | tee -a "${COMPILE_OUTPUT_LOG}" # Append to the same log
+          make target/install $FALLBACK_MAKE_CMD 2>&1 | tee -a "${COMPILE_OUTPUT_LOG}" 
           local final_install_status=$? 
           
           save_md5_info_to_build_state 
@@ -544,13 +546,13 @@ jobs:
         if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
           echo "clean_build is true: DO_FULL_BUILD=1 (全新编译，不使用已恢复的缓存)" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
           DO_FULL_BUILD=1
-        # Check S3 cache status (using GITHUB_OUTPUT from S3 restore step is more robust, but direct check is an alternative)
-        # For simplicity, we assume if S3 restore step ran (clean_build=false) and key dirs are not well populated, it's a full build.
-        # This logic can be refined if `s3_download_and_untar` sets an output.
+        # Basic check for S3 cache presence (more robust checks can be added, e.g. checking specific stamp files)
+        # This assumes if clean_build is false, S3 restore step ran.
         elif [ ! -f "${{ env.S3_TARGET_STAGING_DIR_PATH }}/stamp/.prepared" ] || \
              [ ! -d "${{ env.S3_TARGET_HOST_BUILD_DIR_PATH }}/stamp" ] || \
-             [ ! -d "${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }}/stamp" ]; then
-          echo "一个或多个关键S3缓存目录似乎不完整或未恢复，执行完整构建逻辑: DO_FULL_BUILD=1" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+             [ ! -d "${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }}/stamp" ] || \
+             [ ! -d "${{ env.S3_TARGET_DL_DIR_PATH }}" ] ; then 
+          echo "一个或多个关键S3缓存目录/标记文件似乎不完整或未恢复，执行完整构建逻辑: DO_FULL_BUILD=1" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
           DO_FULL_BUILD=1
         elif [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_state_cache" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
           echo "Toolchain config MD5 变化或首次构建 (基于state缓存)，执行完整构建逻辑: DO_FULL_BUILD=1" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -631,8 +633,8 @@ jobs:
       working-directory: /workdir/openwrt 
       run: |
         S3_BUCKET_NAME="${{ secrets.AWS_S3_BUCKET_NAME }}"
-        S3_FULL_PREFIX="${{ env.S3_PATH_PREFIX_KEY }}" # Use the env var set by the early step
-        CONFIG_FILE_TO_UPLOAD=".config" # Path relative to /workdir/openwrt
+        S3_FULL_PREFIX="${{ env.S3_PATH_PREFIX_KEY }}" 
+        CONFIG_FILE_TO_UPLOAD=".config" 
 
         if [ -z "$S3_BUCKET_NAME" ]; then
           echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。无法上传缓存到S3。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -641,10 +643,10 @@ jobs:
         echo "[INFO] S3 Bucket for Upload: $S3_BUCKET_NAME, S3 Cache Prefix: $S3_FULL_PREFIX" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
 
         s3_pack_and_upload() {
-          local source_dir_relative_to_pwd="$1" # e.g., staging_dir (relative to /workdir/openwrt)
-          local s3_archive_filename="$2"        # e.g., staging_dir_cache.tar.zst
+          local source_dir_relative_to_pwd="$1" 
+          local s3_archive_filename="$2"      
           local s3_object_key="${S3_FULL_PREFIX}/${s3_archive_filename}"
-          local local_archive_in_pwd="./${s3_archive_filename}" # Temp archive in /workdir/openwrt
+          local local_archive_in_pwd="./${s3_archive_filename}" 
 
           if [ ! -d "$source_dir_relative_to_pwd" ]; then
             echo "目录 $source_dir_relative_to_pwd 不存在于 $(pwd)，跳过打包和上传。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -652,12 +654,11 @@ jobs:
           fi
           
           echo "开始打包压缩目录: $source_dir_relative_to_pwd 为 $local_archive_in_pwd ..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-          # Using current dir as context for tar
           if tar -I "zstd -T0 -3" -cf "$local_archive_in_pwd" "$source_dir_relative_to_pwd"; then 
             ARCHIVE_SIZE=$(du -sh "$local_archive_in_pwd" | awk '{print $1}')
             echo "打包压缩 $local_archive_in_pwd 成功. 文件大小: $ARCHIVE_SIZE" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
             echo "开始上传 $local_archive_in_pwd 到 s3://${S3_BUCKET_NAME}/${s3_object_key} ..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-            if aws s3 cp "$local_archive_in_pwd" "s3://${S3_BUCKET_NAME}/${s3_object_key}" --quiet; then # Added --quiet
+            if aws s3 cp "$local_archive_in_pwd" "s3://${S3_BUCKET_NAME}/${s3_object_key}" --quiet; then 
               echo "上传 $local_archive_in_pwd 到 S3 成功。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
             else
               echo "错误：上传 $local_archive_in_pwd 到 S3 失败。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -717,7 +718,7 @@ jobs:
 
         if [ ! -d "${OPENWRT_TARGETS_DIR}" ]; then
           echo "错误：编译目标目录 ${OPENWRT_TARGETS_DIR} 不存在。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-          FIRMWARE_COLLECTION_DIR_PATH="/tmp/empty_firmware_collection_$$$(date +%N)" 
+          FIRMWARE_COLLECTION_DIR_PATH="/tmp/empty_firmware_collection_$(date +%N)" 
           mkdir -p "${FIRMWARE_COLLECTION_DIR_PATH}"
           echo "FIRMWARE=${FIRMWARE_COLLECTION_DIR_PATH}" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT 
