@@ -633,8 +633,8 @@ jobs:
       working-directory: /workdir/openwrt 
       run: |
         S3_BUCKET_NAME="${{ secrets.AWS_S3_BUCKET_NAME }}"
-        S3_FULL_PREFIX="${{ env.S3_PATH_PREFIX_KEY }}" 
-        CONFIG_FILE_TO_UPLOAD=".config" 
+        S3_FULL_PREFIX="${{ env.S3_PATH_PREFIX_KEY }}" # This is set by the 'Set S3 Cache Path Prefix' step
+        CONFIG_FILE_TO_UPLOAD=".config" # Path relative to /workdir/openwrt (current working directory)
 
         if [ -z "$S3_BUCKET_NAME" ]; then
           echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。无法上传缓存到S3。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -643,17 +643,18 @@ jobs:
         echo "[INFO] S3 Bucket for Upload: $S3_BUCKET_NAME, S3 Cache Prefix: $S3_FULL_PREFIX" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
 
         s3_pack_and_upload() {
-          local source_dir_relative_to_pwd="$1" 
-          local s3_archive_filename="$2"      
+          local source_dir_relative_to_pwd="$1" # e.g., staging_dir OR build_dir/host (relative to /workdir/openwrt)
+          local s3_archive_filename="$2"        # e.g., staging_dir_cache.tar.zst
           local s3_object_key="${S3_FULL_PREFIX}/${s3_archive_filename}"
-          local local_archive_in_pwd="./${s3_archive_filename}" 
+          local local_archive_in_pwd="./${s3_archive_filename}" # Temp archive in /workdir/openwrt
 
           if [ ! -d "$source_dir_relative_to_pwd" ]; then
             echo "目录 $source_dir_relative_to_pwd 不存在于 $(pwd)，跳过打包和上传。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-            return
+            return 1 # Indicate failure to pack this specific directory
           fi
           
           echo "开始打包压缩目录: $source_dir_relative_to_pwd 为 $local_archive_in_pwd ..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          # Using current dir as context for tar. source_dir_relative_to_pwd is the path to tar.
           if tar -I "zstd -T0 -3" -cf "$local_archive_in_pwd" "$source_dir_relative_to_pwd"; then 
             ARCHIVE_SIZE=$(du -sh "$local_archive_in_pwd" | awk '{print $1}')
             echo "打包压缩 $local_archive_in_pwd 成功. 文件大小: $ARCHIVE_SIZE" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -662,17 +663,30 @@ jobs:
               echo "上传 $local_archive_in_pwd 到 S3 成功。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
             else
               echo "错误：上传 $local_archive_in_pwd 到 S3 失败。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+              # Optionally, you might want to return an error code here too
+              # return 1 
             fi
             rm -f "$local_archive_in_pwd" 
           else
             echo "错误：打包压缩 $source_dir_relative_to_pwd 为 $local_archive_in_pwd 失败。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+            return 1 # Indicate failure
           fi
+          return 0 # Success for this directory
         }
         
+        # --- Corrected calls to s3_pack_and_upload ---
+        # For directories directly under /workdir/openwrt (like staging_dir, dl):
         s3_pack_and_upload "$(basename ${{ env.S3_TARGET_STAGING_DIR_PATH }})" "${{ env.S3_STAGING_DIR_ARCHIVE_FILENAME }}"
-        s3_pack_and_upload "$(basename ${{ env.S3_TARGET_HOST_BUILD_DIR_PATH }})" "${{ env.S3_HOST_BUILD_DIR_ARCHIVE_FILENAME }}"
-        s3_pack_and_upload "$(basename ${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }})" "${{ env.S3_TOOLCHAIN_BUILD_DIR_ARCHIVE_FILENAME }}"
         s3_pack_and_upload "$(basename ${{ env.S3_TARGET_DL_DIR_PATH }})" "${{ env.S3_DL_DIR_ARCHIVE_FILENAME }}"
+
+        # For directories under /workdir/openwrt/build_dir/ (like host, toolchain):
+        # We need their path relative to /workdir/openwrt
+        HOST_BUILD_DIR_REL_PATH="build_dir/$(basename ${{ env.S3_TARGET_HOST_BUILD_DIR_PATH }})"
+        TOOLCHAIN_BUILD_DIR_REL_PATH="build_dir/$(basename ${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }})"
+        
+        s3_pack_and_upload "${HOST_BUILD_DIR_REL_PATH}" "${{ env.S3_HOST_BUILD_DIR_ARCHIVE_FILENAME }}"
+        s3_pack_and_upload "${TOOLCHAIN_BUILD_DIR_REL_PATH}" "${{ env.S3_TOOLCHAIN_BUILD_DIR_ARCHIVE_FILENAME }}"
+        # --- End of corrected calls ---
 
         if [ -f "$CONFIG_FILE_TO_UPLOAD" ]; then 
           echo "上传 .config 文件 (${CONFIG_FILE_TO_UPLOAD}) 到 S3..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
