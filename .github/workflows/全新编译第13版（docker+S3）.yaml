@@ -10,7 +10,7 @@ on:
       clean_build:
         description: '全新编译，不使用S3恢复的环境。仍会打包上传新环境到S3。首次S3填充时应为false并预清空S3。'
         required: false
-        default: 'false' 
+        default: 'false'
       config_file:
         description: '配置文件名 (位于仓库根目录)'
         required: false
@@ -18,11 +18,11 @@ on:
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master 
+  REPO_BRANCH: master
   FEEDS_CONF_URL: https://github.com/tikkacn/openwrt-new-rom/raw/main/feeds.conf.default
   CONFIG_FILE_IN_REPO: ${{ github.event.inputs.config_file || '增量缓存优化.config' }} # 在仓库中的配置文件名
-  DIY_P1_SH_IN_REPO: diy-part1.sh 
-  DIY_P2_SH_IN_REPO: diy-part2.sh 
+  DIY_P1_SH_IN_REPO: diy-part1.sh
+  DIY_P2_SH_IN_REPO: diy-part2.sh
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
@@ -36,13 +36,13 @@ env:
 
   # S3 缓存压缩包信息
   S3_WORKSPACE_ARCHIVE_FILENAME: openwrt_workspace_cache.tar.zst # 整个工作区的S3缓存文件名
-  S3_PATH_PREFIX: ${{ secrets.S3_CACHE_PATH_PREFIX || format('openwrt-s3env-caches/{0}', env.REPO_BRANCH) }} # S3桶内路径前缀
+  # S3_PATH_PREFIX: ${{ secrets.S3_CACHE_PATH_PREFIX || format('openwrt-s3env-caches/{0}', env.REPO_BRANCH) }} # S3桶内路径前缀  <- 此行已根据错误报告移除
   S3_CONFIG_SNAPSHOT_FILENAME: last_successful_build.config # S3上保存的.config快照文件名
 
   # 日志文件路径 (这些将在Docker容器内部使用)
   CONTAINER_CCACHE_LOGFILE_PATH: /tmp/ccache_detailed.log
   CONTAINER_DEBUG_LOG_FILE_PATH: /tmp/build_debug_summary.log
-  
+
   # 编译相关的目录，相对于容器内的OpenWrt根目录 (例如 /build/openwrt)
   # 这些仅用于信息展示或内部脚本，实际缓存是整个工作区
   BUILD_STATE_DIR_NAME: .github_actions_build_state # 存放在OpenWrt根目录下
@@ -88,7 +88,7 @@ jobs:
     - name: 优化Runner磁盘空间 (Maximize Runner Build Space)
       uses: easimon/maximize-build-space@master
       with:
-        root-reserve-mb: 10240 
+        root-reserve-mb: 10240
         swap-size-mb: 2048
         remove-dotnet: 'true'
         remove-android: 'true'
@@ -116,7 +116,7 @@ jobs:
         if [ -z "$S3_BUCKET_NAME_SECRET" ]; then
           echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。跳过S3缓存恢复。" | tee -a $DEBUG_LOG_FILE
           mkdir -p $RUNNER_WORKSPACE_PATH_ENV # 确保目录存在，即使是空的
-          exit 0 
+          exit 0
         fi
         
         S3_OBJECT_KEY="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${S3_ARCHIVE_NAME_ENV}"
@@ -129,14 +129,14 @@ jobs:
           mkdir -p "${RUNNER_WORKSPACE_PATH_ENV}"
           # 解压前删除旧内容
           rm -rf "${RUNNER_WORKSPACE_PATH_ENV:?}"/* "${RUNNER_WORKSPACE_PATH_ENV:?}"/.[!.]* "${RUNNER_WORKSPACE_PATH_ENV:?}"/..?* 2>/dev/null || true
-          if tar -I "zstd -T0" -xf "${LOCAL_ARCHIVE_ON_RUNNER}" -C "${RUNNER_WORKSPACE_PATH_ENV}"; then 
+          if tar -I "zstd -T0" -xf "${LOCAL_ARCHIVE_ON_RUNNER}" -C "${RUNNER_WORKSPACE_PATH_ENV}"; then
             echo "解压 ${S3_ARCHIVE_NAME_ENV} 到 ${RUNNER_WORKSPACE_PATH_ENV} 成功。" | tee -a $DEBUG_LOG_FILE
             echo "S3_CACHE_RESTORED=true" >> $GITHUB_ENV
           else
             echo "错误：解压 ${S3_ARCHIVE_NAME_ENV} 失败。将进行全新构建。" | tee -a $DEBUG_LOG_FILE
             rm -rf "${RUNNER_WORKSPACE_PATH_ENV:?}"/* "${RUNNER_WORKSPACE_PATH_ENV:?}"/.[!.]* "${RUNNER_WORKSPACE_PATH_ENV:?}"/..?* 2>/dev/null || true # 清理不完整的解压
           fi
-          rm -f "${LOCAL_ARCHIVE_ON_RUNNER}" 
+          rm -f "${LOCAL_ARCHIVE_ON_RUNNER}"
         else
           echo "从 S3 下载 ${S3_ARCHIVE_NAME_ENV} 失败或文件不存在。将进行全新构建。" | tee -a $DEBUG_LOG_FILE
           mkdir -p $RUNNER_WORKSPACE_PATH_ENV # 确保目录存在
@@ -237,7 +237,7 @@ jobs:
         if [ -f "${CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" ]; then # Check if custom feeds.conf.default exists in repo
           cp "${CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" "./feeds.conf.default"
         elif [ ! -f "./feeds.conf.default" ] && [ -f "./feeds.conf.default.sample" ]; then # If no custom and no default, use sample
-          cp feeds.conf.default.sample feeds.conf.default 
+          cp feeds.conf.default.sample feeds.conf.default
         fi
         cat feeds.conf.default | tee -a "${INTERNAL_DEBUG_LOG}"
 
@@ -248,8 +248,8 @@ jobs:
         "./${DIY_P2_SH_NAME_IN_REPO}"
         
         # Standard .config adjustments
-        echo "CONFIG_AUTOREMOVE=y" >> .config 
-        echo "CONFIG_AUTOREBUILD=y" >> .config 
+        echo "CONFIG_AUTOREMOVE=y" >> .config
+        echo "CONFIG_AUTOREBUILD=y" >> .config
         # (Ensuring image options logic as before)
         if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config; fi
         if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config; fi
@@ -267,7 +267,7 @@ jobs:
         TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
         PREVIOUS_TOOLCHAIN_MD5=$(cat ${INTERNAL_BUILD_STATE_DIR}/toolchain.md5 2>/dev/null || echo "not_found_in_build_state")
 
-        PACKAGE_CONFIG_SUBSET_FOR_MD5=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort) 
+        PACKAGE_CONFIG_SUBSET_FOR_MD5=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort)
         PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
         PREVIOUS_PACKAGE_MD5=$(cat ${INTERNAL_BUILD_STATE_DIR}/package.md5 2>/dev/null || echo "not_found_in_build_state")
         
@@ -295,8 +295,8 @@ jobs:
           echo "[DOCKER] Package config MD5 changed: DO_PACKAGE_BUILD_DOCKER=1" | tee -a "${INTERNAL_DEBUG_LOG}"
           DO_PACKAGE_BUILD_DOCKER=1
         elif [ "${FEEDS_CHANGED_FROM_OUTSIDE}" = "true" ]; then
-           echo "[DOCKER] Feeds changed: DO_PACKAGE_BUILD_DOCKER=1" | tee -a "${INTERNAL_DEBUG_LOG}"
-           DO_PACKAGE_BUILD_DOCKER=1
+          echo "[DOCKER] Feeds changed: DO_PACKAGE_BUILD_DOCKER=1" | tee -a "${INTERNAL_DEBUG_LOG}"
+          DO_PACKAGE_BUILD_DOCKER=1
         fi
         echo "[DOCKER] Final Build Strategy -> DO_FULL_BUILD_DOCKER: $DO_FULL_BUILD_DOCKER, DO_PACKAGE_BUILD_DOCKER: $DO_PACKAGE_BUILD_DOCKER" | tee -a "${INTERNAL_DEBUG_LOG}"
         
@@ -340,20 +340,19 @@ jobs:
         echo "$TOOLCHAIN_MD5" > "${INTERNAL_BUILD_STATE_DIR}/toolchain.md5"
         echo "$PACKAGE_MD5" > "${INTERNAL_BUILD_STATE_DIR}/package.md5"
         # Save feeds hash from outside, or recalculate if feeds source is also part of workspace
-        echo "${FEEDS_CHANGED_FROM_OUTSIDE}" > "${INTERNAL_BUILD_STATE_DIR}/last_feeds_changed_status.txt" 
+        echo "${FEEDS_CHANGED_FROM_OUTSIDE}" > "${INTERNAL_BUILD_STATE_DIR}/last_feeds_changed_status.txt"
         find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > "${INTERNAL_BUILD_STATE_DIR}/current_feeds.sha256"
 
         echo "[DOCKER] >>> CCACHE Statistics at END of compile_firmware:" | tee -a "${INTERNAL_DEBUG_LOG}"
         ccache -s | tee -a "${INTERNAL_DEBUG_LOG}"
 
+        # Create success/failure marker in the shared build area
         if [ ${final_install_status_docker} -eq 0 ] && [ -n "$(find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print -quit)" ]; then
           echo "[DOCKER] Compile firmware successful." | tee -a "${INTERNAL_DEBUG_LOG}"
-          # Create a success marker file for the outer script to check
-          touch /tmp/docker_build_success 
+          touch "${CONTAINER_BUILD_AREA}/.docker_build_status_success"
         else
           echo "[DOCKER] Compile firmware failed." | tee -a "${INTERNAL_DEBUG_LOG}"
-          # Create a failure marker file
-          touch /tmp/docker_build_failure
+          touch "${CONTAINER_BUILD_AREA}/.docker_build_status_failure"
         fi
         # Copy docker debug log to the mounted repo_config for upload if something goes wrong with workspace upload
         cp "${INTERNAL_DEBUG_LOG}" "${CONTAINER_REPO_CONFIG_PATH}/docker_build_debug_summary.log" || true
@@ -380,13 +379,13 @@ jobs:
           -e REPO_URL_ENV="${{ env.REPO_URL }}" \
           -e REPO_BRANCH_ENV="${{ env.REPO_BRANCH }}" \
           -e FEEDS_CONF_URL_ENV="${{ env.FEEDS_CONF_URL }}" \
-          -e CONFIG_FILE_NAME_IN_REPO="${{ env.CONFIG_FILE_NAME }}" \
-          -e DIY_P1_SH_NAME_IN_REPO="${{ env.DIY_P1_SH_NAME }}" \
-          -e DIY_P2_SH_NAME_IN_REPO="${{ env.DIY_P2_SH_NAME }}" \
+          -e CONFIG_FILE_NAME_IN_REPO="${{ env.CONFIG_FILE_IN_REPO }}" \
+          -e DIY_P1_SH_NAME_IN_REPO="${{ env.DIY_P1_SH_IN_REPO }}" \
+          -e DIY_P2_SH_NAME_IN_REPO="${{ env.DIY_P2_SH_IN_REPO }}" \
           -e BUILD_STATE_DIR_NAME="${{ env.BUILD_STATE_DIR_NAME }}" \
           -e CCACHE_DIR_NAME="${{ env.CCACHE_DIR_NAME }}" \
-          -e CONTAINER_DEBUG_LOG_PATH="${{ env.CONTAINER_DEBUG_LOG_PATH }}" \
-          -e CONTAINER_CCACHE_LOG_PATH="${{ env.CONTAINER_CCACHE_LOG_PATH }}" \
+          -e CONTAINER_DEBUG_LOG_PATH="${{ env.CONTAINER_DEBUG_LOG_FILE_PATH }}" \
+          -e CONTAINER_CCACHE_LOG_PATH="${{ env.CONTAINER_CCACHE_LOGFILE_PATH }}" \
           -e CONTAINER_BUILD_AREA="${{ env.CONTAINER_BUILD_AREA }}" \
           -e CONTAINER_REPO_CONFIG_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}" \
           -e CLEAN_BUILD_FROM_OUTSIDE="${{ github.event.inputs.clean_build }}" \
@@ -396,13 +395,15 @@ jobs:
           ${{ env.DOCKER_IMAGE }} \
           bash -c "cd ${{ env.CONTAINER_BUILD_AREA }} && /tmp/docker_build_script.sh"
         
-        # Check for success/failure marker from Docker script
-        if [ -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/tmp/docker_build_success" ]; then # Path needs to be accessible by runner
+        # Check for success/failure marker from Docker script (now in shared volume)
+        if [ -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success" ]; then
             echo "Docker build reported success."
             echo "status=success" >> $GITHUB_OUTPUT
+            rm -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success" # Clean up marker
         else
             echo "Docker build reported failure or marker not found."
             echo "status=failure" >> $GITHUB_OUTPUT
+            rm -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_failure" # Clean up marker if it exists
             # Optionally copy out logs from mounted repo_config again if they weren't uploaded by Docker directly
             echo "Copying out logs from Docker mapped repo config (if any)..."
             cp "${{ github.workspace }}/${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/docker_build_debug_summary.log" /tmp/docker_build_debug_summary.log 2>/dev/null || true
@@ -410,6 +411,7 @@ jobs:
             cp "${{ github.workspace }}/${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/docker_compile_output.log" /tmp/docker_compile_output.log 2>/dev/null || true
             # exit 1 # Fail the step
         fi
+        rm -f /tmp/docker_build_script.sh # Clean up the script from runner's /tmp
 
     - name: 打包并上传S3构建环境缓存 (Pack & Upload S3 Build Environment Cache)
       if: steps.compile_in_docker.outputs.status == 'success' && !cancelled()
@@ -423,7 +425,7 @@ jobs:
         echo "S3_EFFECTIVE_PATH_PREFIX in upload step: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}" | tee -a $DEBUG_LOG_FILE
         if [ -z "$S3_BUCKET_NAME_SECRET" ]; then
           echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。无法上传缓存到S3。" | tee -a $DEBUG_LOG_FILE
-          exit 1 
+          exit 1
         fi
         
         echo "开始打包压缩整个工作区: ${RUNNER_WORKSPACE_PATH_ENV} 为 /tmp/${S3_ARCHIVE_NAME_ENV} ..." | tee -a $DEBUG_LOG_FILE
@@ -449,7 +451,7 @@ jobs:
 
         # Upload .config from the workspace (it should have been updated by Docker)
         CONFIG_FILE_IN_WORKSPACE="${RUNNER_WORKSPACE_PATH_ENV}/.config"
-        if [ -f "$CONFIG_FILE_IN_WORKSPACE" ]; then 
+        if [ -f "$CONFIG_FILE_IN_WORKSPACE" ]; then
           echo "上传 .config 文件 (${CONFIG_FILE_IN_WORKSPACE}) 到 S3..." | tee -a $DEBUG_LOG_FILE
           S3_CONFIG_OBJECT_KEY="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${S3_CONFIG_SNAPSHOT_FILENAME_ENV}"
           if aws s3 cp "$CONFIG_FILE_IN_WORKSPACE" "s3://${S3_BUCKET_NAME_SECRET}/${S3_CONFIG_OBJECT_KEY}" --quiet; then
@@ -473,12 +475,12 @@ jobs:
         name: build-debug-logs-${{ github.run_id }}
         path: |
           ${{ env.DEBUG_LOG_ON_RUNNER }}
-          ${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/docker_build_debug_summary.log
-          ${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/docker_ccache_detailed.log
-          ${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/docker_compile_output.log
-          ${{ env.RUNNER_OPENWRT_WORKSPACE }}/config_diff.txt 
-          ${{ env.RUNNER_OPENWRT_WORKSPACE }}/.config 
-          ${{ env.RUNNER_OPENWRT_WORKSPACE }}/.config.input 
+          ${{ github.workspace }}/${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/docker_build_debug_summary.log
+          ${{ github.workspace }}/${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/docker_ccache_detailed.log
+          ${{ github.workspace }}/${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/docker_compile_output.log
+          ${{ env.RUNNER_OPENWRT_WORKSPACE }}/config_diff.txt
+          ${{ env.RUNNER_OPENWRT_WORKSPACE }}/.config
+          ${{ env.RUNNER_OPENWRT_WORKSPACE }}/.config.input
           ${{ env.RUNNER_OPENWRT_WORKSPACE }}/logs/ # Main make logs from inside Docker
         if-no-files-found: ignore # Some Docker logs might not exist if Docker part fails early
         retention-days: 7
@@ -489,26 +491,26 @@ jobs:
       # This script now needs to look for firmware in ${{ env.RUNNER_OPENWRT_WORKSPACE }}/bin
       run: |
         echo "开始整理固件文件 from ${{ env.RUNNER_OPENWRT_WORKSPACE }}/bin ..." | tee -a ${{ env.DEBUG_LOG_ON_RUNNER }}
-        FIRMWARE_COLLECTION_DIR_PATH="" 
+        FIRMWARE_COLLECTION_DIR_PATH=""
         OPENWRT_BUILD_ROOT="${{ env.RUNNER_OPENWRT_WORKSPACE }}" # Root of the OpenWrt build env
         OPENWRT_BIN_DIR="${OPENWRT_BUILD_ROOT}/bin"
         OPENWRT_TARGETS_DIR="${OPENWRT_BIN_DIR}/targets"
 
         if [ ! -d "${OPENWRT_TARGETS_DIR}" ]; then
           echo "错误：编译目标目录 ${OPENWRT_TARGETS_DIR} 不存在。" | tee -a ${{ env.DEBUG_LOG_ON_RUNNER }}
-          FIRMWARE_COLLECTION_DIR_PATH="/tmp/empty_firmware_collection_$(date +%N)" 
+          FIRMWARE_COLLECTION_DIR_PATH="/tmp/empty_firmware_collection_$(date +%N)"
           mkdir -p "${FIRMWARE_COLLECTION_DIR_PATH}"
           echo "FIRMWARE=${FIRMWARE_COLLECTION_DIR_PATH}" >> $GITHUB_ENV
-          echo "status=success" >> $GITHUB_OUTPUT 
-          echo "FIRMWARE_ZIP=${FIRMWARE_COLLECTION_DIR_PATH}.zip" >> $GITHUB_ENV 
-          zip -r9 "${FIRMWARE_COLLECTION_DIR_PATH}.zip" "${FIRMWARE_COLLECTION_DIR_PATH}" 
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "FIRMWARE_ZIP=${FIRMWARE_COLLECTION_DIR_PATH}.zip" >> $GITHUB_ENV
+          zip -r9 "${FIRMWARE_COLLECTION_DIR_PATH}.zip" "${FIRMWARE_COLLECTION_DIR_PATH}"
           exit 0
         fi
 
         DEEPEST_TARGET_SUBDIRS=$(find "${OPENWRT_TARGETS_DIR}" -mindepth 2 -maxdepth 2 -type d ! -name "packages" -print)
         if [ -z "${DEEPEST_TARGET_SUBDIRS}" ]; then
             echo "警告：在 ${OPENWRT_TARGETS_DIR} 下未找到标准的目标架构子目录。尝试直接在 ${OPENWRT_TARGETS_DIR} 搜索。" | tee -a ${{ env.DEBUG_LOG_ON_RUNNER }}
-            DEEPEST_TARGET_SUBDIRS="${OPENWRT_TARGETS_DIR}" 
+            DEEPEST_TARGET_SUBDIRS="${OPENWRT_TARGETS_DIR}"
         fi
         
         # Collection dir will be outside the main openwrt workspace to avoid re-packing it into S3
@@ -521,7 +523,7 @@ jobs:
             mkdir -p "${COLLECTED_FIRMWARE_OUTPUT_DIR}"
             FILES_COPIED_COUNT=0
             
-            cd "${CURRENT_IMG_SOURCE_DIR}" 
+            cd "${CURRENT_IMG_SOURCE_DIR}"
             
             for pattern in "*combined.img.gz" "*sysupgrade.img.gz" "*combined-efi.img.gz" "*kernel.bin" "*.img" "*.bin"; do
                 find . -maxdepth 1 -type f -name "$pattern" ! -path "./packages/*" -print0 | while IFS= read -r -d $'\0' found_file; do
@@ -541,7 +543,7 @@ jobs:
                 done
             fi
             # Go back to a known neutral directory or runner's workdir to avoid issues with subsequent cd
-            cd "${{ github.workspace }}/${{ env.CONTAINER_REPO_CONFIG_MOUNT }}" 
+            cd "${{ github.workspace }}/${{ env.CONTAINER_REPO_CONFIG_MOUNT }}"
 
 
             if [ $FILES_COPIED_COUNT -gt 0 ]; then
@@ -550,11 +552,11 @@ jobs:
                   cp -v -f "${OPENWRT_BUILD_ROOT}/.config" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/config.txt"
                 fi
                 ls -lh "${COLLECTED_FIRMWARE_OUTPUT_DIR}" | tee -a ${{ env.DEBUG_LOG_ON_RUNNER }}
-                FIRMWARE_COLLECTION_DIR_PATH="${COLLECTED_FIRMWARE_OUTPUT_DIR}" 
-                break 
+                FIRMWARE_COLLECTION_DIR_PATH="${COLLECTED_FIRMWARE_OUTPUT_DIR}"
+                break
             else
                 echo "警告: 在 ${CURRENT_IMG_SOURCE_DIR} 中未找到可用固件文件可收集。" | tee -a ${{ env.DEBUG_LOG_ON_RUNNER }}
-                rm -rf "${COLLECTED_FIRMWARE_OUTPUT_DIR}" 
+                rm -rf "${COLLECTED_FIRMWARE_OUTPUT_DIR}"
             fi
         done
 
@@ -563,10 +565,10 @@ jobs:
             FIRMWARE_COLLECTION_DIR_PATH="${FINAL_FIRMWARE_OUTPUT_BASE}/firmware_fallback_collection_$(date +%N)"
             mkdir -p "${FIRMWARE_COLLECTION_DIR_PATH}"
             find "${OPENWRT_TARGETS_DIR}" -type f \( -name "*.bin" -o -name "*.img" -o -name "*.img.gz" \) ! -path "*/packages/*" ! -path "*/firmware_collection_*" -exec cp -v -f {} "${FIRMWARE_COLLECTION_DIR_PATH}/" \;
-            if [ -f "${OPENWRT_BUILD_ROOT}/.config" ]; then 
+            if [ -f "${OPENWRT_BUILD_ROOT}/.config" ]; then
                 cp -v -f "${OPENWRT_BUILD_ROOT}/.config" "${FIRMWARE_COLLECTION_DIR_PATH}/config.txt";
-            else 
-                echo "# Fallback .config - actual .config not found" > "${FIRMWARE_COLLECTION_DIR_PATH}/config.txt"; 
+            else
+                echo "# Fallback .config - actual .config not found" > "${FIRMWARE_COLLECTION_DIR_PATH}/config.txt";
             fi
         fi
 
@@ -576,7 +578,7 @@ jobs:
         if [ -n "${FIRMWARE_COLLECTION_DIR_PATH}" ] && [ -d "${FIRMWARE_COLLECTION_DIR_PATH}" ] && [ "$(ls -A "${FIRMWARE_COLLECTION_DIR_PATH}")" ]; then
             FIRMWARE_PARENT_DIR=$(dirname "${FIRMWARE_COLLECTION_DIR_PATH}")
             FIRMWARE_BASENAME=$(basename "${FIRMWARE_COLLECTION_DIR_PATH}")
-            ZIP_FILENAME="${FIRMWARE_BASENAME}.zip" 
+            ZIP_FILENAME="${FIRMWARE_BASENAME}.zip"
             
             echo "创建固件压缩包 ${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME} 从目录 ${FIRMWARE_BASENAME}" | tee -a ${{ env.DEBUG_LOG_ON_RUNNER }}
             cd "${FIRMWARE_PARENT_DIR}" && zip -r9 "${ZIP_FILENAME}" "${FIRMWARE_BASENAME}"
@@ -586,7 +588,7 @@ jobs:
                 ls -lh "${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME}" | tee -a ${{ env.DEBUG_LOG_ON_RUNNER }}
             else
                 echo "错误：压缩包 ${ZIP_FILENAME} 未能成功创建。" | tee -a ${{ env.DEBUG_LOG_ON_RUNNER }}
-                echo "FIRMWARE_ZIP=/tmp/zip_creation_failed_$(date +%N).zip" >> $GITHUB_ENV 
+                echo "FIRMWARE_ZIP=/tmp/zip_creation_failed_$(date +%N).zip" >> $GITHUB_ENV
             fi
         else
             echo "警告: 最终固件收集目录 (${FIRMWARE_COLLECTION_DIR_PATH}) 未有效设置、不是目录或为空，无法创建 firmware.zip。" | tee -a ${{ env.DEBUG_LOG_ON_RUNNER }}
@@ -598,7 +600,7 @@ jobs:
       if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE_ZIP }} 
+        path: ${{ env.FIRMWARE_ZIP }}
         if-no-files-found: warn
 
     - name: 生成发布标签 (Generate Release Tag)
@@ -613,7 +615,7 @@ jobs:
         echo "## OpenWrt Firmware Build ($(date +"%Y-%m-%d %H:%M %Z")) 📦" > release_body.txt
         echo "" >> release_body.txt
         echo "**Branch:** \`${{ env.REPO_BRANCH }}\`" >> release_body.txt
-        echo "**Config:** \`${{ env.CONFIG_FILE_NAME }}\`" >> release_body.txt
+        echo "**Config:** \`${{ env.CONFIG_FILE_IN_REPO }}\`" >> release_body.txt # Changed from CONFIG_FILE_NAME to CONFIG_FILE_IN_REPO for consistency
         if [ -n "$DEVICE_TAG_PART" ] && [ "$DEVICE_TAG_PART" != "-" ]; then echo "**Device:** \`${{ env.DEVICE_NAME }}\`" >> release_body.txt; fi
         echo "" >> release_body.txt
         echo "### 固件下载 (Firmware Download)" >> release_body.txt
@@ -635,7 +637,7 @@ jobs:
       with:
         tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release_body.txt
-        files: ${{ env.FIRMWARE_ZIP }} 
+        files: ${{ env.FIRMWARE_ZIP }}
 
     - name: 删除旧的Releases (Delete Old Releases)
       uses: dev-drprasad/delete-older-releases@master
