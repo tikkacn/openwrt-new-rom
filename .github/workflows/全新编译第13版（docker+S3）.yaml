@@ -27,15 +27,15 @@ env:
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
-  RUNNER_CHECKOUT_SUBDIR: 'repo_files' # 新增：用于在Runner上检出代码的子目录名
+  RUNNER_CHECKOUT_SUBDIR: 'repo_files' # 用于在Runner上检出代码的子目录名
   CONTAINER_REPO_CONFIG_MOUNT: /repo_config # 容器内映射的GitHub仓库根目录
 
   DOCKER_IMAGE: ubuntu:22.04
   S3_WORKSPACE_ARCHIVE_FILENAME: openwrt_workspace_cache.tar.zst
   S3_CONFIG_SNAPSHOT_FILENAME: last_successful_build.config
 
-  CONTAINER_CCACHE_LOGFILE_PATH: /tmp/ccache_detailed.log
-  CONTAINER_DEBUG_LOG_FILE_PATH: /tmp/build_debug_summary.log
+  CONTAINER_CCACHE_LOGFILE_PATH: /tmp/ccache_detailed.log # Path inside Docker
+  CONTAINER_DEBUG_LOG_FILE_PATH: /tmp/build_debug_summary.log # Path inside Docker
 
   BUILD_STATE_DIR_NAME: .github_actions_build_state
   CCACHE_DIR_NAME: .ccache
@@ -48,13 +48,13 @@ jobs:
     env: # Job specific env
       RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env
       CONTAINER_BUILD_AREA: /build_area
-      # CONTAINER_REPO_CONFIG_MOUNT is already defined globally and will be inherited
+      # CONTAINER_REPO_CONFIG_MOUNT is inherited from global env
 
     steps:
     - name: 检出仓库代码 (Checkout Repository Code)
       uses: actions/checkout@v4
       with:
-        path: ${{ env.RUNNER_CHECKOUT_SUBDIR }} # 修改
+        path: ${{ env.RUNNER_CHECKOUT_SUBDIR }}
 
     - name: 设置 S3 缓存的完整路径前缀 (Set Full S3 Cache Path Prefix)
       id: set_s3_vars
@@ -74,7 +74,8 @@ jobs:
         fi
         echo "S3_EFFECTIVE_PATH_PREFIX=${final_s3_prefix}" >> $GITHUB_ENV
         echo "s3_prefix_out=${final_s3_prefix}" >> $GITHUB_OUTPUT
-        echo "DEBUG_LOG_ON_RUNNER=${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/build_debug_summary_runner.log" >> $GITHUB_ENV # 修改
+        # This log is written on the runner, inside the checked-out subdirectory
+        echo "DEBUG_LOG_ON_RUNNER=${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/build_debug_summary_runner.log" >> $GITHUB_ENV
 
     - name: 优化Runner磁盘空间 (Maximize Runner Build Space)
       uses: easimon/maximize-build-space@master
@@ -101,12 +102,12 @@ jobs:
           S3_BUCKET_NAME_SECRET: ${{ secrets.AWS_S3_BUCKET_NAME }}
           S3_ARCHIVE_NAME_ENV: ${{ env.S3_WORKSPACE_ARCHIVE_FILENAME }}
           RUNNER_WORKSPACE_PATH_ENV: ${{ env.RUNNER_OPENWRT_WORKSPACE }}
-          DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }}
+          DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }} # Absolute path on runner
       run: |
         echo "S3_EFFECTIVE_PATH_PREFIX in download step: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}" | tee -a $DEBUG_LOG_FILE
         if [ -z "$S3_BUCKET_NAME_SECRET" ]; then
           echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。跳过S3缓存恢复。" | tee -a $DEBUG_LOG_FILE
-          mkdir -p $RUNNER_WORKSPACE_PATH_ENV
+          mkdir -p "$RUNNER_WORKSPACE_PATH_ENV" # Ensure dir exists even if empty
           exit 0
         fi
         
@@ -129,24 +130,22 @@ jobs:
           rm -f "${LOCAL_ARCHIVE_ON_RUNNER}"
         else
           echo "从 S3 下载 ${S3_ARCHIVE_NAME_ENV} 失败或文件不存在。将进行全新构建。" | tee -a $DEBUG_LOG_FILE
-          mkdir -p $RUNNER_WORKSPACE_PATH_ENV
+          mkdir -p "$RUNNER_WORKSPACE_PATH_ENV" # Ensure dir exists
         fi
         df -h | tee -a $DEBUG_LOG_FILE
 
     - name: 运行Docker容器并执行编译 (Run Docker Container & Compile)
       id: compile_in_docker
       run: |
-        CONTAINER_BUILD_AREA_LOCAL_VAR="${{ env.CONTAINER_BUILD_AREA }}" # Use local var to avoid issues in heredoc
-        CONTAINER_REPO_CONFIG_MOUNT_LOCAL_VAR="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}" # Use local var
-
-        cat << DOCKER_SCRIPT_EOF > /tmp/docker_build_script.sh
+        # Using quoted heredoc 'DOCKER_SCRIPT_EOF' means $VAR and $(cmd) are literal
+        # and will be expanded by the shell inside the Docker container.
+        cat << 'DOCKER_SCRIPT_EOF' > /tmp/docker_build_script.sh
         #!/bin/bash
         set -eo pipefail
 
         echo "[DOCKER] Starting build script inside Docker container..."
-        # Use local vars passed as env to docker run, or ensure they are correctly interpolated if used directly in heredoc
-        echo "[DOCKER] Runner's OpenWrt Workspace (mounted at \${CONTAINER_BUILD_AREA_DOCKER_ENV}): \$(ls -A \${CONTAINER_BUILD_AREA_DOCKER_ENV} | wc -l) items"
-        echo "[DOCKER] Repo Config Path (mounted at \${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV}): \$(ls -A \${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV} | wc -l) items"
+        echo "[DOCKER] Runner's OpenWrt Workspace (mounted at ${DOCKER_ENV_CONTAINER_BUILD_AREA}): $(ls -A ${DOCKER_ENV_CONTAINER_BUILD_AREA} | wc -l) items"
+        echo "[DOCKER] Repo Config Path (mounted at ${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}): $(ls -A ${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH} | wc -l) items"
 
         apt-get update -y && apt-get install -y --no-install-recommends \
           git build-essential libncurses5-dev libncursesw5-dev zlib1g-dev libssl-dev \
@@ -157,149 +156,149 @@ jobs:
           time
         apt-get clean && rm -rf /var/lib/apt/lists/*
         
-        export TZ="\${BUILD_TZ:-Asia/Shanghai}"
-        ln -snf "/usr/share/zoneinfo/\$TZ" /etc/localtime && echo "\$TZ" > /etc/timezone
+        export TZ="${DOCKER_ENV_BUILD_TZ:-Asia/Shanghai}"
+        ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && echo "$TZ" > /etc/timezone
         
-        mkdir -p "\${CONTAINER_BUILD_AREA_DOCKER_ENV}"
-        cd "\${CONTAINER_BUILD_AREA_DOCKER_ENV}"
-        echo "[DOCKER] Current directory: \$(pwd)"
+        mkdir -p "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
+        cd "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
+        echo "[DOCKER] Current directory: $(pwd)"
 
-        INTERNAL_BUILD_STATE_DIR="./\${BUILD_STATE_DIR_NAME:-.github_actions_build_state}"
-        INTERNAL_CCACHE_DIR="./\${CCACHE_DIR_NAME:-.ccache}"
-        INTERNAL_CONFIG_FILE_NAME="\${CONFIG_FILE_NAME_IN_REPO:-.config_default}"
-        INTERNAL_DIY_P1_SH_NAME="\${DIY_P1_SH_NAME_IN_REPO:-diy-p1-default.sh}"
-        INTERNAL_DIY_P2_SH_NAME="\${DIY_P2_SH_NAME_IN_REPO:-diy-p2-default.sh}"
-        INTERNAL_DEBUG_LOG="\${CONTAINER_DEBUG_LOG_PATH_DOCKER_ENV:-/tmp/container_build_debug.log}"
-        INTERNAL_CCACHE_LOG="\${CONTAINER_CCACHE_LOG_PATH_DOCKER_ENV:-/tmp/container_ccache_detailed.log}"
+        INTERNAL_BUILD_STATE_DIR="./${DOCKER_ENV_BUILD_STATE_DIR_NAME:-.github_actions_build_state}"
+        INTERNAL_CCACHE_DIR="./${DOCKER_ENV_CCACHE_DIR_NAME:-.ccache}"
+        INTERNAL_CONFIG_FILE_NAME="${DOCKER_ENV_CONFIG_FILE_NAME_IN_REPO:-.config_default}"
+        INTERNAL_DIY_P1_SH_NAME="${DOCKER_ENV_DIY_P1_SH_NAME_IN_REPO:-diy-p1-default.sh}"
+        INTERNAL_DIY_P2_SH_NAME="${DOCKER_ENV_DIY_P2_SH_NAME_IN_REPO:-diy-p2-default.sh}"
+        INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
+        INTERNAL_CCACHE_LOG="${DOCKER_ENV_CONTAINER_CCACHE_LOG_PATH:-/tmp/container_ccache_detailed.log}"
 
-        mkdir -p "\${INTERNAL_CCACHE_DIR}"
-        export CCACHE_DIR="\${INTERNAL_CCACHE_DIR}"
-        export CCACHE_LOGFILE="\${INTERNAL_CCACHE_LOG}"
+        mkdir -p "${INTERNAL_CCACHE_DIR}"
+        export CCACHE_DIR="${INTERNAL_CCACHE_DIR}"
+        export CCACHE_LOGFILE="${INTERNAL_CCACHE_LOG}"
         ccache -M 8G
         ccache -z
 
         if [ ! -d ".git" ] && [ ! -f "Makefile" ]; then
-            echo "[DOCKER] Looks like a fresh setup. Cloning OpenWrt..." | tee -a "\${INTERNAL_DEBUG_LOG}"
-            git clone --depth 1 "\${REPO_URL_ENV}" -b "\${REPO_BRANCH_ENV}" .
+            echo "[DOCKER] Looks like a fresh setup. Cloning OpenWrt..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            git clone --depth 1 "${DOCKER_ENV_REPO_URL}" -b "${DOCKER_ENV_REPO_BRANCH}" .
         else
-            echo "[DOCKER] Found existing OpenWrt tree." | tee -a "\${INTERNAL_DEBUG_LOG}"
+            echo "[DOCKER] Found existing OpenWrt tree." | tee -a "${INTERNAL_DEBUG_LOG}"
         fi
         
-        mkdir -p "\${INTERNAL_BUILD_STATE_DIR}" logs
+        mkdir -p "${INTERNAL_BUILD_STATE_DIR}" logs
 
-        echo "[DOCKER] Copying config and DIY scripts from \${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV} ..." | tee -a "\${INTERNAL_DEBUG_LOG}"
-        cp "\${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV}/\${CONFIG_FILE_NAME_IN_REPO}" "./.config"
+        echo "[DOCKER] Copying config and DIY scripts from ${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH} ..." | tee -a "${INTERNAL_DEBUG_LOG}"
+        cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_CONFIG_FILE_NAME}" "./.config"
         cp ./.config ./.config.input
         
-        cp "\${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV}/\${DIY_P1_SH_NAME_IN_REPO}" "./\${DIY_P1_SH_NAME_IN_REPO}" && chmod +x "./\${DIY_P1_SH_NAME_IN_REPO}"
-        cp "\${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV}/\${DIY_P2_SH_NAME_IN_REPO}" "./\${DIY_P2_SH_NAME_IN_REPO}" && chmod +x "./\${DIY_P2_SH_NAME_IN_REPO}"
+        cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P1_SH_NAME}" "./${INTERNAL_DIY_P1_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P1_SH_NAME}"
+        cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P2_SH_NAME}" "./${INTERNAL_DIY_P2_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P2_SH_NAME}"
         
-        "./\${DIY_P1_SH_NAME_IN_REPO}"
+        "./${INTERNAL_DIY_P1_SH_NAME}"
 
-        if [ -f "\${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV}/feeds.conf.default" ]; then
-          cp "\${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV}/feeds.conf.default" "./feeds.conf.default"
+        if [ -f "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" ]; then
+          cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" "./feeds.conf.default"
         elif [ ! -f "./feeds.conf.default" ] && [ -f "./feeds.conf.default.sample" ]; then
           cp feeds.conf.default.sample feeds.conf.default
         fi
-        cat feeds.conf.default | tee -a "\${INTERNAL_DEBUG_LOG}"
+        cat feeds.conf.default | tee -a "${INTERNAL_DEBUG_LOG}"
 
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-        "./\${DIY_P2_SH_NAME_IN_REPO}"
+        "./${INTERNAL_DIY_P2_SH_NAME}"
         
         echo "CONFIG_AUTOREMOVE=y" >> .config
         echo "CONFIG_AUTOREBUILD=y" >> .config
         if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config; fi
         if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config; fi
 
-        echo "[DOCKER] Running make defconfig..." | tee -a "\${INTERNAL_DEBUG_LOG}"
+        echo "[DOCKER] Running make defconfig..." | tee -a "${INTERNAL_DEBUG_LOG}"
         make defconfig
         
-        TOOLCHAIN_CONFIG_SUBSET_FOR_MD5=\$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort)
-        TOOLCHAIN_MD5=\$(echo "\$TOOLCHAIN_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print \$1}')
-        PREVIOUS_TOOLCHAIN_MD5=\$(cat \${INTERNAL_BUILD_STATE_DIR}/toolchain.md5 2>/dev/null || echo "not_found_in_build_state")
+        TOOLCHAIN_CONFIG_SUBSET_FOR_MD5=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort)
+        TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
+        PREVIOUS_TOOLCHAIN_MD5=$(cat ${INTERNAL_BUILD_STATE_DIR}/toolchain.md5 2>/dev/null || echo "not_found_in_build_state")
 
-        PACKAGE_CONFIG_SUBSET_FOR_MD5=\$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort)
-        PACKAGE_MD5=\$(echo "\$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print \$1}')
-        PREVIOUS_PACKAGE_MD5=\$(cat \${INTERNAL_BUILD_STATE_DIR}/package.md5 2>/dev/null || echo "not_found_in_build_state")
+        PACKAGE_CONFIG_SUBSET_FOR_MD5=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort)
+        PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
+        PREVIOUS_PACKAGE_MD5=$(cat ${INTERNAL_BUILD_STATE_DIR}/package.md5 2>/dev/null || echo "not_found_in_build_state")
         
         DO_FULL_BUILD_DOCKER=0
         DO_PACKAGE_BUILD_DOCKER=0
 
-        echo "[DOCKER] --- Build Decision Variables ---" | tee -a "\${INTERNAL_DEBUG_LOG}"
-        echo "[DOCKER] Input clean_build (from outside): \${CLEAN_BUILD_FROM_OUTSIDE}" | tee -a "\${INTERNAL_DEBUG_LOG}"
-        echo "[DOCKER] S3 Cache Restored (from outside): \${S3_CACHE_RESTORED_FROM_OUTSIDE}" | tee -a "\${INTERNAL_DEBUG_LOG}"
-        echo "[DOCKER] Feeds changed (from outside): \${FEEDS_CHANGED_FROM_OUTSIDE}" | tee -a "\${INTERNAL_DEBUG_LOG}"
+        echo "[DOCKER] --- Build Decision Variables ---" | tee -a "${INTERNAL_DEBUG_LOG}"
+        echo "[DOCKER] Input clean_build (from outside): ${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" | tee -a "${INTERNAL_DEBUG_LOG}"
+        echo "[DOCKER] S3 Cache Restored (from outside): ${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" | tee -a "${INTERNAL_DEBUG_LOG}"
+        echo "[DOCKER] Feeds changed (from outside): ${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" | tee -a "${INTERNAL_DEBUG_LOG}"
 
 
-        if [ "\${CLEAN_BUILD_FROM_OUTSIDE}" = "true" ] || [ "\${S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ] ; then
-          echo "[DOCKER] clean_build is true OR S3 cache not restored: DO_FULL_BUILD_DOCKER=1" | tee -a "\${INTERNAL_DEBUG_LOG}"
+        if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ] || [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ] ; then
+          echo "[DOCKER] clean_build is true OR S3 cache not restored: DO_FULL_BUILD_DOCKER=1" | tee -a "${INTERNAL_DEBUG_LOG}"
           DO_FULL_BUILD_DOCKER=1
-        elif [ "\$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ] || [ "\$TOOLCHAIN_MD5" != "\$PREVIOUS_TOOLCHAIN_MD5" ]; then
-          echo "[DOCKER] Toolchain config MD5 changed or first build state: DO_FULL_BUILD_DOCKER=1" | tee -a "\${INTERNAL_DEBUG_LOG}"
+        elif [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
+          echo "[DOCKER] Toolchain config MD5 changed or first build state: DO_FULL_BUILD_DOCKER=1" | tee -a "${INTERNAL_DEBUG_LOG}"
           DO_FULL_BUILD_DOCKER=1
-        elif [ "\$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ] || [ "\$PACKAGE_MD5" != "\$PREVIOUS_PACKAGE_MD5" ]; then
-          echo "[DOCKER] Package config MD5 changed: DO_PACKAGE_BUILD_DOCKER=1" | tee -a "\${INTERNAL_DEBUG_LOG}"
+        elif [ "$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ] || [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
+          echo "[DOCKER] Package config MD5 changed: DO_PACKAGE_BUILD_DOCKER=1" | tee -a "${INTERNAL_DEBUG_LOG}"
           DO_PACKAGE_BUILD_DOCKER=1
-        elif [ "\${FEEDS_CHANGED_FROM_OUTSIDE}" = "true" ]; then
-          echo "[DOCKER] Feeds changed: DO_PACKAGE_BUILD_DOCKER=1" | tee -a "\${INTERNAL_DEBUG_LOG}"
+        elif [ "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" = "true" ]; then
+          echo "[DOCKER] Feeds changed: DO_PACKAGE_BUILD_DOCKER=1" | tee -a "${INTERNAL_DEBUG_LOG}"
           DO_PACKAGE_BUILD_DOCKER=1
         fi
-        echo "[DOCKER] Final Build Strategy -> DO_FULL_BUILD_DOCKER: \$DO_FULL_BUILD_DOCKER, DO_PACKAGE_BUILD_DOCKER: \$DO_PACKAGE_BUILD_DOCKER" | tee -a "\${INTERNAL_DEBUG_LOG}"
+        echo "[DOCKER] Final Build Strategy -> DO_FULL_BUILD_DOCKER: $DO_FULL_BUILD_DOCKER, DO_PACKAGE_BUILD_DOCKER: $DO_PACKAGE_BUILD_DOCKER" | tee -a "${INTERNAL_DEBUG_LOG}"
         
-        MAKE_JOBS_DOCKER=\$(nproc)
-        MAIN_MAKE_CMD_DOCKER="make -j\${MAKE_JOBS_DOCKER} V=s"
+        MAKE_JOBS_DOCKER=$(nproc)
+        MAIN_MAKE_CMD_DOCKER="make -j${MAKE_JOBS_DOCKER} V=s"
         FALLBACK_MAKE_CMD_DOCKER="make -j1 V=s"
-        COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_\$(date +%Y%m%d_%H%M%S).log"
-        echo "[DOCKER] Detailed compile log will be in: \${CONTAINER_BUILD_AREA_DOCKER_ENV}/\${COMPILE_OUTPUT_LOG_DOCKER}" | tee -a "\${INTERNAL_DEBUG_LOG}"
+        COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_$(date +%Y%m%d_%H%M%S).log"
+        echo "[DOCKER] Detailed compile log will be in: ${DOCKER_ENV_CONTAINER_BUILD_AREA}/${COMPILE_OUTPUT_LOG_DOCKER}" | tee -a "${INTERNAL_DEBUG_LOG}"
 
-        if [ \$DO_FULL_BUILD_DOCKER -eq 1 ]; then
-          echo "[DOCKER] --- Compile Branch: Full Build ---" | tee -a "\${INTERNAL_DEBUG_LOG}"
-          make tools/compile \$FALLBACK_MAKE_CMD_DOCKER || make tools/compile \$FALLBACK_MAKE_CMD_DOCKER
-          make toolchain/compile \$FALLBACK_MAKE_CMD_DOCKER || make toolchain/compile \$FALLBACK_MAKE_CMD_DOCKER
-          if ! \$MAIN_MAKE_CMD_DOCKER 2>&1 | tee "\${COMPILE_OUTPUT_LOG_DOCKER}"; then \$FALLBACK_MAKE_CMD_DOCKER 2>&1 | tee -a "\${COMPILE_OUTPUT_LOG_DOCKER}"; fi
-        elif [ \$DO_PACKAGE_BUILD_DOCKER -eq 1 ]; then
-          echo "[DOCKER] --- Compile Branch: Package Build ---" | tee -a "\${INTERNAL_DEBUG_LOG}"
+        if [ $DO_FULL_BUILD_DOCKER -eq 1 ]; then
+          echo "[DOCKER] --- Compile Branch: Full Build ---" | tee -a "${INTERNAL_DEBUG_LOG}"
+          make tools/compile $FALLBACK_MAKE_CMD_DOCKER || make tools/compile $FALLBACK_MAKE_CMD_DOCKER
+          make toolchain/compile $FALLBACK_MAKE_CMD_DOCKER || make toolchain/compile $FALLBACK_MAKE_CMD_DOCKER
+          if ! $MAIN_MAKE_CMD_DOCKER 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then $FALLBACK_MAKE_CMD_DOCKER 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+        elif [ $DO_PACKAGE_BUILD_DOCKER -eq 1 ]; then
+          echo "[DOCKER] --- Compile Branch: Package Build ---" | tee -a "${INTERNAL_DEBUG_LOG}"
           make package/clean V=s || true
-          if ! make package/compile \$MAIN_MAKE_CMD_DOCKER 2>&1 | tee "\${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile \$FALLBACK_MAKE_CMD_DOCKER 2>&1 | tee -a "\${COMPILE_OUTPUT_LOG_DOCKER}"; fi
-          make package/index V=s || make package/index \$FALLBACK_MAKE_CMD_DOCKER
+          if ! make package/compile $MAIN_MAKE_CMD_DOCKER 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile $FALLBACK_MAKE_CMD_DOCKER 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+          make package/index V=s || make package/index $FALLBACK_MAKE_CMD_DOCKER
         else
-          echo "[DOCKER] --- Compile Branch: Minimal Incremental Build ---" | tee -a "\${INTERNAL_DEBUG_LOG}"
-          if ! \$MAIN_MAKE_CMD_DOCKER 2>&1 | tee "\${COMPILE_OUTPUT_LOG_DOCKER}"; then \$FALLBACK_MAKE_CMD_DOCKER 2>&1 | tee -a "\${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+          echo "[DOCKER] --- Compile Branch: Minimal Incremental Build ---" | tee -a "${INTERNAL_DEBUG_LOG}"
+          if ! $MAIN_MAKE_CMD_DOCKER 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then $FALLBACK_MAKE_CMD_DOCKER 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
         fi
         
-        echo "[DOCKER] Finalizing target/install..." | tee -a "\${INTERNAL_DEBUG_LOG}"
-        make target/install \$FALLBACK_MAKE_CMD_DOCKER 2>&1 | tee -a "\${COMPILE_OUTPUT_LOG_DOCKER}"
-        final_install_status_docker=\$?
+        echo "[DOCKER] Finalizing target/install..." | tee -a "${INTERNAL_DEBUG_LOG}"
+        make target/install $FALLBACK_MAKE_CMD_DOCKER 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"
+        final_install_status_docker=$?
 
-        echo "[DOCKER] Attempting to finalize core component stamps..." | tee -a "\${INTERNAL_DEBUG_LOG}"
-        make prepare -j\${MAKE_JOBS_DOCKER} V=s || make prepare -j1 V=s || echo "[DOCKER_WARN] 'make prepare' had issues." | tee -a "\${INTERNAL_DEBUG_LOG}"
-        make tools/install -j\${MAKE_JOBS_DOCKER} V=s IGNORE_ERRORS=m || make tools/install -j1 V=s IGNORE_ERRORS=m || echo "[DOCKER_WARN] 'make tools/install' had issues." | tee -a "\${INTERNAL_DEBUG_LOG}"
-        make toolchain/install -j\${MAKE_JOBS_DOCKER} V=s IGNORE_ERRORS=m || make toolchain/install -j1 V=s IGNORE_ERRORS=m || echo "[DOCKER_WARN] 'make toolchain/install' had issues." | tee -a "\${INTERNAL_DEBUG_LOG}"
-        echo "[DOCKER] Core component stamp finalization attempted." | tee -a "\${INTERNAL_DEBUG_LOG}"
+        echo "[DOCKER] Attempting to finalize core component stamps..." | tee -a "${INTERNAL_DEBUG_LOG}"
+        make prepare -j${MAKE_JOBS_DOCKER} V=s || make prepare -j1 V=s || echo "[DOCKER_WARN] 'make prepare' had issues." | tee -a "${INTERNAL_DEBUG_LOG}"
+        make tools/install -j${MAKE_JOBS_DOCKER} V=s IGNORE_ERRORS=m || make tools/install -j1 V=s IGNORE_ERRORS=m || echo "[DOCKER_WARN] 'make tools/install' had issues." | tee -a "${INTERNAL_DEBUG_LOG}"
+        make toolchain/install -j${MAKE_JOBS_DOCKER} V=s IGNORE_ERRORS=m || make toolchain/install -j1 V=s IGNORE_ERRORS=m || echo "[DOCKER_WARN] 'make toolchain/install' had issues." | tee -a "${INTERNAL_DEBUG_LOG}"
+        echo "[DOCKER] Core component stamp finalization attempted." | tee -a "${INTERNAL_DEBUG_LOG}"
 
-        mkdir -p "\${INTERNAL_BUILD_STATE_DIR}"
-        cp .config "\${INTERNAL_BUILD_STATE_DIR}/config_from_compile_step.txt"
-        echo "\$TOOLCHAIN_MD5" > "\${INTERNAL_BUILD_STATE_DIR}/toolchain.md5"
-        echo "\$PACKAGE_MD5" > "\${INTERNAL_BUILD_STATE_DIR}/package.md5"
-        echo "\${FEEDS_CHANGED_FROM_OUTSIDE}" > "\${INTERNAL_BUILD_STATE_DIR}/last_feeds_changed_status.txt"
-        find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > "\${INTERNAL_BUILD_STATE_DIR}/current_feeds.sha256"
+        mkdir -p "${INTERNAL_BUILD_STATE_DIR}"
+        cp .config "${INTERNAL_BUILD_STATE_DIR}/config_from_compile_step.txt"
+        echo "$TOOLCHAIN_MD5" > "${INTERNAL_BUILD_STATE_DIR}/toolchain.md5"
+        echo "$PACKAGE_MD5" > "${INTERNAL_BUILD_STATE_DIR}/package.md5"
+        echo "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" > "${INTERNAL_BUILD_STATE_DIR}/last_feeds_changed_status.txt"
+        find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > "${INTERNAL_BUILD_STATE_DIR}/current_feeds.sha256"
 
-        echo "[DOCKER] >>> CCACHE Statistics at END of compile_firmware:" | tee -a "\${INTERNAL_DEBUG_LOG}"
-        ccache -s | tee -a "\${INTERNAL_DEBUG_LOG}"
+        echo "[DOCKER] >>> CCACHE Statistics at END of compile_firmware:" | tee -a "${INTERNAL_DEBUG_LOG}"
+        ccache -s | tee -a "${INTERNAL_DEBUG_LOG}"
 
-        if [ \${final_install_status_docker} -eq 0 ] && [ -n "\$(find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print -quit)" ]; then
-          echo "[DOCKER] Compile firmware successful." | tee -a "\${INTERNAL_DEBUG_LOG}"
-          touch "\${CONTAINER_BUILD_AREA_DOCKER_ENV}/.docker_build_status_success"
+        if [ ${final_install_status_docker} -eq 0 ] && [ -n "$(find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print -quit)" ]; then
+          echo "[DOCKER] Compile firmware successful." | tee -a "${INTERNAL_DEBUG_LOG}"
+          touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_success"
         else
-          echo "[DOCKER] Compile firmware failed." | tee -a "\${INTERNAL_DEBUG_LOG}"
-          touch "\${CONTAINER_BUILD_AREA_DOCKER_ENV}/.docker_build_status_failure"
+          echo "[DOCKER] Compile firmware failed." | tee -a "${INTERNAL_DEBUG_LOG}"
+          touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_failure"
         fi
-        cp "\${INTERNAL_DEBUG_LOG}" "\${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV}/docker_build_debug_summary.log" || true
-        cp "\${INTERNAL_CCACHE_LOG}" "\${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV}/docker_ccache_detailed.log" || true
-        if [ -f "\${COMPILE_OUTPUT_LOG_DOCKER}" ]; then
-          cp "\${COMPILE_OUTPUT_LOG_DOCKER}" "\${CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV}/docker_compile_output.log" || true
+        cp "${INTERNAL_DEBUG_LOG}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_build_debug_summary.log" || true
+        cp "${INTERNAL_CCACHE_LOG}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_ccache_detailed.log" || true
+        if [ -f "${COMPILE_OUTPUT_LOG_DOCKER}" ]; then
+          cp "${COMPILE_OUTPUT_LOG_DOCKER}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_compile_output.log" || true
         fi
 
         echo "[DOCKER] Build script finished."
@@ -309,24 +308,24 @@ DOCKER_SCRIPT_EOF
         docker run --rm \
           -v "${{ env.RUNNER_OPENWRT_WORKSPACE }}:${{ env.CONTAINER_BUILD_AREA }}" \
           -v "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}:${{ env.CONTAINER_REPO_CONFIG_MOUNT }}:ro" \
-          -e REPO_URL_ENV="${{ env.REPO_URL }}" \
-          -e REPO_BRANCH_ENV="${{ env.REPO_BRANCH }}" \
-          -e FEEDS_CONF_URL_ENV="${{ env.FEEDS_CONF_URL }}" \
-          -e CONFIG_FILE_NAME_IN_REPO="${{ env.CONFIG_FILE_IN_REPO }}" \
-          -e DIY_P1_SH_NAME_IN_REPO="${{ env.DIY_P1_SH_IN_REPO }}" \
-          -e DIY_P2_SH_NAME_IN_REPO="${{ env.DIY_P2_SH_IN_REPO }}" \
-          -e BUILD_STATE_DIR_NAME="${{ env.BUILD_STATE_DIR_NAME }}" \
-          -e CCACHE_DIR_NAME="${{ env.CCACHE_DIR_NAME }}" \
-          -e CONTAINER_DEBUG_LOG_PATH_DOCKER_ENV="${{ env.CONTAINER_DEBUG_LOG_FILE_PATH }}" \
-          -e CONTAINER_CCACHE_LOG_PATH_DOCKER_ENV="${{ env.CONTAINER_CCACHE_LOGFILE_PATH }}" \
-          -e CONTAINER_BUILD_AREA_DOCKER_ENV="${{ env.CONTAINER_BUILD_AREA }}" \
-          -e CONTAINER_REPO_CONFIG_PATH_DOCKER_ENV="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}" \
-          -e CLEAN_BUILD_FROM_OUTSIDE="${{ github.event.inputs.clean_build }}" \
-          -e S3_CACHE_RESTORED_FROM_OUTSIDE="${{ env.S3_CACHE_RESTORED || 'false' }}" \
-          -e FEEDS_CHANGED_FROM_OUTSIDE="${{ env.feeds_changed || 'true' }}" \
-          -e BUILD_TZ="${{ env.TZ }}" \
+          -e DOCKER_ENV_REPO_URL="${{ env.REPO_URL }}" \
+          -e DOCKER_ENV_REPO_BRANCH="${{ env.REPO_BRANCH }}" \
+          -e DOCKER_ENV_FEEDS_CONF_URL="${{ env.FEEDS_CONF_URL }}" \
+          -e DOCKER_ENV_CONFIG_FILE_NAME_IN_REPO="${{ env.CONFIG_FILE_IN_REPO }}" \
+          -e DOCKER_ENV_DIY_P1_SH_NAME_IN_REPO="${{ env.DIY_P1_SH_IN_REPO }}" \
+          -e DOCKER_ENV_DIY_P2_SH_NAME_IN_REPO="${{ env.DIY_P2_SH_IN_REPO }}" \
+          -e DOCKER_ENV_BUILD_STATE_DIR_NAME="${{ env.BUILD_STATE_DIR_NAME }}" \
+          -e DOCKER_ENV_CCACHE_DIR_NAME="${{ env.CCACHE_DIR_NAME }}" \
+          -e DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH="${{ env.CONTAINER_DEBUG_LOG_FILE_PATH }}" \
+          -e DOCKER_ENV_CONTAINER_CCACHE_LOG_PATH="${{ env.CONTAINER_CCACHE_LOGFILE_PATH }}" \
+          -e DOCKER_ENV_CONTAINER_BUILD_AREA="${{ env.CONTAINER_BUILD_AREA }}" \
+          -e DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}" \
+          -e DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE="${{ github.event.inputs.clean_build }}" \
+          -e DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE="${{ env.S3_CACHE_RESTORED || 'false' }}" \
+          -e DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE="${{ env.feeds_changed || 'true' }}" \
+          -e DOCKER_ENV_BUILD_TZ="${{ env.TZ }}" \
           ${{ env.DOCKER_IMAGE }} \
-          bash -c "cd \"\${CONTAINER_BUILD_AREA_DOCKER_ENV}\" && /tmp/docker_build_script.sh"
+          bash -c "cd \"${DOCKER_ENV_CONTAINER_BUILD_AREA}\" && /tmp/docker_build_script.sh" # Referencing DOCKER_ENV_CONTAINER_BUILD_AREA for cd
         
         if [ -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success" ]; then
             echo "Docker build reported success."
@@ -337,9 +336,9 @@ DOCKER_SCRIPT_EOF
             echo "status=failure" >> $GITHUB_OUTPUT
             rm -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_failure" 2>/dev/null || true
             echo "Copying out logs from Docker mapped repo config (if any)..."
-            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_build_debug_summary.log" /tmp/docker_build_debug_summary.log 2>/dev/null || true
-            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log" /tmp/docker_ccache_detailed.log 2>/dev/null || true
-            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" /tmp/docker_compile_output.log 2>/dev/null || true
+            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_build_debug_summary.log" /tmp/docker_build_debug_summary_runner.log 2>/dev/null || true
+            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log" /tmp/docker_ccache_detailed_runner.log 2>/dev/null || true
+            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" /tmp/docker_compile_output_runner.log 2>/dev/null || true
         fi
         rm -f /tmp/docker_build_script.sh
 
@@ -463,7 +462,7 @@ DOCKER_SCRIPT_EOF
                     FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1))
                 done
             fi
-            cd "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}" # Changed to a known directory
+            cd "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}"
 
             if [ $FILES_COPIED_COUNT -gt 0 ]; then
                 echo "成功从 ${CURRENT_IMG_SOURCE_DIR} 复制 $FILES_COPIED_COUNT 个文件到 ${COLLECTED_FIRMWARE_OUTPUT_DIR}" | tee -a ${{ env.DEBUG_LOG_ON_RUNNER }}
