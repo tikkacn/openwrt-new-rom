@@ -142,7 +142,7 @@ jobs:
           #!/bin/bash
           set -eo pipefail
           export FORCE_UNSAFE_CONFIGURE=1 
-          export GOFLAGS="-buildvcs=false" # <--- 新增：全局禁用Go的VCS检查
+          export GOFLAGS="-buildvcs=false" # 全局禁用Go的VCS检查
 
           INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
           mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")" 
@@ -263,10 +263,13 @@ jobs:
           fi
           echo "[DOCKER] Final Build Strategy -> DO_FULL_BUILD_DOCKER: $DO_FULL_BUILD_DOCKER, DO_PACKAGE_BUILD_DOCKER: $DO_PACKAGE_BUILD_DOCKER" | tee -a "${INTERNAL_DEBUG_LOG}"
           
+          # 定义 make 命令选项，并确保 GOFLAGS 生效
           MAKE_JOBS_NPROC=$(nproc)
-          MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s"
-          MAKE_OPTS_FALLBACK="-j1 V=s"
-          MAKE_OPTS_SINGLE_JOB="-j1"
+          MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false" # 确保此环境变量传递给make执行的go命令
+          MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
+          MAKE_OPTS_FALLBACK="-j1 V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
+          MAKE_OPTS_SINGLE_JOB="-j1 ${MAKE_OPTS_COMMON_GOFLAGS}"
+
 
           COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_$(date +%Y%m%d_%H%M%S).log"
           echo "[DOCKER] Detailed compile log will be in: ${PWD}/${COMPILE_OUTPUT_LOG_DOCKER}" | tee -a "${INTERNAL_DEBUG_LOG}"
