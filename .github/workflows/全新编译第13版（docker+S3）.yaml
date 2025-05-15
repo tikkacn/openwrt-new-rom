@@ -141,9 +141,10 @@ jobs:
           cat << 'DOCKER_SCRIPT_EOF' > "${RUNNER_SCRIPT_PATH}"
           #!/bin/bash
           set -eo pipefail
+          export FORCE_UNSAFE_CONFIGURE=1 # <--- 新增：允许以root用户运行configure
 
           INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
-          mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")"
+          mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")" 
 
           echo "[DOCKER] Starting build script inside Docker container..." | tee -a "${INTERNAL_DEBUG_LOG}"
           echo "[DOCKER] Workspace (mounted at ${DOCKER_ENV_CONTAINER_BUILD_AREA}): $(ls -A ${DOCKER_ENV_CONTAINER_BUILD_AREA} | wc -l) items" | tee -a "${INTERNAL_DEBUG_LOG}"
