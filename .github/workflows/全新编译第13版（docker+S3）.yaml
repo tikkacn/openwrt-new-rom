@@ -142,6 +142,7 @@ jobs:
           #!/bin/bash
           set -eo pipefail
           export FORCE_UNSAFE_CONFIGURE=1 
+          export GOFLAGS="-buildvcs=false" # <--- 新增：全局禁用Go的VCS检查
 
           INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
           mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")" 
@@ -282,7 +283,7 @@ jobs:
             make package/clean V=s || true 
             if ! make package/compile ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
             make package/index ${MAKE_OPTS_SINGLE_JOB} || make package/index ${MAKE_OPTS_SINGLE_JOB} 
-          else # Minimal Incremental Build
+          else 
             echo "[DOCKER] --- Compile Branch: Minimal Incremental Build ---" | tee -a "${INTERNAL_DEBUG_LOG}"
             if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
           fi
