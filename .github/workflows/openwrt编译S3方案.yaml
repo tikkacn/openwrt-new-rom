@@ -8,7 +8,7 @@ on:
         required: false
         default: 'false'
       clean_build:
-        description: '全新编译，不使用任何恢复的缓存。首次S3填充时应为false。'
+        description: '全新编译，不使用任何恢复的缓存。首次S3填充(P-Fix运行)时应为false并预清空S3/Actions缓存。'
         required: false
         default: 'false' 
       config_file:
@@ -44,6 +44,7 @@ env:
   S3_TOOLCHAIN_BUILD_DIR_ARCHIVE_FILENAME: toolchain_build_dir_cache.tar.zst
   S3_DL_DIR_ARCHIVE_FILENAME: dl_dir_cache.tar.zst
   
+  # S3_PATH_PREFIX_KEY 将在下面的步骤中动态设置
   S3_CONFIG_SNAPSHOT_FILENAME: latest_successful_build.config 
 
   CCACHE_LOGFILE_PATH: /tmp/ccache_detailed.log
@@ -66,7 +67,6 @@ jobs:
           final_s3_prefix="$s3_prefix_from_secret"
           echo "使用来自 Secret 'S3_CACHE_PATH_PREFIX' 的S3路径前缀: $final_s3_prefix" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         else
-          # REPO_BRANCH 在顶级 env 中定义，此处可安全引用
           default_prefix="openwrt-caches/${{ env.REPO_BRANCH }}"
           final_s3_prefix="$default_prefix"
           echo "使用默认S3路径前缀: $final_s3_prefix" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -76,6 +76,7 @@ jobs:
 
     - name: 优化磁盘空间 (Maximize Build Space)
       uses: easimon/maximize-build-space@master
+      # (with: 参数与之前版本相同)
       with:
         root-reserve-mb: 20480 
         swap-size-mb: 5120
@@ -87,6 +88,7 @@ jobs:
         build-mount-path: '/workdir'
 
     - name: 额外清理磁盘空间并检查 (Extra Cleanup & Check)
+      # (run: 脚本与之前版本相同)
       run: |
         echo "清理额外磁盘空间..."
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL
@@ -98,6 +100,7 @@ jobs:
     - name: 初始化环境和安装 AWS CLI (Initialize Environment & Install AWS CLI)
       env:
         DEBIAN_FRONTEND: noninteractive
+      # (run: 脚本与之前版本相同, 确保使用 github.workspace)
       run: |
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
@@ -113,8 +116,7 @@ jobs:
         mkdir -p ${{ env.BUILD_STATE_DIR_PATH }} ${{ env.CCACHE_DIR_PATH }} /workdir/openwrt 
         chmod -R 777 /workdir
         
-        # 使用 github.workspace 引用仓库根目录下的文件
-        CONFIG_FILE_ON_RUNNER="${{ github.workspace }}/${{ env.CONFIG_FILE_NAME }}"
+        CONFIG_FILE_ON_RUNNER="${{ github.workspace }}/${{ env.CONFIG_FILE_NAME }}" 
         DIY_P1_SH_ON_RUNNER="${{ github.workspace }}/${{ env.DIY_P1_SH_NAME }}"
         DIY_P2_SH_ON_RUNNER="${{ github.workspace }}/${{ env.DIY_P2_SH_NAME }}"
 
@@ -126,10 +128,9 @@ jobs:
         echo '#!/bin/bash' > "${DIY_P2_SH_ON_RUNNER}"
         echo "set -eo pipefail" >> "${DIY_P2_SH_ON_RUNNER}"
         echo 'BANNER_DATE=$(date +"%Y%m%d%H%M")' >> "${DIY_P2_SH_ON_RUNNER}"
-        # 确保 package/lean/default-settings/files 目录存在，如果不存在，sed 会报错
-        echo 'mkdir -p package/lean/default-settings/files' >> "${DIY_P2_SH_ON_RUNNER}"
-        echo 'touch package/lean/default-settings/files/zzz-default-settings' >> "${DIY_P2_SH_ON_RUNNER}"
-        echo 'sed -i "s/OpenWrt /OpenWrt_S3Build_${BANNER_DATE} /" package/lean/default-settings/files/zzz-default-settings || echo "Banner sed command failed or target file not found."' >> "${DIY_P2_SH_ON_RUNNER}"
+        echo 'mkdir -p ./package/lean/default-settings/files' >> "${DIY_P2_SH_ON_RUNNER}" # Ensure dir exists
+        echo 'touch ./package/lean/default-settings/files/zzz-default-settings' >> "${DIY_P2_SH_ON_RUNNER}" # Ensure file exists
+        echo 'sed -i "s/OpenWrt /OpenWrt_S3Build_${BANNER_DATE} /" ./package/lean/default-settings/files/zzz-default-settings || echo "Banner sed command failed or target file not found."' >> "${DIY_P2_SH_ON_RUNNER}"
         echo "echo '[INFO] Running default diy-part2.sh (Banner updated).'" >> "${DIY_P2_SH_ON_RUNNER}"
         chmod +x "${DIY_P2_SH_ON_RUNNER}"
         
@@ -173,7 +174,6 @@ jobs:
         cd openwrt 
         echo "当前已进入 $(pwd)" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         
-        # 创建 S3 缓存对应的目标目录及其他缓存目录
         mkdir -p ${{ env.S3_TARGET_STAGING_DIR_PATH }} ${{ env.S3_TARGET_HOST_BUILD_DIR_PATH }} ${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }} \
                    ${{ env.S3_TARGET_DL_DIR_PATH }} \
                    ${{ env.PACKAGES_BIN_DIR_PATH }} ${{ env.BUILD_STATE_DIR_PATH }} ${{ env.CCACHE_DIR_PATH }}
@@ -263,6 +263,7 @@ jobs:
 
     - name: 检查缓存恢复后状态 (Check Cache Restore Status)
       run: |
+        # (脚本与之前版本相同)
         echo "--- Debug Log: Cache Restore Status Summary ---" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         echo "CONFIG_FILE: ${{ env.CONFIG_FILE_NAME }}" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         echo "GitHub Packages Bin Cache: ${{ steps.cache-packages-bin.outputs.cache-hit == 'true' && 'Hit' || 'Miss/Skipped' }}" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -281,6 +282,7 @@ jobs:
 
     - name: 配置编译环境 (Configure Build Environment)
       run: |
+        # (脚本与之前版本相同, 确保使用 github.workspace)
         cd /workdir/openwrt
         CONFIG_FILE_ON_RUNNER="${{ github.workspace }}/${{ env.CONFIG_FILE_NAME }}" 
         DIY_P1_SH_ON_RUNNER="${{ github.workspace }}/${{ env.DIY_P1_SH_NAME }}"     
@@ -336,6 +338,7 @@ jobs:
     - name: 检查源码变化 (Feeds Makefile Hashes)
       id: check-feeds
       run: |
+        # (Script content remains the same)
         cd /workdir/openwrt
         mkdir -p ${{ env.BUILD_STATE_DIR_PATH }}
         find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > ${{ env.BUILD_STATE_DIR_PATH }}/feeds.sha256
@@ -360,6 +363,7 @@ jobs:
 
     - name: 下载软件包 (make download)
       run: |
+        # (Script content remains the same)
         cd /workdir/openwrt
         MAX_RETRIES=3
         RETRY_WAIT=10
@@ -392,6 +396,7 @@ jobs:
         
     - name: 检测并处理下载失败的包 (Detect & Handle Failed Downloads)
       run: |
+        # (Script content remains the same)
         cd /workdir/openwrt
         if [ -f "logs/download_failures.log" ] || [ -f "logs/download_final_attempt.log" ]; then
             COMBINED_DOWNLOAD_LOG="logs/combined_download_errors.log"
@@ -508,6 +513,26 @@ jobs:
           echo "所有编译分支执行完毕，确保执行最终的固件生成步骤 (target/install)..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
           make target/install $FALLBACK_MAKE_CMD 2>&1 | tee -a "${COMPILE_OUTPUT_LOG}" 
           local final_install_status=$? 
+
+          # --- STAMP FINALIZATION ATTEMPTS START ---
+          echo "尝试最终化核心组件的状态和stamp文件 (P阶段强制检查)..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+
+          echo "确保 staging_dir/.prepared stamp (P阶段强制检查)..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          if ! make prepare -j$(nproc) V=s; then
+            make prepare -j1 V=s || echo "[WARNING_STAMP_FIX] 'make prepare' 即使单线程重试也失败，但继续。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          fi
+
+          echo "确保 tools/install stamps (P阶段强制检查)..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          if ! make tools/install -j$(nproc) V=s IGNORE_ERRORS=m; then
+            make tools/install -j1 V=s IGNORE_ERRORS=m || echo "[WARNING_STAMP_FIX] 'make tools/install' 即使单线程重试也失败，但继续。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          fi
+
+          echo "确保 toolchain/install stamps (P阶段强制检查)..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          if ! make toolchain/install -j$(nproc) V=s IGNORE_ERRORS=m; then
+            make toolchain/install -j1 V=s IGNORE_ERRORS=m || echo "[WARNING_STAMP_FIX] 'make toolchain/install' 即使单线程重试也失败，但继续。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          fi
+          echo "核心组件stamp最终化尝试完成 (P阶段强制检查)。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          # --- STAMP FINALIZATION ATTEMPTS END ---
           
           save_md5_info_to_build_state 
 
@@ -546,8 +571,6 @@ jobs:
         if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
           echo "clean_build is true: DO_FULL_BUILD=1 (全新编译，不使用已恢复的缓存)" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
           DO_FULL_BUILD=1
-        # Basic check for S3 cache presence (more robust checks can be added, e.g. checking specific stamp files)
-        # This assumes if clean_build is false, S3 restore step ran.
         elif [ ! -f "${{ env.S3_TARGET_STAGING_DIR_PATH }}/stamp/.prepared" ] || \
              [ ! -d "${{ env.S3_TARGET_HOST_BUILD_DIR_PATH }}/stamp" ] || \
              [ ! -d "${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }}/stamp" ] || \
@@ -584,8 +607,9 @@ jobs:
         echo "--- Debug Log: Compile Step End ---" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
 
     - name: 检查编译后各目录大小 (S3缓存上传前) (Check Sizes Before S3 Upload)
-      if: "!cancelled()" 
+      if: "!cancelled()" # 总是运行此步骤以检查大小，即使编译失败
       run: |
+        # (Script content remains the same as in previous full workflow version)
         echo "编译完成或中止，详细检查各构建目录大小..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         CURRENT_DATE_WITH_TZ=$(date +"%Y-%m-%d %H:%M:%S %Z")
         echo "" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -629,12 +653,14 @@ jobs:
 
     # --- S3 Cache Save (Large Caches) ---
     - name: 打包并上传大体积缓存到 S3 (Pack & Upload Large Caches to S3)
+      # (Script content with check_cache_integrity remains the same as in response ID A0c9B8D7E6F5G4H3I2J1)
       if: steps.compile.outputs.status == 'success' && !cancelled() 
       working-directory: /workdir/openwrt 
       run: |
         S3_BUCKET_NAME="${{ secrets.AWS_S3_BUCKET_NAME }}"
-        S3_FULL_PREFIX="${{ env.S3_PATH_PREFIX_KEY }}" # This is set by the 'Set S3 Cache Path Prefix' step
-        CONFIG_FILE_TO_UPLOAD=".config" # Path relative to /workdir/openwrt (current working directory)
+        S3_FULL_PREFIX="${{ env.S3_PATH_PREFIX_KEY }}" 
+        CONFIG_FILE_TO_UPLOAD=".config" 
+        OPENWRT_ROOT_DIR_ABS="/workdir/openwrt" 
 
         if [ -z "$S3_BUCKET_NAME" ]; then
           echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。无法上传缓存到S3。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -642,19 +668,58 @@ jobs:
         fi
         echo "[INFO] S3 Bucket for Upload: $S3_BUCKET_NAME, S3 Cache Prefix: $S3_FULL_PREFIX" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
 
+        check_cache_integrity() {
+          local dir_to_check_relative_to_root="$1" 
+          local check_type="$2" 
+          local stamp_path_inside_dir_to_check="$3" 
+          local full_path_to_check="${OPENWRT_ROOT_DIR_ABS}/${dir_to_check_relative_to_root}/${stamp_path_inside_dir_to_check}"
+          
+          if [ "$dir_to_check_relative_to_root" = "$(basename ${{ env.S3_TARGET_DL_DIR_PATH }})" ]; then
+            if [ ! -d "${OPENWRT_ROOT_DIR_ABS}/${dir_to_check_relative_to_root}" ]; then
+              echo "[ERROR_CACHE_INTEGRITY] 关键目录 ${OPENWRT_ROOT_DIR_ABS}/${dir_to_check_relative_to_root} 不存在！" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+              return 1
+            fi
+            echo "[INFO_CACHE_INTEGRITY] 目录 ${OPENWRT_ROOT_DIR_ABS}/${dir_to_check_relative_to_root} 存在。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+            return 0
+          fi
+
+          if [ "$check_type" = "file" ]; then
+            if [ ! -f "$full_path_to_check" ]; then
+              echo "[ERROR_CACHE_INTEGRITY] 关键标记文件 $full_path_to_check 缺失！" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+              return 1
+            fi
+          elif [ "$check_type" = "dir" ]; then
+            if [ ! -d "$full_path_to_check" ]; then
+              echo "[ERROR_CACHE_INTEGRITY] 关键标记目录 $full_path_to_check 缺失！" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+              return 1
+            fi
+          else
+            echo "[WARN_CACHE_INTEGRITY] 未知的检查类型 '$check_type' for $dir_to_check_relative_to_root." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+            return 0 
+          fi
+          echo "[INFO_CACHE_INTEGRITY] 缓存完整性检查通过: $full_path_to_check 存在。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+          return 0
+        }
+
         s3_pack_and_upload() {
-          local source_dir_relative_to_pwd="$1" # e.g., staging_dir OR build_dir/host (relative to /workdir/openwrt)
-          local s3_archive_filename="$2"        # e.g., staging_dir_cache.tar.zst
+          local source_dir_relative_to_pwd="$1" 
+          local s3_archive_filename="$2"      
+          local integrity_check_type="$3" 
+          local stamp_path_for_integrity_check="$4" 
           local s3_object_key="${S3_FULL_PREFIX}/${s3_archive_filename}"
-          local local_archive_in_pwd="./${s3_archive_filename}" # Temp archive in /workdir/openwrt
+          local local_archive_in_pwd="./${s3_archive_filename}" 
 
           if [ ! -d "$source_dir_relative_to_pwd" ]; then
             echo "目录 $source_dir_relative_to_pwd 不存在于 $(pwd)，跳过打包和上传。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-            return 1 # Indicate failure to pack this specific directory
+            return 1 
+          fi
+
+          if ! check_cache_integrity "$source_dir_relative_to_pwd" "$integrity_check_type" "$stamp_path_for_integrity_check"; then
+            echo "由于目录 $source_dir_relative_to_pwd 未通过完整性检查 (关键标记缺失)，将不打包上传此S3缓存。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
+            return 1 
           fi
           
           echo "开始打包压缩目录: $source_dir_relative_to_pwd 为 $local_archive_in_pwd ..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-          # Using current dir as context for tar. source_dir_relative_to_pwd is the path to tar.
           if tar -I "zstd -T0 -3" -cf "$local_archive_in_pwd" "$source_dir_relative_to_pwd"; then 
             ARCHIVE_SIZE=$(du -sh "$local_archive_in_pwd" | awk '{print $1}')
             echo "打包压缩 $local_archive_in_pwd 成功. 文件大小: $ARCHIVE_SIZE" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -663,30 +728,32 @@ jobs:
               echo "上传 $local_archive_in_pwd 到 S3 成功。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
             else
               echo "错误：上传 $local_archive_in_pwd 到 S3 失败。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-              # Optionally, you might want to return an error code here too
-              # return 1 
             fi
             rm -f "$local_archive_in_pwd" 
           else
             echo "错误：打包压缩 $source_dir_relative_to_pwd 为 $local_archive_in_pwd 失败。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
-            return 1 # Indicate failure
+            return 1 
           fi
-          return 0 # Success for this directory
+          return 0 
         }
         
-        # --- Corrected calls to s3_pack_and_upload ---
-        # For directories directly under /workdir/openwrt (like staging_dir, dl):
-        s3_pack_and_upload "$(basename ${{ env.S3_TARGET_STAGING_DIR_PATH }})" "${{ env.S3_STAGING_DIR_ARCHIVE_FILENAME }}"
-        s3_pack_and_upload "$(basename ${{ env.S3_TARGET_DL_DIR_PATH }})" "${{ env.S3_DL_DIR_ARCHIVE_FILENAME }}"
+        s3_pack_and_upload "$(basename ${{ env.S3_TARGET_STAGING_DIR_PATH }})" \
+                           "${{ env.S3_STAGING_DIR_ARCHIVE_FILENAME }}" \
+                           "file" "stamp/.prepared"
+                           
+        s3_pack_and_upload "$(basename ${{ env.S3_TARGET_DL_DIR_PATH }})" \
+                           "${{ env.S3_DL_DIR_ARCHIVE_FILENAME }}" \
+                           "dir" "" 
 
-        # For directories under /workdir/openwrt/build_dir/ (like host, toolchain):
-        # We need their path relative to /workdir/openwrt
         HOST_BUILD_DIR_REL_PATH="build_dir/$(basename ${{ env.S3_TARGET_HOST_BUILD_DIR_PATH }})"
+        s3_pack_and_upload "${HOST_BUILD_DIR_REL_PATH}" \
+                           "${{ env.S3_HOST_BUILD_DIR_ARCHIVE_FILENAME }}" \
+                           "dir" "stamp"
+
         TOOLCHAIN_BUILD_DIR_REL_PATH="build_dir/$(basename ${{ env.S3_TARGET_TOOLCHAIN_BUILD_DIR_PATH }})"
-        
-        s3_pack_and_upload "${HOST_BUILD_DIR_REL_PATH}" "${{ env.S3_HOST_BUILD_DIR_ARCHIVE_FILENAME }}"
-        s3_pack_and_upload "${TOOLCHAIN_BUILD_DIR_REL_PATH}" "${{ env.S3_TOOLCHAIN_BUILD_DIR_ARCHIVE_FILENAME }}"
-        # --- End of corrected calls ---
+        s3_pack_and_upload "${TOOLCHAIN_BUILD_DIR_REL_PATH}" \
+                           "${{ env.S3_TOOLCHAIN_BUILD_DIR_ARCHIVE_FILENAME }}" \
+                           "dir" "stamp"
 
         if [ -f "$CONFIG_FILE_TO_UPLOAD" ]; then 
           echo "上传 .config 文件 (${CONFIG_FILE_TO_UPLOAD}) 到 S3..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
@@ -702,12 +769,14 @@ jobs:
     # --- END S3 Cache Save ---
 
     - name: 验证 Actions Cache 配置待保存 (Verify Actions Cache Save Config)
+      # (Script content remains the same)
       if: "!cancelled()"
       run: |
         echo "已完成编译和S3上传。Actions Cache (小缓存) 将在作业结束时根据定义的key和path自动保存。" | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
         df -h | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
 
     - name: Upload Debug Logs
+      # (Path content remains the same)
       if: always()
       uses: actions/upload-artifact@main
       with:
@@ -723,6 +792,7 @@ jobs:
 
     - name: 整理文件 (Organize Firmware Files)
       id: organize
+      # (Script content remains the same, with cd fixes)
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         echo "开始整理固件文件..." | tee -a ${{ env.DEBUG_LOG_FILE_PATH }}
