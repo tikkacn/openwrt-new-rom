@@ -1,4 +1,3 @@
-# YAML文件顶部，无前导空格
 name: 全新编译第13版(Docker-S3FullEnvCache)
 
 on:
@@ -17,7 +16,7 @@ on:
         required: false
         default: '增量缓存优化.config'
 
-env: # 2 空格缩进 (相对于上一级，但这里是顶级env)
+env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF_URL: https://github.com/tikkacn/openwrt-new-rom/raw/main/feeds.conf.default
@@ -41,22 +40,22 @@ env: # 2 空格缩进 (相对于上一级，但这里是顶级env)
   BUILD_STATE_DIR_NAME: .github_actions_build_state
   CCACHE_DIR_NAME: .ccache
 
-jobs: # 2 空格缩进
-  build_in_docker: # 4 空格缩进
-    runs-on: ubuntu-22.04 # 6 空格缩进
-    name: Build OpenWrt in Docker with S3 Env Cache # 6 空格缩进
-    env: # 6 空格缩进
-      RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env # 8 空格缩进
-      CONTAINER_BUILD_AREA: /build_area # 8 空格缩进
-    steps: # 6 空格缩进
-      - name: 检出仓库代码 (Checkout Repository Code) # 8 空格缩进 (注意'-'本身是列表项的一部分)
-        uses: actions/checkout@v4 # 10 空格缩进
-        with: # 10 空格缩进
-          path: ${{ env.RUNNER_CHECKOUT_SUBDIR }} # 12 空格缩进
+jobs:
+  build_in_docker: # 2 空格
+    runs-on: ubuntu-22.04 # 4 空格
+    name: Build OpenWrt in Docker with S3 Env Cache # 4 空格
+    env: # 4 空格
+      RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env # 6 空格
+      CONTAINER_BUILD_AREA: /build_area # 6 空格
+    steps: # 4 空格
+      - name: 检出仓库代码 (Checkout Repository Code) # 6 空格
+        uses: actions/checkout@v4 # 8 空格
+        with: # 8 空格
+          path: ${{ env.RUNNER_CHECKOUT_SUBDIR }} # 10 空格
 
-      - name: 设置 S3 缓存的完整路径前缀 (Set Full S3 Cache Path Prefix) # 8 空格缩进
-        id: set_s3_vars # 10 空格缩进
-        run: | # 10 空格缩进, 后续脚本行从12空格开始
+      - name: 设置 S3 缓存的完整路径前缀 (Set Full S3 Cache Path Prefix) # 6 空格
+        id: set_s3_vars # 8 空格
+        run: | # 8 空格, 后续脚本行从10空格开始
           s3_prefix_from_secret="${{ secrets.S3_CACHE_PATH_PREFIX }}"
           repo_branch_for_path="${{ env.REPO_BRANCH }}"
           repo_branch_for_path_sanitized=$(echo "$repo_branch_for_path" | sed 's/\//-/g')
@@ -74,10 +73,10 @@ jobs: # 2 空格缩进
           echo "s3_prefix_out=${final_s3_prefix}" >> $GITHUB_OUTPUT
           echo "DEBUG_LOG_ON_RUNNER=${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/build_debug_summary_runner.log" >> $GITHUB_ENV
 
-      - name: 优化Runner磁盘空间 (Maximize Runner Build Space) # 8 空格缩进
-        uses: easimon/maximize-build-space@master # 10 空格缩进
-        with: # 10 空格缩进
-          root-reserve-mb: 10240 # 12 空格缩进
+      - name: 优化Runner磁盘空间 (Maximize Runner Build Space) # 6 空格
+        uses: easimon/maximize-build-space@master # 8 空格
+        with: # 8 空格
+          root-reserve-mb: 10240 # 10 空格
           swap-size-mb: 2048
           remove-dotnet: 'true'
           remove-android: 'true'
@@ -86,21 +85,21 @@ jobs: # 2 空格缩进
           remove-docker-images: 'false'
           build-mount-path: '/workdir'
 
-      - name: 配置 AWS 凭证 (Configure AWS Credentials) # 8 空格缩进
-        uses: aws-actions/configure-aws-credentials@v4 # 10 空格缩进
-        with: # 10 空格缩进
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }} # 12 空格缩进
+      - name: 配置 AWS 凭证 (Configure AWS Credentials) # 6 空格
+        uses: aws-actions/configure-aws-credentials@v4 # 8 空格
+        with: # 8 空格
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }} # 10 空格
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: 下载并恢复S3构建环境缓存 (Download & Restore S3 Build Env Cache) # 8 空格缩进
-        if: inputs.clean_build != 'true' # 10 空格缩进
-        env: # 10 空格缩进
-          S3_BUCKET_NAME_SECRET: ${{ secrets.AWS_S3_BUCKET_NAME }} # 12 空格缩进
+      - name: 下载并恢复S3构建环境缓存 (Download & Restore S3 Build Env Cache) # 6 空格
+        if: inputs.clean_build != 'true' # 8 空格
+        env: # 8 空格
+          S3_BUCKET_NAME_SECRET: ${{ secrets.AWS_S3_BUCKET_NAME }} # 10 空格
           S3_ARCHIVE_NAME_ENV: ${{ env.S3_WORKSPACE_ARCHIVE_FILENAME }}
           RUNNER_WORKSPACE_PATH_ENV: ${{ env.RUNNER_OPENWRT_WORKSPACE }}
           DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }}
-        run: | # 10 空格缩进, 后续脚本行从12空格开始
+        run: | # 8 空格, 后续脚本行从10空格开始
           echo "S3_EFFECTIVE_PATH_PREFIX in download step: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}" | tee -a "$DEBUG_LOG_FILE"
           if [ -z "$S3_BUCKET_NAME_SECRET" ]; then
             echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。跳过S3缓存恢复。" | tee -a "$DEBUG_LOG_FILE"
@@ -131,13 +130,16 @@ jobs: # 2 空格缩进
           fi
           df -h | tee -a "$DEBUG_LOG_FILE"
       
-      # 关键步骤：确保下面的 'run: |' 块内所有行（包括 DOCKER_SCRIPT_EOF 和 docker run 的每一行）
-      # 都精确地从第12个空格开始。
-      # 不要有任何 Tab 字符，全部使用空格。
-      - name: 运行Docker容器并执行编译 (Run Docker Container & Compile) # 8 空格缩进
-        id: compile_in_docker # 10 空格缩进
-        run: | # 10 空格缩进, 后续脚本行从12空格开始
-          cat << 'DOCKER_SCRIPT_EOF' > /tmp/docker_build_script.sh
+      - name: 运行Docker容器并执行编译 (Run Docker Container & Compile) # 6 空格
+        id: compile_in_docker # 8 空格
+        run: | # 8 空格, 后续脚本行从10空格开始
+          # 定义脚本在 Runner 上的路径 (位于检出目录内) 和在容器内的路径 (通过挂载访问)
+          RUNNER_SCRIPT_FILENAME="docker_build_script.sh"
+          RUNNER_SCRIPT_PATH="${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/${RUNNER_SCRIPT_FILENAME}"
+          CONTAINER_SCRIPT_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/${RUNNER_SCRIPT_FILENAME}"
+
+          # 创建脚本文件到 Runner 上的检出目录
+          cat << 'DOCKER_SCRIPT_EOF' > "${RUNNER_SCRIPT_PATH}"
           #!/bin/bash
           set -eo pipefail
 
@@ -188,6 +190,8 @@ jobs: # 2 空格缩进
           cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_CONFIG_FILE_NAME}" "./.config"
           cp ./.config ./.config.input
           
+          # DIY脚本也从挂载的配置目录中复制（如果它们与主仓库分开）
+          # 假设DIY脚本与主配置文件在同一检出目录中，由RUNNER_CHECKOUT_SUBDIR检出并挂载到CONTAINER_REPO_CONFIG_MOUNT
           cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P1_SH_NAME}" "./${INTERNAL_DIY_P1_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P1_SH_NAME}"
           cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P2_SH_NAME}" "./${INTERNAL_DIY_P2_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P2_SH_NAME}"
           
@@ -300,11 +304,10 @@ jobs: # 2 空格缩进
 
           echo "[DOCKER] Build script finished."
           DOCKER_SCRIPT_EOF
-          # ^^^^ The above DOCKER_SCRIPT_EOF MUST have the same leading whitespace as the `cat << ...` line (e.g., 12 spaces from file start if run: is at 10).
-          # AND no characters after DOCKER_SCRIPT_EOF on this line.
+          # ^^^ 确保这一行的前导空格与上面的 cat << 'DOCKER_SCRIPT_EOF' 和脚本内容行完全一致
+          chmod +x "${RUNNER_SCRIPT_PATH}"
 
-          chmod +x /tmp/docker_build_script.sh
-
+          # 执行容器内的脚本 (通过挂载路径)
           docker run --rm \
             -v "${{ env.RUNNER_OPENWRT_WORKSPACE }}:${{ env.CONTAINER_BUILD_AREA }}" \
             -v "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}:${{ env.CONTAINER_REPO_CONFIG_MOUNT }}:ro" \
@@ -325,7 +328,7 @@ jobs: # 2 空格缩进
             -e DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE="${{ env.feeds_changed || 'true' }}" \
             -e DOCKER_ENV_BUILD_TZ="${{ env.TZ }}" \
             ${{ env.DOCKER_IMAGE }} \
-            bash -c "cd \"${DOCKER_ENV_CONTAINER_BUILD_AREA}\" && /tmp/docker_build_script.sh"
+            bash -c "cd \"${DOCKER_ENV_CONTAINER_BUILD_AREA}\" && \"${CONTAINER_SCRIPT_PATH}\""
           
           if [ -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success" ]; then
               echo "Docker build reported success."
@@ -340,7 +343,8 @@ jobs: # 2 空格缩进
               cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log" "/tmp/docker_ccache_detailed_runner.log" 2>/dev/null || true
               cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" "/tmp/docker_compile_output_runner.log" 2>/dev/null || true
           fi
-          rm -f /tmp/docker_build_script.sh
+          # 可以选择在结束后删除 Runner 上的脚本文件
+          # rm -f "${RUNNER_SCRIPT_PATH}"
 
       - name: 打包并上传S3构建环境缓存 (Pack & Upload S3 Build Environment Cache) # 8 空格缩进
         if: steps.compile_in_docker.outputs.status == 'success' && !cancelled() # 10 空格缩进
