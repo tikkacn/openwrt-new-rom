@@ -384,6 +384,28 @@ DOCKER_SCRIPT_EOF
             fi
           else
             echo "警告：${CONFIG_FILE_IN_WORKSPACE} 文件未找到，无法上传到S3。" | tee -a "$DEBUG_LOG_FILE"
+          fi://${S3_BUCKET_NAME_SECRET}/${S3_OBJECT_KEY} ..." | tee -a "$DEBUG_LOG_FILE"
+            if aws s3 cp "/tmp/${S3_ARCHIVE_NAME_ENV}" "s3://${S3_BUCKET_NAME_SECRET}/${S3_OBJECT_KEY}" --quiet; then
+              echo "上传 /tmp/${S3_ARCHIVE_NAME_ENV} 到 S3 成功。" | tee -a "$DEBUG_LOG_FILE"
+            else
+              echo "错误：上传 /tmp/${S3_ARCHIVE_NAME_ENV} 到 S3 失败。" | tee -a "$DEBUG_LOG_FILE"
+            fi
+            rm -f "/tmp/${S3_ARCHIVE_NAME_ENV}"
+          else
+            echo "错误：打包压缩 ${RUNNER_WORKSPACE_PATH_ENV} 失败。" | tee -a "$DEBUG_LOG_FILE"
+          fi
+
+          CONFIG_FILE_IN_WORKSPACE="${RUNNER_WORKSPACE_PATH_ENV}/.config"
+          if [ -f "$CONFIG_FILE_IN_WORKSPACE" ]; then
+            echo "上传 .config 文件 (${CONFIG_FILE_IN_WORKSPACE}) 到 S3..." | tee -a "$DEBUG_LOG_FILE"
+            S3_CONFIG_OBJECT_KEY="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${S3_CONFIG_SNAPSHOT_FILENAME_ENV}"
+            if aws s3 cp "$CONFIG_FILE_IN_WORKSPACE" "s3://${S3_BUCKET_NAME_SECRET}/${S3_CONFIG_OBJECT_KEY}" --quiet; then
+              echo ".config 文件成功上传到 s3://${S3_BUCKET_NAME_SECRET}/${S3_CONFIG_OBJECT_KEY}" | tee -a "$DEBUG_LOG_FILE"
+            else
+              echo "错误：上传 .config 文件到 S3 失败。" | tee -a "$DEBUG_LOG_FILE"
+            fi
+          else
+            echo "警告：${CONFIG_FILE_IN_WORKSPACE} 文件未找到，无法上传到S3。" | tee -a "$DEBUG_LOG_FILE"
           fi
 
       - name: Upload Debug Logs (from Runner and potentially Docker)
