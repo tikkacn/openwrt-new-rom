@@ -27,15 +27,15 @@ env:
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
-  RUNNER_CHECKOUT_SUBDIR: 'repo_files' # 用于在Runner上检出代码的子目录名
-  CONTAINER_REPO_CONFIG_MOUNT: /repo_config # 容器内映射的GitHub仓库根目录
+  RUNNER_CHECKOUT_SUBDIR: 'repo_files' 
+  CONTAINER_REPO_CONFIG_MOUNT: /repo_config 
 
   DOCKER_IMAGE: ubuntu:22.04
   S3_WORKSPACE_ARCHIVE_FILENAME: openwrt_workspace_cache.tar.zst
   S3_CONFIG_SNAPSHOT_FILENAME: last_successful_build.config
 
-  CONTAINER_CCACHE_LOGFILE_PATH: /tmp/ccache_detailed.log # Path inside Docker
-  CONTAINER_DEBUG_LOG_FILE_PATH: /tmp/build_debug_summary.log # Path inside Docker
+  CONTAINER_CCACHE_LOGFILE_PATH: /tmp/ccache_detailed.log 
+  CONTAINER_DEBUG_LOG_FILE_PATH: /tmp/build_debug_summary.log 
 
   BUILD_STATE_DIR_NAME: .github_actions_build_state
   CCACHE_DIR_NAME: .ccache
@@ -44,7 +44,7 @@ jobs:
   build_in_docker:
     runs-on: ubuntu-22.04
     name: Build OpenWrt in Docker with S3 Env Cache
-    env: # Job specific env
+    env: 
       RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env
       CONTAINER_BUILD_AREA: /build_area
     steps:
@@ -129,7 +129,9 @@ jobs:
             mkdir -p "$RUNNER_WORKSPACE_PATH_ENV"
           fi
           df -h | tee -a "$DEBUG_LOG_FILE"
-
+      
+      # YAML Linter anvisning: Alle linjer i 'run:' blokken nedenfor MÅ ha nøyaktig samme innrykk (f.eks. 10 mellomrom hvis '- name:' starter på 6).
+      # INGEN TAB-tegn, kun mellomrom.
       - name: 运行Docker容器并执行编译 (Run Docker Container & Compile)
         id: compile_in_docker
         run: |
