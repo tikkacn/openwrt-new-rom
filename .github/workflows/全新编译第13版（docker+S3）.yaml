@@ -299,7 +299,7 @@ jobs: # 2 空格缩进
           fi
 
           echo "[DOCKER] Build script finished."
-DOCKER_SCRIPT_EOF
+          DOCKER_SCRIPT_EOF
           # ^^^^ The above DOCKER_SCRIPT_EOF MUST have the same leading whitespace as the `cat << ...` line (e.g., 12 spaces from file start if run: is at 10).
           # AND no characters after DOCKER_SCRIPT_EOF on this line.
 
