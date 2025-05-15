@@ -1,3 +1,4 @@
+# YAML文件顶部，无前导空格
 name: 全新编译第13版(Docker-S3FullEnvCache)
 
 on:
@@ -16,7 +17,7 @@ on:
         required: false
         default: '增量缓存优化.config'
 
-env:
+env: # 2 空格缩进 (相对于上一级，但这里是顶级env)
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF_URL: https://github.com/tikkacn/openwrt-new-rom/raw/main/feeds.conf.default
@@ -40,22 +41,22 @@ env:
   BUILD_STATE_DIR_NAME: .github_actions_build_state
   CCACHE_DIR_NAME: .ccache
 
-jobs:
-  build_in_docker:
-    runs-on: ubuntu-22.04
-    name: Build OpenWrt in Docker with S3 Env Cache
-    env:
-      RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env
-      CONTAINER_BUILD_AREA: /build_area
-    steps:
-      - name: 检出仓库代码 (Checkout Repository Code)
-        uses: actions/checkout@v4
-        with:
-          path: ${{ env.RUNNER_CHECKOUT_SUBDIR }}
+jobs: # 2 空格缩进
+  build_in_docker: # 4 空格缩进
+    runs-on: ubuntu-22.04 # 6 空格缩进
+    name: Build OpenWrt in Docker with S3 Env Cache # 6 空格缩进
+    env: # 6 空格缩进
+      RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env # 8 空格缩进
+      CONTAINER_BUILD_AREA: /build_area # 8 空格缩进
+    steps: # 6 空格缩进
+      - name: 检出仓库代码 (Checkout Repository Code) # 8 空格缩进 (注意'-'本身是列表项的一部分)
+        uses: actions/checkout@v4 # 10 空格缩进
+        with: # 10 空格缩进
+          path: ${{ env.RUNNER_CHECKOUT_SUBDIR }} # 12 空格缩进
 
-      - name: 设置 S3 缓存的完整路径前缀 (Set Full S3 Cache Path Prefix)
-        id: set_s3_vars
-        run: |
+      - name: 设置 S3 缓存的完整路径前缀 (Set Full S3 Cache Path Prefix) # 8 空格缩进
+        id: set_s3_vars # 10 空格缩进
+        run: | # 10 空格缩进, 后续脚本行从12空格开始
           s3_prefix_from_secret="${{ secrets.S3_CACHE_PATH_PREFIX }}"
           repo_branch_for_path="${{ env.REPO_BRANCH }}"
           repo_branch_for_path_sanitized=$(echo "$repo_branch_for_path" | sed 's/\//-/g')
@@ -73,10 +74,10 @@ jobs:
           echo "s3_prefix_out=${final_s3_prefix}" >> $GITHUB_OUTPUT
           echo "DEBUG_LOG_ON_RUNNER=${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/build_debug_summary_runner.log" >> $GITHUB_ENV
 
-      - name: 优化Runner磁盘空间 (Maximize Runner Build Space)
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 10240
+      - name: 优化Runner磁盘空间 (Maximize Runner Build Space) # 8 空格缩进
+        uses: easimon/maximize-build-space@master # 10 空格缩进
+        with: # 10 空格缩进
+          root-reserve-mb: 10240 # 12 空格缩进
           swap-size-mb: 2048
           remove-dotnet: 'true'
           remove-android: 'true'
@@ -85,21 +86,21 @@ jobs:
           remove-docker-images: 'false'
           build-mount-path: '/workdir'
 
-      - name: 配置 AWS 凭证 (Configure AWS Credentials)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      - name: 配置 AWS 凭证 (Configure AWS Credentials) # 8 空格缩进
+        uses: aws-actions/configure-aws-credentials@v4 # 10 空格缩进
+        with: # 10 空格缩进
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }} # 12 空格缩进
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: 下载并恢复S3构建环境缓存 (Download & Restore S3 Build Env Cache)
-        if: inputs.clean_build != 'true'
-        env:
-          S3_BUCKET_NAME_SECRET: ${{ secrets.AWS_S3_BUCKET_NAME }}
+      - name: 下载并恢复S3构建环境缓存 (Download & Restore S3 Build Env Cache) # 8 空格缩进
+        if: inputs.clean_build != 'true' # 10 空格缩进
+        env: # 10 空格缩进
+          S3_BUCKET_NAME_SECRET: ${{ secrets.AWS_S3_BUCKET_NAME }} # 12 空格缩进
           S3_ARCHIVE_NAME_ENV: ${{ env.S3_WORKSPACE_ARCHIVE_FILENAME }}
           RUNNER_WORKSPACE_PATH_ENV: ${{ env.RUNNER_OPENWRT_WORKSPACE }}
           DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }}
-        run: |
+        run: | # 10 空格缩进, 后续脚本行从12空格开始
           echo "S3_EFFECTIVE_PATH_PREFIX in download step: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}" | tee -a "$DEBUG_LOG_FILE"
           if [ -z "$S3_BUCKET_NAME_SECRET" ]; then
             echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。跳过S3缓存恢复。" | tee -a "$DEBUG_LOG_FILE"
@@ -131,11 +132,11 @@ jobs:
           df -h | tee -a "$DEBUG_LOG_FILE"
       
       # 关键步骤：确保下面的 'run: |' 块内所有行（包括 DOCKER_SCRIPT_EOF 和 docker run 的每一行）
-      # 都精确地从第10个空格开始（假设此 '- name:' 行的 '-' 在第6个空格）。
+      # 都精确地从第12个空格开始。
       # 不要有任何 Tab 字符，全部使用空格。
-      - name: 运行Docker容器并执行编译 (Run Docker Container & Compile)
-        id: compile_in_docker
-        run: |
+      - name: 运行Docker容器并执行编译 (Run Docker Container & Compile) # 8 空格缩进
+        id: compile_in_docker # 10 空格缩进
+        run: | # 10 空格缩进, 后续脚本行从12空格开始
           cat << 'DOCKER_SCRIPT_EOF' > /tmp/docker_build_script.sh
           #!/bin/bash
           set -eo pipefail
@@ -299,6 +300,9 @@ jobs:
 
           echo "[DOCKER] Build script finished."
 DOCKER_SCRIPT_EOF
+          # ^^^^ The above DOCKER_SCRIPT_EOF MUST have the same leading whitespace as the `cat << ...` line (e.g., 12 spaces from file start if run: is at 10).
+          # AND no characters after DOCKER_SCRIPT_EOF on this line.
+
           chmod +x /tmp/docker_build_script.sh
 
           docker run --rm \
@@ -338,15 +342,15 @@ DOCKER_SCRIPT_EOF
           fi
           rm -f /tmp/docker_build_script.sh
 
-      - name: 打包并上传S3构建环境缓存 (Pack & Upload S3 Build Environment Cache)
-        if: steps.compile_in_docker.outputs.status == 'success' && !cancelled()
-        env:
-          S3_BUCKET_NAME_SECRET: ${{ secrets.AWS_S3_BUCKET_NAME }}
+      - name: 打包并上传S3构建环境缓存 (Pack & Upload S3 Build Environment Cache) # 8 空格缩进
+        if: steps.compile_in_docker.outputs.status == 'success' && !cancelled() # 10 空格缩进
+        env: # 10 空格缩进
+          S3_BUCKET_NAME_SECRET: ${{ secrets.AWS_S3_BUCKET_NAME }} # 12 空格缩进
           S3_ARCHIVE_NAME_ENV: ${{ env.S3_WORKSPACE_ARCHIVE_FILENAME }}
           RUNNER_WORKSPACE_PATH_ENV: ${{ env.RUNNER_OPENWRT_WORKSPACE }}
           S3_CONFIG_SNAPSHOT_FILENAME_ENV: ${{ env.S3_CONFIG_SNAPSHOT_FILENAME }}
           DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }}
-        run: |
+        run: | # 10 空格缩进, 后续脚本行从12空格开始
           echo "S3_EFFECTIVE_PATH_PREFIX in upload step: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}" | tee -a "$DEBUG_LOG_FILE"
           if [ -z "$S3_BUCKET_NAME_SECRET" ]; then
             echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。无法上传缓存到S3。" | tee -a "$DEBUG_LOG_FILE"
@@ -384,36 +388,14 @@ DOCKER_SCRIPT_EOF
             fi
           else
             echo "警告：${CONFIG_FILE_IN_WORKSPACE} 文件未找到，无法上传到S3。" | tee -a "$DEBUG_LOG_FILE"
-          fi://${S3_BUCKET_NAME_SECRET}/${S3_OBJECT_KEY} ..." | tee -a "$DEBUG_LOG_FILE"
-            if aws s3 cp "/tmp/${S3_ARCHIVE_NAME_ENV}" "s3://${S3_BUCKET_NAME_SECRET}/${S3_OBJECT_KEY}" --quiet; then
-              echo "上传 /tmp/${S3_ARCHIVE_NAME_ENV} 到 S3 成功。" | tee -a "$DEBUG_LOG_FILE"
-            else
-              echo "错误：上传 /tmp/${S3_ARCHIVE_NAME_ENV} 到 S3 失败。" | tee -a "$DEBUG_LOG_FILE"
-            fi
-            rm -f "/tmp/${S3_ARCHIVE_NAME_ENV}"
-          else
-            echo "错误：打包压缩 ${RUNNER_WORKSPACE_PATH_ENV} 失败。" | tee -a "$DEBUG_LOG_FILE"
           fi
 
-          CONFIG_FILE_IN_WORKSPACE="${RUNNER_WORKSPACE_PATH_ENV}/.config"
-          if [ -f "$CONFIG_FILE_IN_WORKSPACE" ]; then
-            echo "上传 .config 文件 (${CONFIG_FILE_IN_WORKSPACE}) 到 S3..." | tee -a "$DEBUG_LOG_FILE"
-            S3_CONFIG_OBJECT_KEY="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${S3_CONFIG_SNAPSHOT_FILENAME_ENV}"
-            if aws s3 cp "$CONFIG_FILE_IN_WORKSPACE" "s3://${S3_BUCKET_NAME_SECRET}/${S3_CONFIG_OBJECT_KEY}" --quiet; then
-              echo ".config 文件成功上传到 s3://${S3_BUCKET_NAME_SECRET}/${S3_CONFIG_OBJECT_KEY}" | tee -a "$DEBUG_LOG_FILE"
-            else
-              echo "错误：上传 .config 文件到 S3 失败。" | tee -a "$DEBUG_LOG_FILE"
-            fi
-          else
-            echo "警告：${CONFIG_FILE_IN_WORKSPACE} 文件未找到，无法上传到S3。" | tee -a "$DEBUG_LOG_FILE"
-          fi
-
-      - name: Upload Debug Logs (from Runner and potentially Docker)
-        if: always()
-        uses: actions/upload-artifact@main
-        with:
-          name: build-debug-logs-${{ github.run_id }}
-          path: |
+      - name: Upload Debug Logs (from Runner and potentially Docker) # 8 空格缩进
+        if: always() # 10 空格缩进
+        uses: actions/upload-artifact@main # 10 空格缩进
+        with: # 10 空格缩进
+          name: build-debug-logs-${{ github.run_id }} # 12 空格缩进
+          path: | # 12 空格缩进, 后续路径从14空格开始
             ${{ env.DEBUG_LOG_ON_RUNNER }}
             ${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_build_debug_summary.log
             ${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log
@@ -422,13 +404,13 @@ DOCKER_SCRIPT_EOF
             ${{ env.RUNNER_OPENWRT_WORKSPACE }}/.config
             ${{ env.RUNNER_OPENWRT_WORKSPACE }}/.config.input
             ${{ env.RUNNER_OPENWRT_WORKSPACE }}/logs/
-          if-no-files-found: ignore
-          retention-days: 7
+          if-no-files-found: ignore # 12 空格缩进
+          retention-days: 7 # 12 空格缩进
 
-      - name: 整理文件 (Organize Firmware Files)
-        id: organize
-        if: steps.compile_in_docker.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-        run: |
+      - name: 整理文件 (Organize Firmware Files) # 8 空格缩进
+        id: organize # 10 空格缩进
+        if: steps.compile_in_docker.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled() # 10 空格缩进
+        run: | # 10 空格缩进, 后续脚本行从12空格开始
           echo "开始整理固件文件 from ${{ env.RUNNER_OPENWRT_WORKSPACE }}/bin ..." | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
           FIRMWARE_COLLECTION_DIR_PATH=""
           OPENWRT_BUILD_ROOT="${{ env.RUNNER_OPENWRT_WORKSPACE }}"
@@ -464,7 +446,7 @@ DOCKER_SCRIPT_EOF
               cd "${CURRENT_IMG_SOURCE_DIR}"
               
               for pattern in "*combined.img.gz" "*sysupgrade.img.gz" "*combined-efi.img.gz" "*kernel.bin" "*.img" "*.bin"; do
-                  find . -maxdepth 1 -type f -name "$pattern" ! -path "./packages/*" -print0 | while IFS= read -r -d \0' found_file; do
+                  find . -maxdepth 1 -type f -name "$pattern" ! -path "./packages/*" -print0 | while IFS= read -r -d $'\0' found_file; do
                       cp -v -f "${found_file}" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/"
                       FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1))
                   done
@@ -475,7 +457,7 @@ DOCKER_SCRIPT_EOF
                   find . -maxdepth 1 -type f \
                     ! -name "*.manifest" ! -name "*.txt" ! -name "*.json" ! -name "*.buildinfo" ! -name "sha256sums" \
                     ! -path "./packages/*" \
-                    -print0 | while IFS= read -r -d \0' found_file; do
+                    -print0 | while IFS= read -r -d $'\0' found_file; do
                       cp -v -f "${found_file}" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/"
                       FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1))
                   done
@@ -531,18 +513,18 @@ DOCKER_SCRIPT_EOF
               echo "FIRMWARE_ZIP=/tmp/no_firmware_to_zip_$(date +%N).zip" >> $GITHUB_ENV
           fi
 
-      - name: 上传固件 (Artifact)
-        uses: actions/upload-artifact@main
-        if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-        with:
-          name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+      - name: 上传固件 (Artifact) # 8 空格缩进
+        uses: actions/upload-artifact@main # 10 空格缩进
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled() # 10 空格缩进
+        with: # 10 空格缩进
+          name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }} # 12 空格缩进
           path: ${{ env.FIRMWARE_ZIP }}
           if-no-files-found: warn
 
-      - name: 生成发布标签 (Generate Release Tag)
-        id: tag
-        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
-        run: |
+      - name: 生成发布标签 (Generate Release Tag) # 8 空格缩进
+        id: tag # 10 空格缩进
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled() # 10 空格缩进
+        run: | # 10 空格缩进, 后续脚本行从12空格开始
           RELEASE_TAG_BASE=$(date +"%Y.%m.%d-%H%M")
           DEVICE_TAG_PART=$(echo "${{ env.DEVICE_NAME }}" | sed 's/^_//;s/_$//' | sed 's/[^a-zA-Z0-9._-]/-/g' )
           if [ -n "$DEVICE_TAG_PART" ] && [ "$DEVICE_TAG_PART" != "-" ]; then FINAL_RELEASE_TAG="${RELEASE_TAG_BASE}_${DEVICE_TAG_PART}"; else FINAL_RELEASE_TAG="${RELEASE_TAG_BASE}"; fi
@@ -563,21 +545,21 @@ DOCKER_SCRIPT_EOF
           echo "_Built by GitHub Actions - Workflow: [${{ github.workflow }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})_" >> release_body.txt
           echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: 上传固件到Releases (Upload Firmware to Releases)
-        uses: softprops/action-gh-release@v2
-        if: steps.tag.outputs.status == 'success' && !cancelled()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
+      - name: 上传固件到Releases (Upload Firmware to Releases) # 8 空格缩进
+        uses: softprops/action-gh-release@v2 # 10 空格缩进
+        if: steps.tag.outputs.status == 'success' && !cancelled() # 10 空格缩进
+        env: # 10 空格缩进
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 12 空格缩进
+        with: # 10 空格缩进
+          tag_name: ${{ steps.tag.outputs.RELEASE_TAG }} # 12 空格缩进
           body_path: release_body.txt
           files: ${{ env.FIRMWARE_ZIP }}
 
-      - name: 删除旧的Releases (Delete Old Releases)
-        uses: dev-drprasad/delete-older-releases@master
-        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-        with:
-          keep_latest: 3
+      - name: 删除旧的Releases (Delete Old Releases) # 8 空格缩进
+        uses: dev-drprasad/delete-older-releases@master # 10 空格缩进
+        if: env.UPLOAD_RELEASE == 'true' && !cancelled() # 10 空格缩进
+        with: # 10 空格缩进
+          keep_latest: 3 # 12 空格缩进
           delete_tags: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        env: # 10 空格缩进
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 12 空格缩进
