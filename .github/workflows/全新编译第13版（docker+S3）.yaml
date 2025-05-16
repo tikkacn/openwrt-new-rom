@@ -82,7 +82,7 @@ jobs:
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
-          remove-docker-images: 'false'
+          remove-docker-images: 'false' # Docker镜像是需要的
           build-mount-path: '/workdir'
 
       - name: 配置 AWS 凭证 (Configure AWS Credentials)
@@ -126,8 +126,8 @@ jobs:
             rm -f "${LOCAL_ARCHIVE_ON_RUNNER}"
           else
             echo "从 S3 下载 ${S3_ARCHIVE_NAME_ENV} 失败或文件不存在。将进行全新构建。" | tee -a "$DEBUG_LOG_FILE"
-            mkdir -p "$RUNNER_WORKSPACE_PATH_ENV"
-            rm -rf "${RUNNER_WORKSPACE_PATH_ENV:?}"/* "${RUNNER_WORKSPACE_PATH_ENV:?}"/.[!.]* "${RUNNER_WORKSPACE_PATH_ENV:?}"/..?* 2>/dev/null || true
+            mkdir -p "$RUNNER_WORKSPACE_PATH_ENV" # 确保目录存在
+            rm -rf "${RUNNER_WORKSPACE_PATH_ENV:?}"/* "${RUNNER_WORKSPACE_PATH_ENV:?}"/.[!.]* "${RUNNER_WORKSPACE_PATH_ENV:?}"/..?* 2>/dev/null || true # 确保是空目录
           fi
           df -h | tee -a "$DEBUG_LOG_FILE"
       
@@ -142,7 +142,7 @@ jobs:
           #!/bin/bash
           set -eo pipefail
           export FORCE_UNSAFE_CONFIGURE=1 
-          export GOFLAGS="-buildvcs=false" # 全局禁用Go的VCS检查
+          export GOFLAGS="-buildvcs=false" 
 
           INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
           mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")" 
@@ -168,12 +168,19 @@ jobs:
           cd "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
           echo "[DOCKER] Current directory: $(pwd)" | tee -a "${INTERNAL_DEBUG_LOG}"
 
+          # 检查 OpenWrt 源码树是否存在，如果不存在则克隆
           if [ ! -d ".git" ] && [ ! -f "Makefile" ]; then
             echo "[DOCKER] Looks like a fresh setup. Checking if current directory '.' is truly empty before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            # 确保克隆目标目录是空的，这对于 `git clone .` 很重要
             if [ "$(ls -A . | wc -l)" -gt 0 ]; then
-              echo "[DOCKER_ERROR] Current directory '.' is not empty but OpenWrt source markers (.git/Makefile) not found. Aborting clone." | tee -a "${INTERNAL_DEBUG_LOG}"
-              echo "[DOCKER_INFO] Contents of '.': $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
-              exit 1 
+              echo "[DOCKER_WARN] Current directory '.' is not empty but OpenWrt source markers (.git/Makefile) not found. Cleaning directory before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
+              echo "[DOCKER_INFO] Contents of '.' before cleaning: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
+              # 清理目录内容，小心操作
+              find . -mindepth 1 -delete # 删除所有文件和子目录，但不删除 "." 本身
+              if [ "$(ls -A . | wc -l)" -gt 0 ]; then # 再次检查
+                 echo "[DOCKER_ERROR] Failed to clean directory '.'. Aborting." | tee -a "${INTERNAL_DEBUG_LOG}"
+                 exit 1
+              fi
             fi
             echo "[DOCKER] Cloning OpenWrt into '.' ..." | tee -a "${INTERNAL_DEBUG_LOG}"
             git clone --depth 1 "${DOCKER_ENV_REPO_URL}" -b "${DOCKER_ENV_REPO_BRANCH}" .
@@ -181,8 +188,18 @@ jobs:
               echo "[DOCKER_ERROR] git clone failed!" | tee -a "${INTERNAL_DEBUG_LOG}"
               exit 1
             fi
+            # 关键改动：克隆后移除 .git 目录，模拟非 Docker 成功工作流的环境
+            echo "[DOCKER_INFO] Removing .git directory after clone to mimic non-Docker success case..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            rm -rf .git
           else
             echo "[DOCKER] Found existing OpenWrt tree (likely from S3 cache)." | tee -a "${INTERNAL_DEBUG_LOG}"
+            # 如果是从 S3 恢复的，也考虑移除 .git (如果存在且可能导致问题)
+            # 不过，S3 缓存的初衷是加速，移除 .git 可能导致无法有效利用 git 进行增量更新（如果后续有此逻辑）
+            # 但为了解决 mosdns 问题，可以尝试移除：
+            if [ -d ".git" ]; then
+              echo "[DOCKER_INFO] Removing .git directory from S3 restored cache to mimic non-Docker success case..." | tee -a "${INTERNAL_DEBUG_LOG}"
+              rm -rf .git
+            fi
           fi
           
           INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL="${DOCKER_ENV_BUILD_STATE_DIR_NAME:-.github_actions_build_state}"
@@ -244,10 +261,7 @@ jobs:
           DO_PACKAGE_BUILD_DOCKER=0
 
           echo "[DOCKER] --- Build Decision Variables ---" | tee -a "${INTERNAL_DEBUG_LOG}"
-          echo "[DOCKER] Input clean_build (from outside): ${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" | tee -a "${INTERNAL_DEBUG_LOG}"
-          echo "[DOCKER] S3 Cache Restored (from outside): ${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" | tee -a "${INTERNAL_DEBUG_LOG}"
-          echo "[DOCKER] Feeds changed (from outside): ${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" | tee -a "${INTERNAL_DEBUG_LOG}"
-
+          # ... (rest of build decision logic remains same) ...
           if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ] || [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ] ; then
             echo "[DOCKER] clean_build is true OR S3 cache not restored: DO_FULL_BUILD_DOCKER=1" | tee -a "${INTERNAL_DEBUG_LOG}"
             DO_FULL_BUILD_DOCKER=1
@@ -262,14 +276,12 @@ jobs:
             DO_PACKAGE_BUILD_DOCKER=1
           fi
           echo "[DOCKER] Final Build Strategy -> DO_FULL_BUILD_DOCKER: $DO_FULL_BUILD_DOCKER, DO_PACKAGE_BUILD_DOCKER: $DO_PACKAGE_BUILD_DOCKER" | tee -a "${INTERNAL_DEBUG_LOG}"
-          
-          # 定义 make 命令选项，并确保 GOFLAGS 生效
+
           MAKE_JOBS_NPROC=$(nproc)
-          MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false" # 确保此环境变量传递给make执行的go命令
+          MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false"
           MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
           MAKE_OPTS_FALLBACK="-j1 V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
           MAKE_OPTS_SINGLE_JOB="-j1 ${MAKE_OPTS_COMMON_GOFLAGS}"
-
 
           COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_$(date +%Y%m%d_%H%M%S).log"
           echo "[DOCKER] Detailed compile log will be in: ${PWD}/${COMPILE_OUTPUT_LOG_DOCKER}" | tee -a "${INTERNAL_DEBUG_LOG}"
@@ -295,6 +307,7 @@ jobs:
           make target/install ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"
           final_install_status_docker=$?
 
+          # ... (rest of the script: stamp finalization, MD5 saving, ccache stats, success/failure markers, log copying) ...
           echo "[DOCKER] Attempting to finalize core component stamps..." | tee -a "${INTERNAL_DEBUG_LOG}"
           make prepare ${MAKE_OPTS_MAIN} || make prepare ${MAKE_OPTS_FALLBACK} || echo "[DOCKER_WARN] 'make prepare' had issues." | tee -a "${INTERNAL_DEBUG_LOG}"
           make tools/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make tools/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m || echo "[DOCKER_WARN] 'make tools/install' had issues." | tee -a "${INTERNAL_DEBUG_LOG}"
@@ -323,7 +336,6 @@ jobs:
           if [ -f "${COMPILE_OUTPUT_LOG_DOCKER}" ]; then
             cp "${COMPILE_OUTPUT_LOG_DOCKER}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_compile_output.log" || true
           fi
-
           echo "[DOCKER] Build script finished." | tee -a "${INTERNAL_DEBUG_LOG}"
           DOCKER_SCRIPT_EOF
           chmod +x "${RUNNER_SCRIPT_PATH}"
@@ -347,6 +359,7 @@ jobs:
             -e DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE="${{ env.S3_CACHE_RESTORED || 'false' }}" \
             -e DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE="${{ env.feeds_changed || 'true' }}" \
             -e DOCKER_ENV_BUILD_TZ="${{ env.TZ }}" \
+            -e GOFLAGS="-buildvcs=false" \ # Pass GOFLAGS directly to docker run
             ${{ env.DOCKER_IMAGE }} \
             bash -c "cd \"${DOCKER_ENV_CONTAINER_BUILD_AREA}\" && \"${CONTAINER_SCRIPT_PATH}\""
           
@@ -365,6 +378,7 @@ jobs:
           fi
           rm -f "${RUNNER_SCRIPT_PATH}"
 
+      # ... (rest of the YAML: S3 upload, artifact upload, release steps remain the same) ...
       - name: 打包并上传S3构建环境缓存 (Pack & Upload S3 Build Environment Cache)
         if: steps.compile_in_docker.outputs.status == 'success' && !cancelled()
         env:
