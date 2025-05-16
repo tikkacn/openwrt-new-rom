@@ -1,4 +1,4 @@
-name: 全新编译第14版(Docker-S全缓存)
+name: 全新编译第13版(Docker-S3FullEnvCache)
 
 on:
   workflow_dispatch:
@@ -31,22 +31,19 @@ env:
   CONTAINER_REPO_CONFIG_MOUNT: /repo_config 
   DOCKER_IMAGE: ubuntu:22.04
 
-  # S3 缓存相关文件名 - 这些将作为分块归档的“基本名”
   S3_DL_DIR_ARCHIVE_BASENAME: openwrt_dl_cache.tar.zst
   S3_STAGING_DIR_ARCHIVE_BASENAME: openwrt_staging_dir_cache.tar.zst
   S3_BUILD_DIR_HOST_ARCHIVE_BASENAME: openwrt_build_dir_host_cache.tar.zst
   S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME: openwrt_build_dir_toolchain_cache.tar.zst
-  S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME: openwrt_build_dir_target.tar.zst # <--- 新增：目标编译产物缓存
+  S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME: openwrt_build_dir_target.tar.zst
   S3_FEEDS_CACHE_ARCHIVE_BASENAME: openwrt_feeds_cache.tar.zst
   S3_CCACHE_ARCHIVE_BASENAME: openwrt_ccache.tar.zst
   S3_BUILD_STATE_ARCHIVE_BASENAME: openwrt_build_state.tar.zst
   S3_DOT_CONFIG_FILENAME: dot_config_snapshot
 
-  # Docker 内部路径 (这些路径是相对于 /build_area，即 RUNNER_OPENWRT_WORKSPACE)
   CONTAINER_DL_DIR_RELPATH: "dl"
   CONTAINER_STAGING_DIR_RELPATH: "staging_dir"
   CONTAINER_BUILD_DIR_HOST_RELPATH: "build_dir/host"
-  # CONTAINER_BUILD_DIR_TARGET_RELPATH: "build_dir/target-*" # 这个会在脚本中动态确定
   CONTAINER_FEEDS_DIR_RELPATH: "feeds"
   CONTAINER_CCACHE_DIR_RELPATH: ".ccache"
   CONTAINER_BUILD_STATE_DIR_RELPATH: ".github_actions_build_state"
@@ -78,7 +75,7 @@ jobs:
           if [ -n "$s3_prefix_from_secret" ]; then
             final_s3_prefix="$s3_prefix_from_secret"
           else
-            default_prefix="openwrt-s3chunks-v3/${repo_branch_for_path_sanitized}" # 更新路径以区分包含target的缓存
+            default_prefix="openwrt-s3chunks-v3/${repo_branch_for_path_sanitized}" 
             final_s3_prefix="$default_prefix"
           fi
           echo "S3_EFFECTIVE_PATH_PREFIX=${final_s3_prefix}" >> $GITHUB_ENV
@@ -88,7 +85,7 @@ jobs:
       - name: 优化Runner磁盘空间 (Maximize Runner Build Space)
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 20480 # 为可能更大的单个分块（如target build dir）预留更多空间
+          root-reserve-mb: 20480 
           swap-size-mb: 4096
           remove-dotnet: 'true'
           remove-android: 'true'
@@ -105,22 +102,33 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: 下载并恢复S3各部分缓存 (Download & Restore S3 Chunked Caches)
-        if: inputs.clean_build != 'true'
+        # 如果是 clean_build，则跳过此步骤，但确保工作区目录是干净的
+        # 如果不是 clean_build，则执行下载和恢复
+        id: s3_restore_cache # 给这一步一个id，方便后续引用其outputs（如果需要的话）
         env:
           S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
           DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }} 
         run: |
-          echo "S3_EFFECTIVE_PATH_PREFIX in download step: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}" | tee -a "$DEBUG_LOG_FILE"
-          if [ -z "$S3_BUCKET_NAME" ]; then
-            echo "[WARN] AWS_S3_BUCKET_NAME secret 未设置。跳过S3缓存恢复。" | tee -a "$DEBUG_LOG_FILE"
-            mkdir -p "$RUNNER_OPENWRT_WORKSPACE" 
-            rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/.[!.]* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/..?* 2>/dev/null || true
-            exit 0
+          # 确保OpenWrt工作区根目录存在
+          mkdir -p "$RUNNER_OPENWRT_WORKSPACE"
+          echo "Cleaning workspace $RUNNER_OPENWRT_WORKSPACE before any operation..." | tee -a "$DEBUG_LOG_FILE"
+          rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/* \
+                 "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/.[!.]* \
+                 "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/..?* 2>/dev/null || true
+          echo "S3_CACHE_RESTORED=false" > $GITHUB_WORKSPACE/s3_cache_status.txt # 默认未恢复
+
+          if [ "${{ inputs.clean_build }}" = "true" ]; then
+            echo "[INFO] clean_build is true. Skipping S3 cache restore. Workspace is clean." | tee -a "$DEBUG_LOG_FILE"
+            df -h | tee -a "$DEBUG_LOG_FILE"
+            exit 0 # 正常退出，以便后续步骤可以进行全新构建
           fi
 
-          mkdir -p "$RUNNER_OPENWRT_WORKSPACE"
-          echo "Cleaning workspace $RUNNER_OPENWRT_WORKSPACE before restoring S3 cache chunks..." | tee -a "$DEBUG_LOG_FILE"
-          rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/.[!.]* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/..?* 2>/dev/null || true
+          echo "S3_EFFECTIVE_PATH_PREFIX in download step: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}" | tee -a "$DEBUG_LOG_FILE"
+          if [ -z "$S3_BUCKET_NAME" ]; then
+            echo "[WARN] AWS_S3_BUCKET_NAME secret 未设置。跳过S3缓存恢复，将进行全新构建。" | tee -a "$DEBUG_LOG_FILE"
+            # 即使secret未设置，也确保目录是干净的，因为非clean_build意味着我们期望有缓存
+            exit 0 # 允许继续进行全新构建
+          fi
           
           s3_download_and_extract_parts() {
             local archive_s3_basename="$1" 
@@ -131,6 +139,7 @@ jobs:
             local manifest_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}.manifest"
             local local_manifest_file="${chunk_restore_tmp_dir}/${archive_s3_basename}.manifest"
             
+            local overall_restore_success_for_part=false
             echo "Attempting to download manifest: s3://${S3_BUCKET_NAME}/${manifest_s3_key}" | tee -a "$DEBUG_LOG_FILE"
             if aws s3 cp "s3://${S3_BUCKET_NAME}/${manifest_s3_key}" "${local_manifest_file}" --no-progress --quiet; then
               echo "Manifest ${archive_s3_basename}.manifest downloaded. Processing chunked restore." | tee -a "$DEBUG_LOG_FILE"
@@ -150,7 +159,7 @@ jobs:
                 echo "All chunks for ${archive_s3_basename} downloaded. Combining and extracting to ${target_extract_path}..." | tee -a "$DEBUG_LOG_FILE"
                 paths_to_cat=""; for chunk_path_item in "${downloaded_chunk_paths_ordered[@]}"; do paths_to_cat="${paths_to_cat} ${chunk_path_item}"; done
                 if [ -n "$paths_to_cat" ]; then
-                  if cat $paths_to_cat | zstd -d -T0 - | tar -xf - -C "${target_extract_path}"; then echo "Restored ${archive_s3_basename} from chunks." | tee -a "$DEBUG_LOG_FILE"; else echo "ERROR: Failed to extract chunks for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; fi
+                  if cat $paths_to_cat | zstd -d -T0 - | tar -xf - -C "${target_extract_path}"; then echo "Restored ${archive_s3_basename} from chunks." | tee -a "$DEBUG_LOG_FILE"; overall_restore_success_for_part=true; else echo "ERROR: Failed to extract chunks for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; fi
                 else echo "No chunk files to cat for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; fi
               else echo "Not all chunks for ${archive_s3_basename} downloaded or no chunks listed. Skipping." | tee -a "$DEBUG_LOG_FILE"; fi
             else
@@ -158,33 +167,74 @@ jobs:
               local single_archive_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}"
               local single_local_archive="${chunk_restore_tmp_dir}/${archive_s3_basename}"
               if aws s3 cp "s3://${S3_BUCKET_NAME}/${single_archive_s3_key}" "${single_local_archive}" --no-progress --quiet; then
-                if tar -I "zstd -T0" -xf "${single_local_archive}" -C "${target_extract_path}"; then echo "Extracted single ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; else echo "ERROR: Failed to extract single ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; fi
+                if tar -I "zstd -T0" -xf "${single_local_archive}" -C "${target_extract_path}"; then echo "Extracted single ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; overall_restore_success_for_part=true; else echo "ERROR: Failed to extract single ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; fi
               else echo "Single file ${archive_s3_basename} also not found. No cache for this part." | tee -a "$DEBUG_LOG_FILE"; fi
             fi
             rm -rf "${chunk_restore_tmp_dir}"
+            if [ "$overall_restore_success_for_part" = true ]; then return 0; else return 1; fi
           }
+          
+          # Attempt to restore main components. If any crucial one fails, we might consider it a failed restore.
+          # For simplicity, we'll just try to restore all and set a general flag.
+          # A more robust check would be if specific critical parts like staging_dir were restored.
+          RESTORE_SUCCESS_COUNT=0
+          RESTORE_ATTEMPT_COUNT=0
 
-          s3_download_and_extract_parts "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE" # <--- 新增恢复
-          s3_download_and_extract_parts "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
+          s3_download_and_extract_parts "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"; ((RESTORE_ATTEMPT_COUNT++)); if [ $? -eq 0 ]; then ((RESTORE_SUCCESS_COUNT++)); fi
+          s3_download_and_extract_parts "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"; ((RESTORE_ATTEMPT_COUNT++)); if [ $? -eq 0 ]; then ((RESTORE_SUCCESS_COUNT++)); fi
+          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"; ((RESTORE_ATTEMPT_COUNT++)); if [ $? -eq 0 ]; then ((RESTORE_SUCCESS_COUNT++)); fi
+          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"; ((RESTORE_ATTEMPT_COUNT++)); if [ $? -eq 0 ]; then ((RESTORE_SUCCESS_COUNT++)); fi
+          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"; ((RESTORE_ATTEMPT_COUNT++)); if [ $? -eq 0 ]; then ((RESTORE_SUCCESS_COUNT++)); fi
+          s3_download_and_extract_parts "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"; ((RESTORE_ATTEMPT_COUNT++)); if [ $? -eq 0 ]; then ((RESTORE_SUCCESS_COUNT++)); fi
+          s3_download_and_extract_parts "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"; ((RESTORE_ATTEMPT_COUNT++)); if [ $? -eq 0 ]; then ((RESTORE_SUCCESS_COUNT++)); fi
+          s3_download_and_extract_parts "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"; ((RESTORE_ATTEMPT_COUNT++)); if [ $? -eq 0 ]; then ((RESTORE_SUCCESS_COUNT++)); fi
           
           S3_DOT_CONFIG_KEY="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${{ env.S3_DOT_CONFIG_FILENAME }}"
           CONFIG_TARGET_PATH="$RUNNER_OPENWRT_WORKSPACE/.config"
-          if aws s3 cp "s3://${S3_BUCKET_NAME}/${S3_DOT_CONFIG_KEY}" "${CONFIG_TARGET_PATH}" --no-progress --quiet; then echo ".config downloaded." | tee -a "$DEBUG_LOG_FILE"; else echo ".config download failed." | tee -a "$DEBUG_LOG_FILE"; fi
-          echo "S3_CACHE_RESTORE_ATTEMPTED=true" >> $GITHUB_ENV
+          if aws s3 cp "s3://${S3_BUCKET_NAME}/${S3_DOT_CONFIG_KEY}" "${CONFIG_TARGET_PATH}" --no-progress --quiet; then 
+            echo ".config downloaded successfully." | tee -a "$DEBUG_LOG_FILE"
+            # Optionally count this as a success if .config is critical for cache state
+            # ((RESTORE_SUCCESS_COUNT++)); ((RESTORE_ATTEMPT_COUNT++)) # If counting .config restore
+          else 
+            echo "Failed to download .config from S3 or it does not exist." | tee -a "$DEBUG_LOG_FILE"; 
+          fi
+
+          # Check if critical caches (e.g., staging_dir, dl, target) were restored
+          # A simple check could be if a reasonable number of parts were successful
+          # For now, if at least a few major parts were successful, we'll mark it.
+          # A more robust check would be the existence of key files/directories.
+          if [ "$RESTORE_SUCCESS_COUNT" -gt 3 ]; then # Arbitrary threshold, adjust as needed
+             echo "S3_CACHE_RESTORED=true" > $GITHUB_WORKSPACE/s3_cache_status.txt
+             echo "S3_CACHE_RESTORE_ATTEMPTED=true" >> $GITHUB_ENV # For Docker script to know restore was effective
+             echo "S3_CACHE_RESTORED=true" >> $GITHUB_ENV # For Docker script to know restore was effective
+          else
+             echo "S3_CACHE_RESTORE_ATTEMPTED=true" >> $GITHUB_ENV # Still attempted
+             echo "S3_CACHE_RESTORED=false" >> $GITHUB_ENV # Mark as not effectively restored
+             echo "[WARN] Not enough S3 cache parts were successfully restored ($RESTORE_SUCCESS_COUNT/$RESTORE_ATTEMPT_COUNT). Build might be slow." | tee -a "$DEBUG_LOG_FILE"
+          fi
+
           df -h | tee -a "$DEBUG_LOG_FILE"
 
       - name: 运行Docker容器并执行编译 (Run Docker Container & Compile)
         id: compile_in_docker
+        env:
+          # Pass the S3 cache restored status to the Docker script
+          # We use a file because GITHUB_ENV set in a previous step might not be directly available
+          # in the same way as job-level or workflow-level env vars when expanding the heredoc.
+          # An alternative is to set an output in s3_restore_cache step and use steps.s3_restore_cache.outputs.*
+          S3_CACHE_STATUS_FILE: ${{ github.workspace }}/s3_cache_status.txt
         run: |
           RUNNER_SCRIPT_FILENAME="docker_build_script.sh"
           RUNNER_SCRIPT_PATH="${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/${RUNNER_SCRIPT_FILENAME}"
           CONTAINER_SCRIPT_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/${RUNNER_SCRIPT_FILENAME}"
+
+          # Read the S3_CACHE_RESTORED status from the file
+          S3_CACHE_RESTORED_EFFECTIVE="false" # Default
+          if [ -f "${S3_CACHE_STATUS_FILE}" ]; then
+            S3_CACHE_RESTORED_EFFECTIVE=$(cat "${S3_CACHE_STATUS_FILE}")
+          fi
+          echo "Effective S3_CACHE_RESTORED status for Docker script: $S3_CACHE_RESTORED_EFFECTIVE" | tee -a "${DEBUG_LOG_ON_RUNNER}"
+
 
           cat << 'DOCKER_SCRIPT_EOF' > "${RUNNER_SCRIPT_PATH}"
           #!/bin/bash
@@ -196,16 +246,8 @@ jobs:
           mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")" 
 
           echo "[DOCKER] Starting build script..." | tee -a "${INTERNAL_DEBUG_LOG}"
-          # ... (内部脚本与上一版本相同，主要是确保 make 命令和编译逻辑正确) ...
-          # (由于内部脚本非常长，此处省略，请使用您上一版本中已修正并能成功编译（除了S3上传打包）的内部脚本内容)
-          # 关键点：
-          # 1. 进入 /build_area
-          # 2. git clone (如果需要) + rm -rf .git
-          # 3. 创建 .ccache, .github_actions_build_state, logs 目录
-          # 4. feeds, defconfig, make ...
-          # 确保所有内部路径和环境变量引用 (${DOCKER_ENV_...}) 正确
-
-          # --- 完整 Docker 内部脚本从这里开始 (基于您之前成功编译的版本) ---
+          echo "[DOCKER] DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE: ${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" | tee -a "${INTERNAL_DEBUG_LOG}"
+          echo "[DOCKER] DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE: ${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" | tee -a "${INTERNAL_DEBUG_LOG}"
           echo "[DOCKER] Workspace (mounted at ${DOCKER_ENV_CONTAINER_BUILD_AREA}): $(ls -A ${DOCKER_ENV_CONTAINER_BUILD_AREA} | wc -l) items" | tee -a "${INTERNAL_DEBUG_LOG}"
           echo "[DOCKER] Repo Config (mounted at ${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}): $(ls -A ${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH} | wc -l) items" | tee -a "${INTERNAL_DEBUG_LOG}"
 
@@ -219,18 +261,35 @@ jobs:
           export TZ="${DOCKER_ENV_BUILD_TZ:-Asia/Shanghai}"
           ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && echo "$TZ" > /etc/timezone
           
-          mkdir -p "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
+          mkdir -p "${DOCKER_ENV_CONTAINER_BUILD_AREA}" # Should already exist and be populated if S3 restore worked
           cd "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
           echo "[DOCKER] Current directory: $(pwd)" | tee -a "${INTERNAL_DEBUG_LOG}"
 
-          if [ ! -d ".git" ] && [ ! -f "Makefile" ]; then # S3缓存未恢复或全新构建
-            echo "[DOCKER] Fresh setup or incomplete S3 cache. Checking if current directory '.' is empty before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
-            if [ "$(ls -A . | wc -l)" -gt 0 ]; then
-              echo "[DOCKER_WARN] Current directory '.' is not empty. Cleaning directory before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
-              echo "[DOCKER_INFO] Contents of '.' before cleaning: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
+          # --- 修正的源码准备逻辑 ---
+          # 如果不是 clean_build 并且 S3 缓存被标记为已恢复 (DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE = "true")
+          # 那么我们信任已恢复的内容，只需确保 .git 不存在。
+          # DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE 的值来自Runner脚本中读取文件的结果
+          if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" != "true" ] && [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" = "true" ]; then
+            echo "[DOCKER] Using OpenWrt tree restored from S3 cache." | tee -a "${INTERNAL_DEBUG_LOG}"
+            # 检查关键文件是否存在，以增加对S3缓存完整性的信心
+            if [ ! -f "Makefile" ] || [ ! -d "include" ] || [ ! -d "package" ] || [ ! -d "dl" ] || [ ! -d "staging_dir" ]; then
+              echo "[DOCKER_ERROR] S3 cache marked as restored, but key OpenWrt files/dirs are missing! This indicates an incomplete S3 cache. Proceeding cautiously, but build may fail or be slow." | tee -a "${INTERNAL_DEBUG_LOG}"
+              # 在这种情况下，理论上应该 fallback 到全新克隆，但那会删除已恢复的部分。
+              # 目前脚本的S3恢复逻辑是先清空再恢复，所以如果恢复了但文件不全，说明S3缓存包本身有问题。
+              # 保持现状，让后续 make 步骤暴露问题。
+            fi
+            if [ -d ".git" ]; then # 如果S3缓存中意外包含了.git目录，也移除它
+              echo "[INFO] Removing .git directory if it exists in restored cache..." | tee -a "${INTERNAL_DEBUG_LOG}"
+              rm -rf .git
+            fi
+          else
+            # 执行全新克隆逻辑 (包括清理目录, 因为 inputs.clean_build = true 或者 S3 缓存未成功恢复)
+            echo "[DOCKER] Performing fresh clone (Reason: clean_build='${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}' OR S3 cache not effectively restored='${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}')." | tee -a "${INTERNAL_DEBUG_LOG}"
+            if [ "$(ls -A . | wc -l)" -gt 0 ]; then # 再次检查，确保目录是空的
+              echo "[DOCKER_INFO] Cleaning directory '.' before fresh clone. Contents: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
               find . -mindepth 1 -delete 
               if [ "$(ls -A . | wc -l)" -gt 0 ]; then 
-                 echo "[DOCKER_ERROR] Failed to clean directory '.'. Aborting." | tee -a "${INTERNAL_DEBUG_LOG}"
+                 echo "[DOCKER_ERROR] Failed to clean directory '.' for fresh clone. Aborting." | tee -a "${INTERNAL_DEBUG_LOG}"
                  exit 1
               fi
             fi
@@ -238,12 +297,8 @@ jobs:
             git clone --depth 1 "${DOCKER_ENV_REPO_URL}" -b "${DOCKER_ENV_REPO_BRANCH}" .
             if [ $? -ne 0 ]; then echo "[DOCKER_ERROR] git clone failed!" | tee -a "${INTERNAL_DEBUG_LOG}"; exit 1; fi
             echo "[INFO] Removing .git directory after clone..." | tee -a "${INTERNAL_DEBUG_LOG}"; rm -rf .git
-          else # 从S3缓存恢复
-            echo "[DOCKER] Existing OpenWrt tree found (from S3 cache)." | tee -a "${INTERNAL_DEBUG_LOG}"
-            if [ -d ".git" ]; then # 如果S3缓存中意外包含了.git目录，也移除它
-              echo "[INFO] Removing .git from S3 restored cache..." | tee -a "${INTERNAL_DEBUG_LOG}"; rm -rf .git
-            fi
           fi
+          # --- 源码准备逻辑结束 ---
           
           INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL="${DOCKER_ENV_BUILD_STATE_DIR_NAME:-.github_actions_build_state}"
           INTERNAL_CCACHE_DIR_NAME_ACTUAL="${DOCKER_ENV_CCACHE_DIR_NAME:-.ccache}"
@@ -275,6 +330,8 @@ jobs:
           PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
           PREVIOUS_PACKAGE_MD5=$(cat "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5" 2>/dev/null || echo "not_found_in_build_state")
           DO_FULL_BUILD_DOCKER=0; DO_PACKAGE_BUILD_DOCKER=0
+          
+          # Build decision logic using DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE
           if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ] || [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ] ; then DO_FULL_BUILD_DOCKER=1;
           elif [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then DO_FULL_BUILD_DOCKER=1;
           elif [ "$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ] || [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then DO_PACKAGE_BUILD_DOCKER=1;
@@ -298,8 +355,7 @@ jobs:
             if ! make package/compile ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
             make package/index ${MAKE_OPTS_SINGLE_JOB} || make package/index ${MAKE_OPTS_SINGLE_JOB} 
           else 
-            echo "[DOCKER] Minimal Incremental Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
-            # 如果S3缓存包含了target编译产物，这里应该非常快，大部分是 "is up to date"
+            echo "[DOCKER] Minimal Incremental Build (cache should be effective)..." | tee -a "${INTERNAL_DEBUG_LOG}"
             if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
           fi
           make target/install ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; final_install_status_docker=$?
@@ -326,6 +382,7 @@ jobs:
           DOCKER_SCRIPT_EOF
           chmod +x "${RUNNER_SCRIPT_PATH}"
 
+          # Pass the determined S3_CACHE_RESTORED_EFFECTIVE status to Docker
           docker run --rm \
             -v "${{ env.RUNNER_OPENWRT_WORKSPACE }}:${{ env.CONTAINER_BUILD_AREA }}" \
             -v "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}:${{ env.CONTAINER_REPO_CONFIG_MOUNT }}:ro" \
@@ -342,13 +399,15 @@ jobs:
             -e DOCKER_ENV_CONTAINER_BUILD_AREA="${{ env.CONTAINER_BUILD_AREA }}" \
             -e DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}" \
             -e DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE="${{ github.event.inputs.clean_build }}" \
-            -e DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE="${{ env.S3_CACHE_RESTORE_ATTEMPTED || 'false' }}" \
+            -e DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE="${S3_CACHE_RESTORED_EFFECTIVE}" \ # Use the value read from file
             -e DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE="${{ env.feeds_changed || 'true' }}" \
             -e DOCKER_ENV_BUILD_TZ="${{ env.TZ }}" \
             -e GOFLAGS="-buildvcs=false" \
             ${{ env.DOCKER_IMAGE }} \
             bash -c "cd \"${DOCKER_ENV_CONTAINER_BUILD_AREA}\" && \"${CONTAINER_SCRIPT_PATH}\""
           
+          rm -f "${S3_CACHE_STATUS_FILE}" # Clean up the status file
+
           if [ -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success" ]; then
               echo "Docker build reported success."
               echo "status=success" >> $GITHUB_OUTPUT
@@ -361,8 +420,9 @@ jobs:
               cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log" "/tmp/docker_ccache_detailed_runner.log" 2>/dev/null || true
               cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" "/tmp/docker_compile_output_runner.log" 2>/dev/null || true
           fi
-          rm -f "${RUNNER_SCRIPT_PATH}"
+          rm -f "${RUNNER_SCRIPT_PATH}" # Clean up the main Docker script from runner
 
+      # ... (后续步骤：修正权限、S3上传、整理固件、Release等，保持不变) ...
       - name: 修正工作区文件权限 (Correct Workspace Permissions)
         if: always() 
         run: |
@@ -473,7 +533,6 @@ jobs:
              echo "Warning: Toolchain build directory (build_dir/toolchain-*) not found." | tee -a "$DEBUG_LOG_FILE"
           fi
 
-          # 新增：打包上传 target 编译产物目录
           TARGET_DIR_PATTERN="build_dir/target-*"
           ACTUAL_TARGET_BUILD_SUBDIR=$(ls -d ${TARGET_DIR_PATTERN} 2>/dev/null | head -n 1)
           if [ -n "$ACTUAL_TARGET_BUILD_SUBDIR" ] && [ -d "$ACTUAL_TARGET_BUILD_SUBDIR" ]; then
