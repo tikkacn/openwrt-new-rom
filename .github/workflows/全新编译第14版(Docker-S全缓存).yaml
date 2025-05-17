@@ -31,7 +31,6 @@ env:
   CONTAINER_REPO_CONFIG_MOUNT: /repo_config 
   DOCKER_IMAGE: ubuntu:22.04
 
-  # S3 缓存相关文件名 - 这些将作为分块归档的“基本名”
   S3_DL_DIR_ARCHIVE_BASENAME: openwrt_dl_cache.tar.zst
   S3_STAGING_DIR_ARCHIVE_BASENAME: openwrt_staging_dir_cache.tar.zst
   S3_BUILD_DIR_HOST_ARCHIVE_BASENAME: openwrt_build_dir_host_cache.tar.zst
@@ -42,7 +41,6 @@ env:
   S3_BUILD_STATE_ARCHIVE_BASENAME: openwrt_build_state.tar.zst
   S3_DOT_CONFIG_FILENAME: dot_config_snapshot
 
-  # Docker 内部路径 (这些路径是相对于 /build_area，即 RUNNER_OPENWRT_WORKSPACE)
   CONTAINER_DL_DIR_RELPATH: "dl"
   CONTAINER_STAGING_DIR_RELPATH: "staging_dir"
   CONTAINER_BUILD_DIR_HOST_RELPATH: "build_dir/host"
@@ -178,7 +176,116 @@ jobs:
           RUNNER_SCRIPT_FILENAME="docker_build_script.sh"
           RUNNER_SCRIPT_PATH="${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/${RUNNER_SCRIPT_FILENAME}"
           CONTAINER_SCRIPT_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/${RUNNER_SCRIPT_FILENAME}"
-          # ...（省略 docker_build_script.sh 生成内容，保持你原有逻辑）...
+          cat << 'DOCKER_SCRIPT_EOF' > "${RUNNER_SCRIPT_PATH}"
+          #!/bin/bash
+          set -eo pipefail
+          export FORCE_UNSAFE_CONFIGURE=1 
+          export GOFLAGS="-buildvcs=false"
+          INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
+          mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")" 
+          echo "[DOCKER] Starting build script..." | tee -a "${INTERNAL_DEBUG_LOG}"
+          # ...此处省略内部脚本大段注释，直接采用你现有的逻辑...
+          apt-get update -y && apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential libncurses5-dev libncursesw5-dev zlib1g-dev libssl-dev \
+            subversion gawk wget curl python3 python3-distutils unzip file patch rsync util-linux procps \
+            ccache libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libreadline-dev libtool llvm p7zip p7zip-full xsltproc xxd gettext autopoint time
+          apt-get clean && rm -rf /var/lib/apt/lists/*
+          export TZ="${DOCKER_ENV_BUILD_TZ:-Asia/Shanghai}"
+          ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && echo "$TZ" > /etc/timezone
+          mkdir -p "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
+          cd "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
+          echo "[DOCKER] Current directory: $(pwd)" | tee -a "${INTERNAL_DEBUG_LOG}"
+          if [ ! -d ".git" ] && [ ! -f "Makefile" ]; then 
+            echo "[DOCKER] Fresh setup or incomplete S3 cache. Checking if current directory '.' is empty before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            if [ "$(ls -A . | wc -l)" -gt 0 ]; then
+              echo "[DOCKER_WARN] Current directory '.' is not empty. Cleaning directory before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
+              echo "[DOCKER_INFO] Contents of '.' before cleaning: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
+              find . -mindepth 1 -delete 
+              if [ "$(ls -A . | wc -l)" -gt 0 ]; then 
+                 echo "[DOCKER_ERROR] Failed to clean directory '.'. Aborting." | tee -a "${INTERNAL_DEBUG_LOG}"
+                 exit 1
+              fi
+            fi
+            echo "[DOCKER] Cloning OpenWrt into '.' ..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            git clone --depth 1 "${DOCKER_ENV_REPO_URL}" -b "${DOCKER_ENV_REPO_BRANCH}" .
+            if [ $? -ne 0 ]; then echo "[DOCKER_ERROR] git clone failed!" | tee -a "${INTERNAL_DEBUG_LOG}"; exit 1; fi
+            echo "[INFO] Removing .git directory after clone..." | tee -a "${INTERNAL_DEBUG_LOG}"; rm -rf .git
+          else 
+            echo "[DOCKER] Existing OpenWrt tree found (from S3 cache)." | tee -a "${INTERNAL_DEBUG_LOG}"
+            if [ -d ".git" ]; then 
+              echo "[INFO] Removing .git from S3 restored cache..." | tee -a "${INTERNAL_DEBUG_LOG}"; rm -rf .git
+            fi
+          fi
+          INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL="${DOCKER_ENV_BUILD_STATE_DIR_NAME:-.github_actions_build_state}"
+          INTERNAL_CCACHE_DIR_NAME_ACTUAL="${DOCKER_ENV_CCACHE_DIR_NAME:-.ccache}"
+          mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}" "./${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" "./logs"
+          export CCACHE_DIR="${PWD}/${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" 
+          export CCACHE_LOGFILE="${DOCKER_ENV_CONTAINER_CCACHE_LOG_PATH:-/tmp/container_ccache_detailed.log}"
+          mkdir -p "$(dirname "${CCACHE_LOGFILE}")"; ccache -M 8G; ccache -z
+          INTERNAL_CONFIG_FILE_NAME="${DOCKER_ENV_CONFIG_FILE_NAME_IN_REPO:-.config_default}"
+          INTERNAL_DIY_P1_SH_NAME="${DOCKER_ENV_DIY_P1_SH_NAME_IN_REPO:-diy-p1-default.sh}"
+          INTERNAL_DIY_P2_SH_NAME="${DOCKER_ENV_DIY_P2_SH_NAME_IN_REPO:-diy-p2-default.sh}"
+          cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_CONFIG_FILE_NAME}" "./.config"; cp ./.config ./.config.input
+          cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P1_SH_NAME}" "./${INTERNAL_DIY_P1_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P1_SH_NAME}"
+          cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P2_SH_NAME}" "./${INTERNAL_DIY_P2_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P2_SH_NAME}"
+          "./${INTERNAL_DIY_P1_SH_NAME}"
+          if [ -f "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" ]; then cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" "./feeds.conf.default"; elif [ ! -f "./feeds.conf.default" ] && [ -f "./feeds.conf.default.sample" ]; then cp feeds.conf.default.sample feeds.conf.default; fi
+          ./scripts/feeds update -a; ./scripts/feeds install -a; "./${INTERNAL_DIY_P2_SH_NAME}"
+          echo "CONFIG_AUTOREMOVE=y" >> .config; echo "CONFIG_AUTOREBUILD=y" >> .config
+          if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config; fi
+          if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config; fi
+          make defconfig
+          TOOLCHAIN_CONFIG_SUBSET_FOR_MD5=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort)
+          TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
+          PREVIOUS_TOOLCHAIN_MD5=$(cat "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5" 2>/dev/null || echo "not_found_in_build_state")
+          PACKAGE_CONFIG_SUBSET_FOR_MD5=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort)
+          PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
+          PREVIOUS_PACKAGE_MD5=$(cat "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5" 2>/dev/null || echo "not_found_in_build_state")
+          DO_FULL_BUILD_DOCKER=0; DO_PACKAGE_BUILD_DOCKER=0
+          if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ] || [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ] ; then DO_FULL_BUILD_DOCKER=1;
+          elif [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ] || [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then DO_FULL_BUILD_DOCKER=1;
+          elif [ "$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ] || [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then DO_PACKAGE_BUILD_DOCKER=1;
+          elif [ "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" = "true" ]; then DO_PACKAGE_BUILD_DOCKER=1; fi
+          echo "[DOCKER] Build Strategy -> FULL: $DO_FULL_BUILD_DOCKER, PACKAGE: $DO_PACKAGE_BUILD_DOCKER" | tee -a "${INTERNAL_DEBUG_LOG}"
+          MAKE_JOBS_NPROC=$(nproc); MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false"
+          MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
+          MAKE_OPTS_FALLBACK="-j1 V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
+          MAKE_OPTS_SINGLE_JOB="-j1 ${MAKE_OPTS_COMMON_GOFLAGS}"
+          COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_$(date +%Y%m%d_%H%M%S).log"
+          if [ $DO_FULL_BUILD_DOCKER -eq 1 ]; then
+            echo "[DOCKER] Full Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            make tools/compile ${MAKE_OPTS_FALLBACK} || make tools/compile ${MAKE_OPTS_FALLBACK}
+            make toolchain/compile ${MAKE_OPTS_FALLBACK} || make toolchain/compile ${MAKE_OPTS_FALLBACK}
+            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+          elif [ $DO_PACKAGE_BUILD_DOCKER -eq 1 ]; then
+            echo "[DOCKER] Package Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            make package/clean V=s || true 
+            if ! make package/compile ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+            make package/index ${MAKE_OPTS_SINGLE_JOB} || make package/index ${MAKE_OPTS_SINGLE_JOB} 
+          else 
+            echo "[DOCKER] Minimal Incremental Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+          fi
+          make target/install ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; final_install_status_docker=$?
+          make prepare ${MAKE_OPTS_MAIN} || make prepare ${MAKE_OPTS_FALLBACK}
+          make tools/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make tools/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
+          make toolchain/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make toolchain/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
+          mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}"; cp .config "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/config_from_compile_step.txt"
+          echo "$TOOLCHAIN_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5"; echo "$PACKAGE_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5"
+          echo "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/last_feeds_changed_status.txt"
+          find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/current_feeds.sha256"
+          ccache -s | tee -a "${INTERNAL_DEBUG_LOG}"
+          if [ ${final_install_status_docker} -eq 0 ] && [ -n "$(find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print -quit)" ]; then
+            touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_success"
+          else
+            touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_failure"
+          fi
+          cp "${INTERNAL_DEBUG_LOG}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_build_debug_summary.log" || true
+          cp "${CCACHE_LOGFILE}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_ccache_detailed.log" || true
+          if [ -f "${COMPILE_OUTPUT_LOG_DOCKER}" ]; then cp "${COMPILE_OUTPUT_LOG_DOCKER}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_compile_output.log" || true; fi
+          echo "[DOCKER] Build script finished." | tee -a "${INTERNAL_DEBUG_LOG}"
+          DOCKER_SCRIPT_EOF
           chmod +x "${RUNNER_SCRIPT_PATH}"
           docker run --rm \
             -v "${{ env.RUNNER_OPENWRT_WORKSPACE }}:${{ env.CONTAINER_BUILD_AREA }}" \
@@ -202,11 +309,6 @@ jobs:
             -e GOFLAGS="-buildvcs=false" \
             ${{ env.DOCKER_IMAGE }} \
             bash -c "cd \"${DOCKER_ENV_CONTAINER_BUILD_AREA}\" && \"${CONTAINER_SCRIPT_PATH}\""
-          # ...（后续保持你的原有逻辑）...
-
-      # 其余步骤全部保持原样
-      # ...（省略后续步骤，和你现有 workflow 脚本一致即可）...
-          
           if [ -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success" ]; then
               echo "Docker build reported success."
               echo "status=success" >> $GITHUB_OUTPUT
@@ -220,12 +322,14 @@ jobs:
               cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" "/tmp/docker_compile_output_runner.log" 2>/dev/null || true
           fi
           rm -f "${RUNNER_SCRIPT_PATH}"
+
       - name: 修正工作区文件权限 (Correct Workspace Permissions)
         if: always() 
         run: |
           echo "Adjusting ownership of ${{ env.RUNNER_OPENWRT_WORKSPACE }} to runner user..."
           sudo chown -R $(id -u):$(id -g) "${{ env.RUNNER_OPENWRT_WORKSPACE }}"
           echo "Ownership adjustment complete."
+
       - name: 打包并上传S3各部分缓存 (Pack & Upload S3 Chunked Caches)
         if: steps.compile_in_docker.outputs.status == 'success' && !cancelled()
         env:
@@ -237,7 +341,6 @@ jobs:
             echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。无法上传缓存到S3。" | tee -a "$DEBUG_LOG_FILE"
             exit 1
           fi
-          
           cd "${{ env.RUNNER_OPENWRT_WORKSPACE }}" || { echo "Failed to cd to ${{ env.RUNNER_OPENWRT_WORKSPACE }}"; exit 1; }
           archive_and_upload_s3_parts() {
             local dir_to_archive_relative="$1" 
@@ -250,12 +353,10 @@ jobs:
             fi
             mkdir -p "${chunk_tmp_dir}"
             echo "Archiving/splitting ${dir_to_archive_relative} (base: ${s3_archive_basename}) in ${chunk_tmp_dir}..." | tee -a "$DEBUG_LOG_FILE"
-            
             local pipe_status_file="${chunk_tmp_dir}/pipe_status"
             ( (tar -cf - "${dir_to_archive_relative}" | zstd -T0 -3 - | split -b "${max_chunk_size}" --numeric-suffixes=1 --suffix-length=3 - "${chunk_tmp_dir}/${s3_archive_basename}.part-") && echo "0" > "$pipe_status_file" ) || echo "$?" > "$pipe_status_file"
             local tar_pipeline_exit_code=$(cat "$pipe_status_file")
             rm -f "$pipe_status_file"
-            
             if [ "${tar_pipeline_exit_code}" -ne 0 ] || ! ls "${chunk_tmp_dir}/${s3_archive_basename}.part-"* 1> /dev/null 2>&1; then
               if [ -d "${dir_to_archive_relative}" ] && [ -z "$(ls -A "${dir_to_archive_relative}")" ]; then
                 echo "Directory ${dir_to_archive_relative} is empty. No S3 archive for ${s3_archive_basename}." | tee -a "$DEBUG_LOG_FILE"
@@ -268,14 +369,12 @@ jobs:
             fi
             echo "Chunking of ${dir_to_archive_relative} complete. Uploading..." | tee -a "$DEBUG_LOG_FILE"
             ls -lh "${chunk_tmp_dir}" | tee -a "$DEBUG_LOG_FILE"
-            
             local all_chunks_uploaded=true
             local chunk_s3_keys_for_manifest=() 
             for chunk_file_path in $(ls -v "${chunk_tmp_dir}/${s3_archive_basename}.part-"*); do 
               if [ -f "$chunk_file_path" ]; then
                 local chunk_filename=$(basename "$chunk_file_path")
                 local s3_chunk_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${chunk_filename}"
-                
                 echo "Uploading chunk ${chunk_filename} to s3://${S3_BUCKET_NAME}/${s3_chunk_key} ..." | tee -a "$DEBUG_LOG_FILE"
                 if aws s3 cp "$chunk_file_path" "s3://${S3_BUCKET_NAME}/${s3_chunk_key}" --quiet; then
                   echo "Uploaded ${chunk_filename}." | tee -a "$DEBUG_LOG_FILE"
@@ -303,26 +402,21 @@ jobs:
             else
               echo "ERROR: Not all chunks for ${dir_to_archive_relative} uploaded. Manifest not created." | tee -a "$DEBUG_LOG_FILE"
             fi
-            
             rm -rf "${chunk_tmp_dir}" 
-            
             if [ "$all_chunks_uploaded" = false ] && [ ${#chunk_s3_keys_for_manifest[@]} -gt 0 ]; then
               return 1
             fi
             return 0
           }
-          
           archive_and_upload_s3_parts "${{ env.CONTAINER_DL_DIR_RELPATH }}" "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}"
           archive_and_upload_s3_parts "${{ env.CONTAINER_STAGING_DIR_RELPATH }}" "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}"
           archive_and_upload_s3_parts "${{ env.CONTAINER_BUILD_DIR_HOST_RELPATH }}" "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}"
-          
           TOOLCHAIN_DIR_ACTUAL_NAME=$(ls -d build_dir/toolchain-* 2>/dev/null | head -n 1)
           if [ -n "$TOOLCHAIN_DIR_ACTUAL_NAME" ] && [ -d "$TOOLCHAIN_DIR_ACTUAL_NAME" ]; then
             archive_and_upload_s3_parts "$TOOLCHAIN_DIR_ACTUAL_NAME" "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}"
           else
              echo "Warning: Toolchain build directory (build_dir/toolchain-*) not found." | tee -a "$DEBUG_LOG_FILE"
           fi
-          # 新增：打包上传 target 编译产物目录
           TARGET_DIR_PATTERN="build_dir/target-*"
           ACTUAL_TARGET_BUILD_SUBDIR=$(ls -d ${TARGET_DIR_PATTERN} 2>/dev/null | head -n 1)
           if [ -n "$ACTUAL_TARGET_BUILD_SUBDIR" ] && [ -d "$ACTUAL_TARGET_BUILD_SUBDIR" ]; then
@@ -345,6 +439,7 @@ jobs:
           else
             echo "WARNING: ${CONFIG_FILE_TO_UPLOAD_S3} not found in $(pwd), cannot upload to S3." | tee -a "$DEBUG_LOG_FILE"
           fi
+
       - name: Upload Debug Logs (from Runner and potentially Docker)
         if: always()
         uses: actions/upload-artifact@main
@@ -386,7 +481,6 @@ jobs:
               echo "警告：在 ${OPENWRT_TARGETS_DIR} 下未找到标准的目标架构子目录。尝试直接在 ${OPENWRT_TARGETS_DIR} 搜索。" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
               DEEPEST_TARGET_SUBDIRS="${OPENWRT_TARGETS_DIR}"
           fi
-          
           FINAL_FIRMWARE_OUTPUT_BASE="/tmp/firmware_output_collections"
           mkdir -p "$FINAL_FIRMWARE_OUTPUT_BASE"
           for CURRENT_IMG_SOURCE_DIR in $DEEPEST_TARGET_SUBDIRS; do
@@ -394,16 +488,13 @@ jobs:
               COLLECTED_FIRMWARE_OUTPUT_DIR="${FINAL_FIRMWARE_OUTPUT_BASE}/firmware_collection_$(basename "${CURRENT_IMG_SOURCE_DIR}")_$(date +%N)"
               mkdir -p "${COLLECTED_FIRMWARE_OUTPUT_DIR}"
               FILES_COPIED_COUNT=0
-              
               cd "${CURRENT_IMG_SOURCE_DIR}"
-              
               for pattern in "*combined.img.gz" "*sysupgrade.img.gz" "*combined-efi.img.gz" "*kernel.bin" "*.img" "*.bin"; do
                   find . -maxdepth 1 -type f -name "$pattern" ! -path "./packages/*" -print0 | while IFS= read -r -d $'\0' found_file; do
                       cp -v -f "${found_file}" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/"
                       FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1))
                   done
               done
-              
               if [ $FILES_COPIED_COUNT -eq 0 ]; then
                   echo "在 ${CURRENT_IMG_SOURCE_DIR} 中未找到标准模式的固件，尝试复制其他可能的文件..." | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
                   find . -maxdepth 1 -type f \
@@ -445,10 +536,8 @@ jobs:
               FIRMWARE_PARENT_DIR=$(dirname "${FIRMWARE_COLLECTION_DIR_PATH}")
               FIRMWARE_BASENAME=$(basename "${FIRMWARE_COLLECTION_DIR_PATH}")
               ZIP_FILENAME="${FIRMWARE_BASENAME}.zip"
-              
               echo "创建固件压缩包 ${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME} 从目录 ${FIRMWARE_BASENAME}" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
               cd "${FIRMWARE_PARENT_DIR}" && zip -r9 "${ZIP_FILENAME}" "${FIRMWARE_BASENAME}"
-              
               if [ -f "${ZIP_FILENAME}" ]; then
                   echo "FIRMWARE_ZIP=${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME}" >> $GITHUB_ENV
                   ls -lh "${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME}" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
@@ -459,7 +548,7 @@ jobs:
           else
               echo "警告: 最终固件收集目录 (${FIRMWARE_COLLECTION_DIR_PATH}) 未有效设置、不是目录或为空，无法创建 firmware.zip。" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
               echo "FIRMWARE_ZIP=/tmp/no_firmware_to_zip_$(date +%N).zip" >> $GITHUB_ENV
-          fi
+
       - name: 上传固件 (Artifact)
         uses: actions/upload-artifact@main
         if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
@@ -491,6 +580,7 @@ jobs:
           echo "" >> release_body.txt
           echo "_Built by GitHub Actions - Workflow: [${{ github.workflow }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})_" >> release_body.txt
           echo "status=success" >> $GITHUB_OUTPUT
+
       - name: 上传固件到Releases (Upload Firmware to Releases)
         uses: softprops/action-gh-release@v2
         if: steps.tag.outputs.status == 'success' && !cancelled()
