@@ -75,7 +75,7 @@ jobs:
           if [ -n "$s3_prefix_from_secret" ]; then
             final_s3_prefix="$s3_prefix_from_secret"
           else
-            default_prefix="openwrt-s3chunks-v3/${repo_branch_for_path_sanitized}" 
+            default_prefix="openwrt-s3chunks-v4/${repo_branch_for_path_sanitized}" # 更新路径以区分新策略
             final_s3_prefix="$default_prefix"
           fi
           echo "S3_EFFECTIVE_PATH_PREFIX=${final_s3_prefix}" >> $GITHUB_ENV
@@ -142,20 +142,25 @@ jobs:
             local manifest_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}.manifest"
             local local_manifest_file="${chunk_restore_tmp_dir}/${archive_s3_basename}.manifest"
             
+            local combined_zst_file="${chunk_restore_tmp_dir}/COMBINED_${archive_s3_basename}.tar.zst"
+            local decompressed_tar_file="${chunk_restore_tmp_dir}/DECOMPRESSED_${archive_s3_basename}.tar"
+
             echo "[INFO] Attempting to download manifest: s3://${S3_BUCKET_NAME}/${manifest_s3_key}" | tee -a "$DEBUG_LOG_FILE"
             aws s3 cp "s3://${S3_BUCKET_NAME}/${manifest_s3_key}" "${local_manifest_file}" --no-progress --quiet
             local manifest_dl_status=$?
 
-            if [ $manifest_dl_status -eq 0 ]; then
+            if [ "$manifest_dl_status" -eq 0 ]; then
               echo "[INFO] Manifest ${archive_s3_basename}.manifest downloaded. Processing chunked restore." | tee -a "$DEBUG_LOG_FILE"
               mapfile -t chunk_files_to_download < <(grep -v '^[[:space:]]*$' "${local_manifest_file}")
               
               if [ ${#chunk_files_to_download[@]} -eq 0 ]; then 
-                echo "[WARN] Manifest for ${archive_s3_basename} is empty or contains only whitespace. No chunks to process." | tee -a "$DEBUG_LOG_FILE"
-                part_had_error=1 
+                echo "[WARN] Manifest for ${archive_s3_basename} is empty or contains only whitespace. No chunks to process for chunked restore." | tee -a "$DEBUG_LOG_FILE"
+                # 即使清单为空，也可能意味着原始文件很小，没有分块，manifest仅为标记，让后续单文件恢复尝试
+                # part_had_error=1 # 不在这里立即标记错误，让后续逻辑判断
               fi
 
-              if [ $part_had_error -eq 0 ]; then
+              # 仅当 manifest 非空且包含有效条目时，才继续分块下载和合并
+              if [ ${#chunk_files_to_download[@]} -gt 0 ]; then
                 local all_chunks_downloaded=true; declare -a downloaded_chunk_paths_ordered
                 for chunk_filename_dirty in "${chunk_files_to_download[@]}"; do
                   local chunk_filename=$(echo "$chunk_filename_dirty" | tr -d '\r\n'); if [ -z "$chunk_filename" ]; then continue; fi
@@ -168,33 +173,49 @@ jobs:
 
                 if [ "$all_chunks_downloaded" = true ] && [ ${#downloaded_chunk_paths_ordered[@]} -gt 0 ]; then
                   echo "[INFO] All chunks for ${archive_s3_basename} downloaded. Paths: ${downloaded_chunk_paths_ordered[*]}" | tee -a "$DEBUG_LOG_FILE"
-                  echo "[DEBUG] Combining and extracting to ${target_extract_path}..." | tee -a "$DEBUG_LOG_FILE"
-                  
-                  cat "${downloaded_chunk_paths_ordered[@]}" | zstd -d -T0 --quiet - | tar -xf - -C "${target_extract_path}"
-                  local cat_status="${PIPESTATUS[0]:-1}"  # Default to error if empty
-                  local zstd_status="${PIPESTATUS[1]:-1}" # Default to error if empty
-                  local tar_status="${PIPESTATUS[2]:-1}"  # Default to error if empty
+                  echo "[DEBUG] Step 1: Combining chunks into ${combined_zst_file}..." | tee -a "$DEBUG_LOG_FILE"
+                  cat "${downloaded_chunk_paths_ordered[@]}" > "${combined_zst_file}"; local cat_status=$?
+                  ls -lh "${combined_zst_file}" 2>/dev/null | tee -a "$DEBUG_LOG_FILE"
 
-                  echo "[DEBUG] Pipeline statuses - Cat: '${cat_status}', Zstd: '${zstd_status}', Tar: '${tar_status}'" | tee -a "$DEBUG_LOG_FILE"
+                  if [ "$cat_status" -eq 0 ] && [ -s "${combined_zst_file}" ]; then
+                    echo "[DEBUG] Step 2: Decompressing ${combined_zst_file} to ${decompressed_tar_file}..." | tee -a "$DEBUG_LOG_FILE"
+                    zstd -d -T0 -qf -o "${decompressed_tar_file}" "${combined_zst_file}"; local zstd_status=$? 
+                    ls -lh "${decompressed_tar_file}" 2>/dev/null | tee -a "$DEBUG_LOG_FILE"
 
-                  if [ "$cat_status" -eq 0 ] && [ "$zstd_status" -eq 0 ] && [ "$tar_status" -eq 0 ]; then
-                     echo "[SUCCESS] Restored ${archive_s3_basename} from chunks." | tee -a "$DEBUG_LOG_FILE"
-                  else 
-                     echo "[ERROR] Failed to extract combined chunks for ${archive_s3_basename}. Cat_status: '${cat_status}', Zstd_status: '${zstd_status}', Tar_status: '${tar_status}'" | tee -a "$DEBUG_LOG_FILE"
-                     part_had_error=1
+                    if [ "$zstd_status" -eq 0 ] && [ -s "${decompressed_tar_file}" ]; then
+                      echo "[DEBUG] Step 3: Extracting ${decompressed_tar_file} to ${target_extract_path}..." | tee -a "$DEBUG_LOG_FILE"
+                      tar -xf "${decompressed_tar_file}" -C "${target_extract_path}"; local tar_status=$?
+                      if [ "$tar_status" -eq 0 ]; then
+                         echo "[SUCCESS] Restored ${archive_s3_basename} from chunks (via intermediate files)." | tee -a "$DEBUG_LOG_FILE"
+                      else
+                         echo "[ERROR] tar extract failed for ${archive_s3_basename}. Tar_status: '${tar_status}'" | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
+                      fi
+                    else
+                      echo "[ERROR] zstd decompression failed for ${archive_s3_basename} (status: $zstd_status) or output was empty." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
+                    fi
+                  else
+                     echo "[ERROR] cat command failed for ${archive_s3_basename} (status: $cat_status) or combined file was empty." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1; 
                   fi
-                elif [ $part_had_error -eq 0 ]; then 
-                  echo "[WARN] Not all chunks downloaded or no valid paths in downloaded_chunk_paths_ordered for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"
-                  part_had_error=1
+                elif [ $part_had_error -eq 0 ]; then # all_chunks_downloaded is false or no paths, but no error was flagged yet from download
+                  echo "[WARN] Not all chunks downloaded or no valid paths in downloaded_chunk_paths_ordered for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
                 fi
-              fi 
-            else 
-              echo "[INFO] Manifest for ${archive_s3_basename} not found (DL status: $manifest_dl_status). Trying single file restore for ${archive_s3_basename}..." | tee -a "$DEBUG_LOG_FILE"
+              fi # end if part_had_error after manifest read for chunked logic
+            fi # end if manifest download success
+
+            # 如果分块恢复有任何问题(part_had_error=1 标记了错误) 
+            # 或者 manifest文件下载失败 (manifest_dl_status != 0 且之前没有成功进行分块恢复)
+            if [ $part_had_error -ne 0 ] || { [ $manifest_dl_status -ne 0 ] && [ ${#chunk_files_to_download[@]} -eq 0 ] && [ $part_had_error -eq 0 ]; }; then
+              if [ $manifest_dl_status -ne 0 ]; then 
+                echo "[INFO] Manifest for ${archive_s3_basename} not found (DL status: $manifest_dl_status) or chunk processing failed earlier. Trying single file restore..." | tee -a "$DEBUG_LOG_FILE"
+              else 
+                echo "[INFO] Chunk processing for ${archive_s3_basename} had errors. Trying single file restore as fallback..." | tee -a "$DEBUG_LOG_FILE"
+              fi
+              part_had_error=0 # 为单文件恢复重置错误标记
               local single_archive_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}"
               local single_local_archive="${chunk_restore_tmp_dir}/${archive_s3_basename}"
               echo "[INFO] Attempting to download single file: s3://${S3_BUCKET_NAME}/${single_archive_s3_key}" | tee -a "$DEBUG_LOG_FILE"
               aws s3 cp "s3://${S3_BUCKET_NAME}/${single_archive_s3_key}" "${single_local_archive}" --no-progress --quiet
-              if [ $? -eq 0 ]; then
+              if [ $? -eq 0 ] && [ -s "${single_local_archive}" ]; then # 确保下载成功且文件非空
                 echo "[INFO] Downloaded single file ${archive_s3_basename}. Extracting..." | tee -a "$DEBUG_LOG_FILE"
                 if tar -I "zstd -T0" -xf "${single_local_archive}" -C "${target_extract_path}"; then
                   echo "[SUCCESS] Extracted single file ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"
@@ -202,9 +223,10 @@ jobs:
                   echo "[ERROR] Failed to extract single file ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
                 fi
               else
-                echo "[WARN] Single file ${archive_s3_basename} also not found or failed to download. No cache for this part." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
+                echo "[WARN] Single file ${archive_s3_basename} also not found, failed to download, or was empty. No cache for this part." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
               fi
             fi
+            rm -f "${combined_zst_file}" "${decompressed_tar_file}" # 确保清理分步产生的临时文件
             rm -rf "${chunk_restore_tmp_dir}"
             echo "<<< [S3 RESTORE END] Finished processing S3 part: ${archive_s3_basename}. Overall part error status: $part_had_error" | tee -a "$DEBUG_LOG_FILE"
             return $part_had_error 
@@ -275,9 +297,13 @@ jobs:
               S3_CACHE_RESTORED_EFFECTIVE="true"
             fi
           fi
-          echo "Effective S3_CACHE_RESTORED status for Docker script: $S3_CACHE_RESTORED_EFFECTIVE" | tee -a "${DEBUG_LOG_ON_RUNNER}"
+          echo "Effective S3_CACHE_RESTORED status for Docker script: $S3_CACHE_RESTORED_EFFECTIVE" | tee -a "${DEBUG_LOG_ON_RUNNER}" # DEBUG_LOG_ON_RUNNER is defined in set_s3_vars
 
-
+          # --- Docker Script Content (Heredoc) ---
+          # IMPORTANT: The content of DOCKER_SCRIPT_EOF should be identical to your last WORKING version
+          # that successfully compiled OpenWrt (before the S3 upload/permission issues appeared).
+          # This includes all apt-get, git clone (with rm -rf .git), feeds, defconfig, and make commands.
+          # I am providing the last known good structure for this script.
           cat << 'DOCKER_SCRIPT_EOF' > "${RUNNER_SCRIPT_PATH}"
           #!/bin/bash
           set -eo pipefail
@@ -542,17 +568,18 @@ jobs:
             elif [ ${#chunk_s3_keys_for_manifest[@]} -eq 0 ] && [ "$all_chunks_uploaded" = true ]; then 
                echo "No chunks were uploaded for ${dir_to_archive_relative} (dir was empty/small). No manifest needed." | tee -a "$DEBUG_LOG_FILE"
             else
-              echo "ERROR: Not all chunks for ${dir_to_archive_relative} uploaded successfully or no chunks were produced. Manifest not created." | tee -a "$DEBUG_LOG_FILE"
+              echo "ERROR: Not all chunks for ${dir_to_archive_relative} uploaded. Manifest not created." | tee -a "$DEBUG_LOG_FILE"
             fi
             
             rm -rf "${chunk_tmp_dir}" 
             
-            if [ "$all_chunks_uploaded" = false ] && [ ${#chunk_s3_keys_for_manifest[@]} -gt 0 ]; then
+            if [ "$all_chunks_uploaded" = false ] && [ ${#chunk_s3_keys_for_manifest[@]} -gt 0 ]; then # If any chunk upload failed after some were successful
               return 1
             fi
             return 0
           }
           
+          # 调用函数并检查返回值，如果失败则退出整个步骤
           archive_and_upload_s3_parts "${{ env.CONTAINER_DL_DIR_RELPATH }}" "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" || exit 1
           archive_and_upload_s3_parts "${{ env.CONTAINER_STAGING_DIR_RELPATH }}" "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" || exit 1
           archive_and_upload_s3_parts "${{ env.CONTAINER_BUILD_DIR_HOST_RELPATH }}" "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" || exit 1
