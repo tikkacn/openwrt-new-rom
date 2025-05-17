@@ -107,21 +107,20 @@ jobs:
           S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
           DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }} 
         run: |
-          # 在此脚本块的开头设置 set +e，以便即使某个下载/解压失败，也能继续尝试其他部分
-          set +e 
+          set +e # 允许脚本在命令失败时继续，以便收集所有日志
           mkdir -p "$RUNNER_OPENWRT_WORKSPACE"
           echo "Cleaning workspace $RUNNER_OPENWRT_WORKSPACE before any operation..." | tee -a "$DEBUG_LOG_FILE"
           if [ -n "$RUNNER_OPENWRT_WORKSPACE" ] && [ -d "$RUNNER_OPENWRT_WORKSPACE" ]; then
-            rm -rf "$RUNNER_OPENWRT_WORKSPACE"/* "$RUNNER_OPENWRT_WORKSPACE"/.[!.]* "$RUNNER_OPENWRT_WORKSPACE"/..?* 2>/dev/null
+            find "$RUNNER_OPENWRT_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} \; 2>/dev/null || true
           else
             echo "[WARN] RUNNER_OPENWRT_WORKSPACE ('$RUNNER_OPENWRT_WORKSPACE') is not a valid directory or not set. Skipping initial clean." | tee -a "$DEBUG_LOG_FILE"
           fi
-          echo "S3_CACHE_RESTORED=false" > $GITHUB_WORKSPACE/s3_cache_status.txt # 默认未恢复
+          echo "S3_CACHE_RESTORED=false" > $GITHUB_WORKSPACE/s3_cache_status.txt
 
           if [ "${{ inputs.clean_build }}" = "true" ]; then
             echo "[INFO] clean_build is true. Skipping S3 cache restore. Workspace is clean." | tee -a "$DEBUG_LOG_FILE"
             df -h | tee -a "$DEBUG_LOG_FILE"
-            set -e # 恢复默认的错误即退出行为
+            set -e 
             exit 0 
           fi
 
@@ -149,8 +148,12 @@ jobs:
 
             if [ $manifest_dl_status -eq 0 ]; then
               echo "[INFO] Manifest ${archive_s3_basename}.manifest downloaded. Processing chunked restore." | tee -a "$DEBUG_LOG_FILE"
-              mapfile -t chunk_files_to_download < "${local_manifest_file}"
-              if [ ${#chunk_files_to_download[@]} -eq 0 ]; then echo "[WARN] Manifest empty for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1; fi
+              mapfile -t chunk_files_to_download < <(grep -v '^[[:space:]]*$' "${local_manifest_file}") # 过滤空行
+              
+              if [ ${#chunk_files_to_download[@]} -eq 0 ]; then 
+                echo "[WARN] Manifest for ${archive_s3_basename} is empty or contains only whitespace. No chunks to process." | tee -a "$DEBUG_LOG_FILE"
+                part_had_error=1 
+              fi
 
               if [ $part_had_error -eq 0 ]; then
                 local all_chunks_downloaded=true; declare -a downloaded_chunk_paths_ordered
@@ -165,20 +168,22 @@ jobs:
 
                 if [ "$all_chunks_downloaded" = true ] && [ ${#downloaded_chunk_paths_ordered[@]} -gt 0 ]; then
                   echo "[INFO] All chunks for ${archive_s3_basename} downloaded. Combining and extracting to ${target_extract_path}..." | tee -a "$DEBUG_LOG_FILE"
-                  paths_to_cat=""; for chunk_path_item in "${downloaded_chunk_paths_ordered[@]}"; do paths_to_cat="${paths_to_cat} ${chunk_path_item}"; done
-                  if [ -n "$paths_to_cat" ]; then
-                    cat $paths_to_cat | zstd -d -T0 - | tar -xf - -C "${target_extract_path}" # SC2086 is ok here
-                    if [ ${PIPESTATUS[0]} -eq 0 ] && [ ${PIPESTATUS[2]} -eq 0 ] && [ ${PIPESTATUS[4]} -eq 0 ]; then # Check cat, zstd, tar
-                       echo "[SUCCESS] Restored ${archive_s3_basename} from chunks." | tee -a "$DEBUG_LOG_FILE"
-                    else 
-                       echo "[ERROR] Failed to extract combined chunks for ${archive_s3_basename}. Cat: ${PIPESTATUS[0]}, Zstd: ${PIPESTATUS[2]}, Tar: ${PIPESTATUS[4]}" | tee -a "$DEBUG_LOG_FILE"; part_had_error=1; 
-                    fi
-                  else echo "[WARN] No chunk files to cat for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1; fi
+                  
+                  cat "${downloaded_chunk_paths_ordered[@]}" | zstd -d -T0 - | tar -xf - -C "${target_extract_path}"
+                  local cat_status="${PIPESTATUS[0]}"
+                  local zstd_status="${PIPESTATUS[1]}"
+                  local tar_status="${PIPESTATUS[2]}"
+
+                  if [ "$cat_status" -eq 0 ] && [ "$zstd_status" -eq 0 ] && [ "$tar_status" -eq 0 ]; then
+                     echo "[SUCCESS] Restored ${archive_s3_basename} from chunks." | tee -a "$DEBUG_LOG_FILE"
+                  else 
+                     echo "[ERROR] Failed to extract combined chunks for ${archive_s3_basename}. Cat_status: '${cat_status}', Zstd_status: '${zstd_status}', Tar_status: '${tar_status}'" | tee -a "$DEBUG_LOG_FILE"; part_had_error=1; 
+                  fi
                 elif [ $part_had_error -eq 0 ]; then 
-                  echo "[WARN] Not all chunks downloaded or no chunks for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
+                  echo "[WARN] Not all chunks downloaded or no paths in downloaded_chunk_paths_ordered for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
                 fi
               fi 
-            else # Manifest download failed
+            else 
               echo "[INFO] Manifest for ${archive_s3_basename} not found (DL status: $manifest_dl_status). Trying single file restore for ${archive_s3_basename}..." | tee -a "$DEBUG_LOG_FILE"
               local single_archive_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}"
               local single_local_archive="${chunk_restore_tmp_dir}/${archive_s3_basename}"
@@ -196,11 +201,11 @@ jobs:
               fi
             fi
             rm -rf "${chunk_restore_tmp_dir}"
-            echo "<<< [S3 RESTORE END] Finished processing S3 part: ${archive_s3_basename}. Status: $part_had_error" | tee -a "$DEBUG_LOG_FILE"
+            echo "<<< [S3 RESTORE END] Finished processing S3 part: ${archive_s3_basename}. Overall part error status: $part_had_error" | tee -a "$DEBUG_LOG_FILE"
             return $part_had_error 
           }
           
-          declare -A restore_statuses
+          declare -A restore_statuses_map 
           restore_parts_list=(
             "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}"
             "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}"
@@ -213,19 +218,19 @@ jobs:
           )
           CRITICAL_PARTS_RESTORED_SUCCESSFULLY=true 
 
-          for part_name in "${restore_parts_list[@]}"; do
-            s3_download_and_extract_parts "$part_name" "$RUNNER_OPENWRT_WORKSPACE"
-            restore_statuses["$part_name"]=$?
-            if [ "${restore_statuses[$part_name]}" -ne 0 ]; then
-              echo "[ERROR_SUMMARY] Failed to restore S3 part: $part_name" | tee -a "$DEBUG_LOG_FILE"
-              # Check if this failed part is critical
-              if [[ "$part_name" == "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" || \
-                    "$part_name" == "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" || \
-                    "$part_name" == "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" ]]; then
+          for part_basename in "${restore_parts_list[@]}"; do
+            s3_download_and_extract_parts "$part_basename" "$RUNNER_OPENWRT_WORKSPACE"
+            current_part_status=$?
+            restore_statuses_map["$part_basename"]=$current_part_status
+            if [ "$current_part_status" -ne 0 ]; then
+              echo "[ERROR_SUMMARY] Failed to restore S3 part: $part_basename (Exit Code: $current_part_status)" | tee -a "$DEBUG_LOG_FILE"
+              if [[ "$part_basename" == "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" || \
+                    "$part_basename" == "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" || \
+                    "$part_basename" == "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" ]]; then
                 CRITICAL_PARTS_RESTORED_SUCCESSFULLY=false
               fi
             else
-              echo "[SUCCESS_SUMMARY] Successfully restored S3 part: $part_name" | tee -a "$DEBUG_LOG_FILE"
+              echo "[SUCCESS_SUMMARY] Successfully restored S3 part: $part_basename" | tee -a "$DEBUG_LOG_FILE"
             fi
           done
           
@@ -236,7 +241,6 @@ jobs:
              echo ".config downloaded successfully." | tee -a "$DEBUG_LOG_FILE"
           else 
              echo "Failed to download .config from S3 or it does not exist. This might be ok for first run." | tee -a "$DEBUG_LOG_FILE"; 
-             # If .config is critical for cache state, might set CRITICAL_PARTS_RESTORED_SUCCESSFULLY=false
           fi
 
           if [ "$CRITICAL_PARTS_RESTORED_SUCCESSFULLY" = true ]; then
@@ -246,10 +250,9 @@ jobs:
              echo "S3_CACHE_RESTORED=false" > $GITHUB_WORKSPACE/s3_cache_status.txt
              echo "[WARN] One or more critical S3 cache parts failed to restore completely. Build will proceed as if cache is not fully effective." | tee -a "$DEBUG_LOG_FILE"
           fi
-          # GITHUB_ENV for DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE will be set based on the file in the next step's run block
 
           df -h | tee -a "$DEBUG_LOG_FILE"
-          set -e # 恢复默认的错误即退出行为
+          set -e 
 
       - name: 运行Docker容器并执行编译 (Run Docker Container & Compile)
         id: compile_in_docker
@@ -442,7 +445,7 @@ jobs:
               cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log" "/tmp/docker_ccache_detailed_runner.log" 2>/dev/null || true
               cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" "/tmp/docker_compile_output_runner.log" 2>/dev/null || true
           fi
-          rm -f "${RUNNER_SCRIPT_PATH}"
+          rm -f "${RUNNER_SCRIPT_PATH}" 
 
       - name: 修正工作区文件权限 (Correct Workspace Permissions)
         if: always() 
@@ -457,6 +460,8 @@ jobs:
           S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
           DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }}
         run: |
+          # 在脚本开头设置 set -e，确保任何命令失败都会中止脚本，除非明确处理
+          set -e
           echo "S3_EFFECTIVE_PATH_PREFIX in upload step: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}" | tee -a "$DEBUG_LOG_FILE"
           if [ -z "$S3_BUCKET_NAME" ]; then
             echo "[ERROR] AWS_S3_BUCKET_NAME secret 未设置。无法上传缓存到S3。" | tee -a "$DEBUG_LOG_FILE"
@@ -473,24 +478,24 @@ jobs:
 
             if [ ! -e "${dir_to_archive_relative}" ]; then 
               echo "Path ${dir_to_archive_relative} not found in $(pwd), skipping for ${s3_archive_basename}." | tee -a "$DEBUG_LOG_FILE"
-              return 1 
+              return 1 # 返回错误码，因为期望的目录不存在
+            fi
+
+            # 如果是空目录 (除了 . 和 ..)，则不创建空的tar包和manifest
+            if [ -d "${dir_to_archive_relative}" ] && [ -z "$(ls -A "${dir_to_archive_relative}")" ]; then
+              echo "Directory ${dir_to_archive_relative} is empty. No S3 archive will be created for ${s3_archive_basename}." | tee -a "$DEBUG_LOG_FILE"
+              return 0 
             fi
 
             mkdir -p "${chunk_tmp_dir}"
             echo "Archiving/splitting ${dir_to_archive_relative} (base: ${s3_archive_basename}) in ${chunk_tmp_dir}..." | tee -a "$DEBUG_LOG_FILE"
             
             local pipe_status_file="${chunk_tmp_dir}/pipe_status"
-            # shellcheck disable=SC2086 # We want word splitting for pipe_status_file
-            ( (tar -cf - "${dir_to_archive_relative}" | zstd -T0 -3 - | split -b "${max_chunk_size}" --numeric-suffixes=1 --suffix-length=3 - "${chunk_tmp_dir}/${s3_archive_basename}.part-") && echo "0" > $pipe_status_file ) || echo "$?" > $pipe_status_file
-            local tar_pipeline_exit_code=$(cat $pipe_status_file)
-            rm -f $pipe_status_file
+            ( (tar -cf - "${dir_to_archive_relative}" | zstd -T0 -3 - | split -b "${max_chunk_size}" --numeric-suffixes=1 --suffix-length=3 - "${chunk_tmp_dir}/${s3_archive_basename}.part-") && echo "0" > "$pipe_status_file" ) || echo "$?" > "$pipe_status_file"
+            local tar_pipeline_exit_code=$(cat "$pipe_status_file")
+            rm -f "$pipe_status_file"
             
             if [ "${tar_pipeline_exit_code}" -ne 0 ] || ! ls "${chunk_tmp_dir}/${s3_archive_basename}.part-"* 1> /dev/null 2>&1; then
-              if [ -d "${dir_to_archive_relative}" ] && [ -z "$(ls -A "${dir_to_archive_relative}")" ]; then
-                echo "Directory ${dir_to_archive_relative} is empty. No S3 archive for ${s3_archive_basename}." | tee -a "$DEBUG_LOG_FILE"
-                rm -rf "${chunk_tmp_dir}"
-                return 0 
-              fi
               echo "ERROR: Failed to archive/split ${dir_to_archive_relative} (pipeline status: $tar_pipeline_exit_code) or no chunks produced." | tee -a "$DEBUG_LOG_FILE"
               rm -rf "${chunk_tmp_dir}"
               return 1 
@@ -508,14 +513,15 @@ jobs:
                 local s3_chunk_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${chunk_filename}"
                 
                 echo "Uploading chunk ${chunk_filename} to s3://${S3_BUCKET_NAME}/${s3_chunk_key} ..." | tee -a "$DEBUG_LOG_FILE"
-                if aws s3 cp "$chunk_file_path" "s3://${S3_BUCKET_NAME}/${s3_chunk_key}" --quiet; then
-                  echo "Uploaded ${chunk_filename}." | tee -a "$DEBUG_LOG_FILE"
-                  chunk_s3_keys_for_manifest+=("${chunk_filename}") 
-                  rm -f "$chunk_file_path" 
-                else
+                aws s3 cp "$chunk_file_path" "s3://${S3_BUCKET_NAME}/${s3_chunk_key}" --quiet
+                if [ $? -ne 0 ]; then
                   echo "ERROR: Failed to upload ${chunk_filename}." | tee -a "$DEBUG_LOG_FILE"
                   all_chunks_uploaded=false
+                else
+                  echo "Uploaded ${chunk_filename}." | tee -a "$DEBUG_LOG_FILE"
+                  chunk_s3_keys_for_manifest+=("${chunk_filename}") 
                 fi
+                rm -f "$chunk_file_path" 
               fi
             done
 
@@ -531,26 +537,27 @@ jobs:
               aws s3 cp "${chunk_tmp_dir}/${manifest_filename_local}" "s3://${S3_BUCKET_NAME}/${manifest_s3_key}" --quiet || \
                 echo "WARN: Failed to upload manifest for ${s3_archive_basename}" | tee -a "$DEBUG_LOG_FILE"
             elif [ ${#chunk_s3_keys_for_manifest[@]} -eq 0 ] && [ "$all_chunks_uploaded" = true ]; then 
-               echo "No chunks were uploaded for ${dir_to_archive_relative} (dir was empty). No manifest needed." | tee -a "$DEBUG_LOG_FILE"
+               echo "No chunks were produced or uploaded for ${dir_to_archive_relative} (perhaps dir was effectively empty after tar). No manifest needed." | tee -a "$DEBUG_LOG_FILE"
             else
-              echo "ERROR: Not all chunks for ${dir_to_archive_relative} uploaded. Manifest not created." | tee -a "$DEBUG_LOG_FILE"
+              echo "ERROR: Not all chunks for ${dir_to_archive_relative} uploaded successfully or no chunks were produced. Manifest not created." | tee -a "$DEBUG_LOG_FILE"
             fi
             
             rm -rf "${chunk_tmp_dir}" 
             
-            if [ "$all_chunks_uploaded" = false ] && [ ${#chunk_s3_keys_for_manifest[@]} -gt 0 ]; then
+            if [ "$all_chunks_uploaded" = false ]; then # If any chunk upload failed
               return 1
             fi
             return 0
           }
           
-          archive_and_upload_s3_parts "${{ env.CONTAINER_DL_DIR_RELPATH }}" "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}"
-          archive_and_upload_s3_parts "${{ env.CONTAINER_STAGING_DIR_RELPATH }}" "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}"
-          archive_and_upload_s3_parts "${{ env.CONTAINER_BUILD_DIR_HOST_RELPATH }}" "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}"
+          # 调用函数并检查返回值，如果失败则退出整个步骤
+          archive_and_upload_s3_parts "${{ env.CONTAINER_DL_DIR_RELPATH }}" "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" || exit 1
+          archive_and_upload_s3_parts "${{ env.CONTAINER_STAGING_DIR_RELPATH }}" "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" || exit 1
+          archive_and_upload_s3_parts "${{ env.CONTAINER_BUILD_DIR_HOST_RELPATH }}" "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" || exit 1
           
           TOOLCHAIN_DIR_ACTUAL_NAME=$(ls -d build_dir/toolchain-* 2>/dev/null | head -n 1)
           if [ -n "$TOOLCHAIN_DIR_ACTUAL_NAME" ] && [ -d "$TOOLCHAIN_DIR_ACTUAL_NAME" ]; then
-            archive_and_upload_s3_parts "$TOOLCHAIN_DIR_ACTUAL_NAME" "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}"
+            archive_and_upload_s3_parts "$TOOLCHAIN_DIR_ACTUAL_NAME" "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" || exit 1
           else
              echo "Warning: Toolchain build directory (build_dir/toolchain-*) not found." | tee -a "$DEBUG_LOG_FILE"
           fi
@@ -558,27 +565,28 @@ jobs:
           TARGET_DIR_PATTERN="build_dir/target-*"
           ACTUAL_TARGET_BUILD_SUBDIR=$(ls -d ${TARGET_DIR_PATTERN} 2>/dev/null | head -n 1)
           if [ -n "$ACTUAL_TARGET_BUILD_SUBDIR" ] && [ -d "$ACTUAL_TARGET_BUILD_SUBDIR" ]; then
-            archive_and_upload_s3_parts "$ACTUAL_TARGET_BUILD_SUBDIR" "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}"
+            archive_and_upload_s3_parts "$ACTUAL_TARGET_BUILD_SUBDIR" "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" || exit 1
           else
             echo "Warning: Main target build directory (${TARGET_DIR_PATTERN}) not found. Skipping its S3 cache." | tee -a "$DEBUG_LOG_FILE"
           fi
 
-          archive_and_upload_s3_parts "${{ env.CONTAINER_FEEDS_DIR_RELPATH }}" "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}"
-          archive_and_upload_s3_parts "${{ env.CONTAINER_CCACHE_DIR_RELPATH }}" "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}"
-          archive_and_upload_s3_parts "${{ env.CONTAINER_BUILD_STATE_DIR_RELPATH }}" "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}"
+          archive_and_upload_s3_parts "${{ env.CONTAINER_FEEDS_DIR_RELPATH }}" "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" || exit 1
+          archive_and_upload_s3_parts "${{ env.CONTAINER_CCACHE_DIR_RELPATH }}" "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" || exit 1
+          archive_and_upload_s3_parts "${{ env.CONTAINER_BUILD_STATE_DIR_RELPATH }}" "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" || exit 1
 
           CONFIG_FILE_TO_UPLOAD_S3=".config" 
           if [ -f "$CONFIG_FILE_TO_UPLOAD_S3" ]; then 
             echo "Uploading .config file (${CONFIG_FILE_TO_UPLOAD_S3}) to S3..." | tee -a "$DEBUG_LOG_FILE"
             S3_DOT_CONFIG_S3_KEY="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${{ env.S3_DOT_CONFIG_FILENAME }}"
-            if aws s3 cp "$CONFIG_FILE_TO_UPLOAD_S3" "s3://${S3_BUCKET_NAME}/${S3_DOT_CONFIG_S3_KEY}" --quiet; then
-              echo ".config file successfully uploaded to s3://${S3_BUCKET_NAME}/${S3_DOT_CONFIG_S3_KEY}" | tee -a "$DEBUG_LOG_FILE"
-            else
+            if ! aws s3 cp "$CONFIG_FILE_TO_UPLOAD_S3" "s3://${S3_BUCKET_NAME}/${S3_DOT_CONFIG_S3_KEY}" --quiet; then
               echo "ERROR: Failed to upload .config file to S3." | tee -a "$DEBUG_LOG_FILE"
+              exit 1
             fi
+            echo ".config file successfully uploaded to s3://${S3_BUCKET_NAME}/${S3_DOT_CONFIG_S3_KEY}" | tee -a "$DEBUG_LOG_FILE"
           else
             echo "WARNING: ${CONFIG_FILE_TO_UPLOAD_S3} not found in $(pwd), cannot upload to S3." | tee -a "$DEBUG_LOG_FILE"
           fi
+          set +e # 恢复默认的错误即退出行为（如果后续还有命令的话，但这是此脚本块最后部分）
 
       - name: Upload Debug Logs (from Runner and potentially Docker)
         if: always()
