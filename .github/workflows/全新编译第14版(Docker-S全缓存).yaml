@@ -8,9 +8,9 @@ on:
         required: false
         default: 'false'
       clean_build:
-        description: '全新编译，不使用S3恢复的环境。仍会打包上传新环境到S3。首次S3填充时应为false并预清空S3。'
+        description: '全新编译，不使用S3恢复的环境。仍会打包上传新环境到S3。首次S3填充时应为true或S3路径下无缓存。'
         required: false
-        default: 'false'
+        default: 'false' # 正常二次编译设为false, 首次填充或强制全新编译设为true
       config_file:
         description: '配置文件名 (位于仓库根目录)'
         required: false
@@ -31,6 +31,7 @@ env:
   CONTAINER_REPO_CONFIG_MOUNT: /repo_config 
   DOCKER_IMAGE: ubuntu:22.04
 
+  # S3 缓存相关文件名 - 这些将作为分块归档的“基本名”
   S3_DL_DIR_ARCHIVE_BASENAME: openwrt_dl_cache.tar.zst
   S3_STAGING_DIR_ARCHIVE_BASENAME: openwrt_staging_dir_cache.tar.zst
   S3_BUILD_DIR_HOST_ARCHIVE_BASENAME: openwrt_build_dir_host_cache.tar.zst
@@ -41,13 +42,16 @@ env:
   S3_BUILD_STATE_ARCHIVE_BASENAME: openwrt_build_state.tar.zst
   S3_DOT_CONFIG_FILENAME: dot_config_snapshot
 
+  # Docker 内部脚本使用的相对路径名 (相对于 OpenWrt 源码根目录)
   CONTAINER_DL_DIR_RELPATH: "dl"
   CONTAINER_STAGING_DIR_RELPATH: "staging_dir"
   CONTAINER_BUILD_DIR_HOST_RELPATH: "build_dir/host"
+  # CONTAINER_BUILD_DIR_TARGET_RELPATH: # 会在脚本中动态确定 build_dir/target-*
   CONTAINER_FEEDS_DIR_RELPATH: "feeds"
   CONTAINER_CCACHE_DIR_RELPATH: ".ccache"
   CONTAINER_BUILD_STATE_DIR_RELPATH: ".github_actions_build_state"
 
+  # Docker 内部使用的日志文件绝对路径
   CONTAINER_CCACHE_LOGFILE_PATH: /tmp/ccache_detailed.log 
   CONTAINER_DEBUG_LOG_FILE_PATH: /tmp/build_debug_summary.log 
 
@@ -56,8 +60,8 @@ jobs:
     runs-on: ubuntu-22.04
     name: Build OpenWrt in Docker with S3 Chunked Env Cache
     env: 
-      RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env
-      CONTAINER_BUILD_AREA: /build_area
+      RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env # Runner上解压/打包S3缓存的区域
+      CONTAINER_BUILD_AREA: /build_area # 容器内OpenWrt源码和构建的根目录
     steps:
       - name: 检出仓库代码 (Checkout Repository Code)
         uses: actions/checkout@v4
@@ -76,15 +80,9 @@ jobs:
             final_s3_prefix="$s3_prefix_from_secret"
             echo "使用来自 Secret 'S3_CACHE_PATH_PREFIX' 的S3路径前缀: $final_s3_prefix"
           else
-            if [ "$repo_branch_for_path_sanitized" == "master" ]; then
-              # 对于 master 分支，默认使用您之前成功上传的 v3 路径
-              final_s3_prefix="openwrt-s3chunks-v3/master" 
-              echo "默认S3路径前缀 (master分支，指向现有v3缓存): $final_s3_prefix"
-            else
-              # 对于其他分支，使用一个通用的、可能需要新填充的路径结构
-              final_s3_prefix="openwrt-s3cache/${repo_branch_for_path_sanitized}" 
-              echo "默认S3路径前缀 (分支: ${repo_branch_for_path_sanitized}): $final_s3_prefix"
-            fi
+            # 使用一个固定的、包含版本标记的路径，方便管理和迭代替换旧缓存
+            final_s3_prefix="openwrt-s3cache/${repo_branch_for_path_sanitized}/full-env-v1" 
+            echo "使用默认S3路径前缀: $final_s3_prefix"
           fi
           echo "S3_EFFECTIVE_PATH_PREFIX=${final_s3_prefix}" >> $GITHUB_ENV
           echo "s3_prefix_out=${final_s3_prefix}" >> $GITHUB_OUTPUT
@@ -115,20 +113,26 @@ jobs:
           S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
           DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }} 
         run: |
+          # 允许脚本在命令失败时继续，以便收集所有部分的恢复日志
           set +e 
+          
+          # 确保 OpenWrt 工作区根目录存在，并在任何操作前清理干净
           mkdir -p "$RUNNER_OPENWRT_WORKSPACE"
           echo "Cleaning workspace $RUNNER_OPENWRT_WORKSPACE before any operation..." | tee -a "$DEBUG_LOG_FILE"
           if [ -n "$RUNNER_OPENWRT_WORKSPACE" ] && [ -d "$RUNNER_OPENWRT_WORKSPACE" ]; then
+            # 安全删除目录内容，而不是目录本身
             find "$RUNNER_OPENWRT_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} \; 2>/dev/null || true
           else
             echo "[WARN] RUNNER_OPENWRT_WORKSPACE ('$RUNNER_OPENWRT_WORKSPACE') is not a valid directory or not set. Skipping initial clean." | tee -a "$DEBUG_LOG_FILE"
           fi
+          # 默认S3缓存未恢复成功，这个文件会传递给Docker内部脚本使用
           echo "S3_CACHE_RESTORED=false" > $GITHUB_WORKSPACE/s3_cache_status.txt 
 
+          # 如果是 clean_build，则跳过S3缓存恢复
           if [ "${{ inputs.clean_build }}" = "true" ]; then
             echo "[INFO] clean_build is true. Skipping S3 cache restore. Workspace is clean." | tee -a "$DEBUG_LOG_FILE"
             df -h | tee -a "$DEBUG_LOG_FILE"
-            set -e 
+            set -e # 恢复脚本的错误即退出行为
             exit 0 
           fi
 
@@ -154,15 +158,18 @@ jobs:
             aws s3 cp "s3://${S3_BUCKET_NAME}/${manifest_s3_key}" "${local_manifest_file}" --no-progress --quiet
             local manifest_dl_status=$?
 
-            if [ "$manifest_dl_status" -eq 0 ]; then
+            if [ "$manifest_dl_status" -eq 0 ]; then # Manifest 下载成功
               echo "[INFO] Manifest ${archive_s3_basename}.manifest downloaded. Processing chunked restore." | tee -a "$DEBUG_LOG_FILE"
-              mapfile -t chunk_files_to_download < <(grep -v '^[[:space:]]*$' "${local_manifest_file}") # 过滤空行
+              # 过滤清单文件中的空行
+              mapfile -t chunk_files_to_download < <(grep -v '^[[:space:]]*$' "${local_manifest_file}")
               
               if [ ${#chunk_files_to_download[@]} -eq 0 ]; then 
-                echo "[WARN] Manifest for ${archive_s3_basename} is empty or contains only whitespace. No chunks to process for chunked restore." | tee -a "$DEBUG_LOG_FILE"
+                echo "[WARN] Manifest for ${archive_s3_basename} is empty. No chunks to process. Will try single file restore." | tee -a "$DEBUG_LOG_FILE"
+                # 标记一下，以便后续尝试单文件恢复
+                manifest_dl_status=1 # 假装manifest下载失败，以触发单文件恢复逻辑
               fi
 
-              if [ ${#chunk_files_to_download[@]} -gt 0 ]; then 
+              if [ "$manifest_dl_status" -eq 0 ]; then # 仅当 manifest 非空且包含有效条目时 (manifest_dl_status仍为0)
                 local all_chunks_downloaded=true; declare -a downloaded_chunk_paths_ordered
                 for chunk_filename_dirty in "${chunk_files_to_download[@]}"; do
                   local chunk_filename=$(echo "$chunk_filename_dirty" | tr -d '\r\n'); if [ -z "$chunk_filename" ]; then continue; fi
@@ -196,27 +203,32 @@ jobs:
               fi # end if [ ${#chunk_files_to_download[@]} -gt 0 ] for chunked logic
             fi # end if manifest download success
 
+            # 如果分块恢复有任何问题(part_had_error=1 标记了错误) 
+            # 或者 manifest文件下载失败 (manifest_dl_status != 0) 
             if [ $part_had_error -ne 0 ] || [ $manifest_dl_status -ne 0 ]; then
               if [ $manifest_dl_status -ne 0 ]; then 
                 echo "[INFO] Manifest for ${archive_s3_basename} not found (DL status: $manifest_dl_status) or chunk processing failed earlier. Trying single file restore..." | tee -a "$DEBUG_LOG_FILE"
               else 
                 echo "[INFO] Chunk processing for ${archive_s3_basename} had errors. Trying single file restore as fallback..." | tee -a "$DEBUG_LOG_FILE"
               fi
-              part_had_error=0 
-              local single_archive_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}"
-              local single_local_archive="${chunk_restore_tmp_dir}/${archive_s3_basename}"
-              echo "[INFO] Attempting to download single file: s3://${S3_BUCKET_NAME}/${single_archive_s3_key}" | tee -a "$DEBUG_LOG_FILE"
-              aws s3 cp "s3://${S3_BUCKET_NAME}/${single_archive_s3_key}" "${single_local_archive}" --no-progress --quiet
-              local single_dl_status=$?
-              if [ "$single_dl_status" -eq 0 ] && [ -s "${single_local_archive}" ]; then 
-                echo "[INFO] Downloaded single file ${archive_s3_basename}. Extracting..." | tee -a "$DEBUG_LOG_FILE"
-                if tar -I "zstd -T0" -xf "${single_local_archive}" -C "${target_extract_path}"; then
-                  echo "[SUCCESS] Extracted single file ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"
-                else
-                  echo "[ERROR] Failed to extract single file ${archive_s3_basename} (tar exit: $?)." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
-                fi
-              else
-                echo "[WARN] Single file ${archive_s3_basename} also not found, failed to download (aws exit: $single_dl_status), or was empty. No cache for this part." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
+              # 只有当分块恢复失败时，才重置 part_had_error 并尝试单文件恢复
+              if [ $part_had_error -ne 0 ] || [ $manifest_dl_status -ne 0 ]; then
+                  part_had_error=0 
+                  local single_archive_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}"
+                  local single_local_archive="${chunk_restore_tmp_dir}/${archive_s3_basename}"
+                  echo "[INFO] Attempting to download single file: s3://${S3_BUCKET_NAME}/${single_archive_s3_key}" | tee -a "$DEBUG_LOG_FILE"
+                  aws s3 cp "s3://${S3_BUCKET_NAME}/${single_archive_s3_key}" "${single_local_archive}" --no-progress --quiet
+                  local single_dl_status=$?
+                  if [ "$single_dl_status" -eq 0 ] && [ -s "${single_local_archive}" ]; then 
+                    echo "[INFO] Downloaded single file ${archive_s3_basename}. Extracting..." | tee -a "$DEBUG_LOG_FILE"
+                    if tar -I "zstd -T0" -xf "${single_local_archive}" -C "${target_extract_path}"; then
+                      echo "[SUCCESS] Extracted single file ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"
+                    else
+                      echo "[ERROR] Failed to extract single file ${archive_s3_basename} (tar exit: $?)." | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
+                    fi
+                  else
+                    echo "[WARN] Single file ${archive_s3_basename} also not found, failed to download (aws exit: $single_dl_status), or was empty. No cache for this part: ${archive_s3_basename}" | tee -a "$DEBUG_LOG_FILE"; part_had_error=1;
+                  fi
               fi
             fi
             rm -rf "${chunk_restore_tmp_dir}"
