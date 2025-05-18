@@ -47,13 +47,16 @@ env:
   CONTAINER_CCACHE_LOGFILE_PATH: /tmp/ccache_detailed.log
   CONTAINER_DEBUG_LOG_FILE_PATH: /tmp/build_debug_summary.log
 
+  RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env
+  CONTAINER_BUILD_AREA: /workdir/openwrt_s3_env
+
 jobs:
   build_in_docker:
     runs-on: ubuntu-22.04
     name: Build OpenWrt in Docker with S3 Chunked Env Cache
     env:
       RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env
-      CONTAINER_BUILD_AREA: /build_area
+      CONTAINER_BUILD_AREA: /workdir/openwrt_s3_env
     steps:
       - name: 检出仓库代码 (Checkout Repository Code)
         uses: actions/checkout@v4
@@ -160,6 +163,13 @@ jobs:
           echo "S3_CACHE_RESTORE_ATTEMPTED=true" >> $GITHUB_ENV
           df -h | tee -a "$DEBUG_LOG_FILE"
 
+      - name: 检查 S3 缓存还原结果
+        run: |
+          echo "RUNNER_OPENWRT_WORKSPACE=$RUNNER_OPENWRT_WORKSPACE"
+          ls -lh $RUNNER_OPENWRT_WORKSPACE/.github_actions_build_state || echo "NO .github_actions_build_state DIR"
+          cat $RUNNER_OPENWRT_WORKSPACE/.github_actions_build_state/toolchain.md5 || echo "NO toolchain.md5"
+          cat $RUNNER_OPENWRT_WORKSPACE/.github_actions_build_state/package.md5 || echo "NO package.md5"
+
       - name: 运行Docker容器并执行编译 (Run Docker Container & Compile)
         id: compile_in_docker
         env:
@@ -190,6 +200,10 @@ jobs:
           cd "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
           echo "[DOCKER] Current directory: $(pwd)" | tee -a "${INTERNAL_DEBUG_LOG}"
 
+          ls -lh .github_actions_build_state || echo "NO .github_actions_build_state in build dir"
+          cat .github_actions_build_state/toolchain.md5 || echo "NO toolchain.md5 in build dir"
+          cat .github_actions_build_state/package.md5 || echo "NO package.md5 in build dir"
+
           if [ ! -d ".git" ] && [ ! -f "Makefile" ]; then 
             echo "[DOCKER] Fresh setup or incomplete S3 cache. Checking if current directory '.' is empty before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
             if [ "$(ls -A . | wc -l)" -gt 0 ]; then
@@ -212,7 +226,7 @@ jobs:
             fi
           fi
 
-          INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL="${DOCKER_ENV_BUILD_STATE_DIR_NAME:-.github_actions_build_state}"
+          INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL=".github_actions_build_state"
           INTERNAL_CCACHE_DIR_NAME_ACTUAL="${DOCKER_ENV_CCACHE_DIR_NAME:-.ccache}"
           mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}" "./${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" "./logs"
           export CCACHE_DIR="${PWD}/${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" 
@@ -241,10 +255,10 @@ jobs:
 
           TOOLCHAIN_CONFIG_SUBSET_FOR_MD5=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort)
           TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
-          PREVIOUS_TOOLCHAIN_MD5=$(cat "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5" 2>/dev/null || echo "not_found_in_build_state")
+          PREVIOUS_TOOLCHAIN_MD5=$(cat "./.github_actions_build_state/toolchain.md5" 2>/dev/null || echo "not_found_in_build_state")
           PACKAGE_CONFIG_SUBSET_FOR_MD5=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort)
           PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
-          PREVIOUS_PACKAGE_MD5=$(cat "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5" 2>/dev/null || echo "not_found_in_build_state")
+          PREVIOUS_PACKAGE_MD5=$(cat "./.github_actions_build_state/package.md5" 2>/dev/null || echo "not_found_in_build_state")
 
           echo "==== 缓存命中分析 ====" | tee -a "${INTERNAL_DEBUG_LOG}"
           echo "当前 .config 生成的 toolchain.md5: $TOOLCHAIN_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
@@ -331,7 +345,7 @@ jobs:
             -e DOCKER_ENV_CONFIG_FILE_NAME_IN_REPO="${{ env.CONFIG_FILE_IN_REPO }}" \
             -e DOCKER_ENV_DIY_P1_SH_NAME_IN_REPO="${{ env.DIY_P1_SH_IN_REPO }}" \
             -e DOCKER_ENV_DIY_P2_SH_NAME_IN_REPO="${{ env.DIY_P2_SH_IN_REPO }}" \
-            -e DOCKER_ENV_BUILD_STATE_DIR_NAME="${{ env.BUILD_STATE_DIR_NAME }}" \
+            -e DOCKER_ENV_BUILD_STATE_DIR_NAME=".github_actions_build_state" \
             -e DOCKER_ENV_CCACHE_DIR_NAME="${{ env.CCACHE_DIR_NAME }}" \
             -e DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH="${{ env.CONTAINER_DEBUG_LOG_FILE_PATH }}" \
             -e DOCKER_ENV_CONTAINER_CCACHE_LOG_PATH="${{ env.CONTAINER_CCACHE_LOGFILE_PATH }}" \
@@ -343,7 +357,7 @@ jobs:
             -e DOCKER_ENV_BUILD_TZ="${{ env.TZ }}" \
             -e GOFLAGS="-buildvcs=false" \
             ${{ env.DOCKER_IMAGE }} \
-            bash -c "cd \"${DOCKER_ENV_CONTAINER_BUILD_AREA}\" && \"${CONTAINER_SCRIPT_PATH}\""
+            bash -c "cd \"${CONTAINER_BUILD_AREA}\" && \"${CONTAINER_SCRIPT_PATH}\""
           if [ -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success" ]; then
             echo "Docker build reported success."
             echo "status=success" >> $GITHUB_OUTPUT
@@ -450,7 +464,7 @@ jobs:
           if [ -n "$TOOLCHAIN_DIR_ACTUAL_NAME" ] && [ -d "$TOOLCHAIN_DIR_ACTUAL_NAME" ]; then
             archive_and_upload_s3_parts "$TOOLCHAIN_DIR_ACTUAL_NAME" "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}"
           else
-            echo "Warning: Toolchain build directory (build_dir/toolchain-*) not found." | tee -a "$DEBUG_LOG_FILE"
+             echo "Warning: Toolchain build directory (build_dir/toolchain-*) not found." | tee -a "$DEBUG_LOG_FILE"
           fi
           TARGET_DIR_PATTERN="build_dir/target-*"
           ACTUAL_TARGET_BUILD_SUBDIR=$(ls -d ${TARGET_DIR_PATTERN} 2>/dev/null | head -n 1)
