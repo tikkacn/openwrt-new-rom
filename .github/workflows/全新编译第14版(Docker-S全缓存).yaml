@@ -341,29 +341,27 @@ DOCKER_SCRIPT_EOF
             -e DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}" \
             -e DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE="${{ github.event.inputs.clean_build }}" \
             -e DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE="${S3_CACHE_RESTORE_ATTEMPTED:-false}" \
-            -e DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE="${{ env.feeds_changed || 'true' }}" \
+            -e DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE="true" \
             -e DOCKER_ENV_BUILD_TZ="${{ env.TZ }}" \
             -e GOFLAGS="-buildvcs=false" \
             ${{ env.DOCKER_IMAGE }} \
             bash -c "cd \"${DOCKER_ENV_CONTAINER_BUILD_AREA}\" && \"${CONTAINER_SCRIPT_PATH}\""
           if [ -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success" ]; then
-              echo "Docker build reported success."
-              echo "status=success" >> $GITHUB_OUTPUT
-              rm -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success"
+            echo "Docker build reported success."
+            echo "status=success" >> $GITHUB_OUTPUT
+            rm -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success"
           else
-              echo "Docker build reported failure or marker not found."
-              echo "status=failure" >> $GITHUB_OUTPUT
-              rm -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_failure" 2>/dev/null || true
-              cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_build_debug_summary.log" "/tmp/docker_build_debug_summary_runner.log" 2>/dev/null || true
-              cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log" "/tmp/docker_ccache_detailed_runner.log" 2>/dev/null || true
-              cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" "/tmp/docker_compile_output_runner.log" 2>/dev/null || true
+            echo "Docker build reported failure or marker not found."
+            echo "status=failure" >> $GITHUB_OUTPUT
+            rm -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_failure" 2>/dev/null || true
+            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_build_debug_summary.log" "/tmp/docker_build_debug_summary_runner.log" 2>/dev/null || true
+            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log" "/tmp/docker_ccache_detailed_runner.log" 2>/dev/null || true
+            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" "/tmp/docker_compile_output_runner.log" 2>/dev/null || true
           fi
           rm -f "${RUNNER_SCRIPT_PATH}"
 
-# ...（后续均保留你的原代码不变）
-
       - name: 修正工作区文件权限 (Correct Workspace Permissions)
-        if: always() 
+        if: always()
         run: |
           echo "Adjusting ownership of ${{ env.RUNNER_OPENWRT_WORKSPACE }} to runner user..."
           sudo chown -R $(id -u):$(id -g) "${{ env.RUNNER_OPENWRT_WORKSPACE }}"
