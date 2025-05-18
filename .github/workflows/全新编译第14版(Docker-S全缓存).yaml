@@ -170,20 +170,20 @@ jobs:
           RUNNER_SCRIPT_PATH="${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/${RUNNER_SCRIPT_FILENAME}"
           CONTAINER_SCRIPT_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/${RUNNER_SCRIPT_FILENAME}"
           cat << 'DOCKER_SCRIPT_EOF' > "${RUNNER_SCRIPT_PATH}"
-#!/bin/bash
-set -eo pipefail
-export FORCE_UNSAFE_CONFIGURE=1 
-export GOFLAGS="-buildvcs=false"
-INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
-mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")" 
-echo "[DOCKER] Starting build script..." | tee -a "${INTERNAL_DEBUG_LOG}"
+          #!/bin/bash
+          set -eo pipefail
+          export FORCE_UNSAFE_CONFIGURE=1 
+          export GOFLAGS="-buildvcs=false"
+          INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
+          mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")" 
+          echo "[DOCKER] Starting build script..." | tee -a "${INTERNAL_DEBUG_LOG}"
 
-apt-get update -y && apt-get install -y --no-install-recommends \
-  ca-certificates git build-essential libncurses5-dev libncursesw5-dev zlib1g-dev libssl-dev \
-  subversion gawk wget curl python3 python3-distutils unzip file patch rsync util-linux procps \
-  ccache libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
-  libreadline-dev libtool llvm p7zip p7zip-full xsltproc xxd gettext autopoint time
-apt-get clean && rm -rf /var/lib/apt/lists/*
+          apt-get update -y && apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential libncurses5-dev libncursesw5-dev zlib1g-dev libssl-dev \
+            subversion gawk wget curl python3 python3-distutils unzip file patch rsync util-linux procps \
+            ccache libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libreadline-dev libtool llvm p7zip p7zip-full xsltproc xxd gettext autopoint time
+          apt-get clean && rm -rf /var/lib/apt/lists/*
 
 export TZ="${DOCKER_ENV_BUILD_TZ:-Asia/Shanghai}"
 ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && echo "$TZ" > /etc/timezone
