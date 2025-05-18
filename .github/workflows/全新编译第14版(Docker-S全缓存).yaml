@@ -209,9 +209,9 @@ jobs:
             if [ "$(ls -A . | wc -l)" -gt 0 ]; then
               echo "[DOCKER_WARN] Current directory '.' is not empty. Cleaning directory before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
               echo "[DOCKER_INFO] Contents of '.' before cleaning: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
-              find . -mindepth 1 -delete 
-              if [ "$(ls -A . | wc -l)" -gt 0 ]; then 
-                echo "[DOCKER_ERROR] Failed to clean directory '.'. Aborting." | tee -a "${INTERNAL_DEBUG_LOG}"
+              find . -mindepth 1 ! -name '.github_actions_build_state' -delete
+              if [ "$(ls -A . | grep -v '^\.github_actions_build_state$' | wc -l)" -gt 0 ]; then 
+                echo "[DOCKER_ERROR] Failed to clean directory '.' (except .github_actions_build_state). Aborting." | tee -a "${INTERNAL_DEBUG_LOG}"
                 exit 1
               fi
             fi
