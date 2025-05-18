@@ -184,144 +184,142 @@ jobs:
             ccache libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
             libreadline-dev libtool llvm p7zip p7zip-full xsltproc xxd gettext autopoint time
           apt-get clean && rm -rf /var/lib/apt/lists/*
+          export TZ="${DOCKER_ENV_BUILD_TZ:-Asia/Shanghai}"
+          ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && echo "$TZ" > /etc/timezone
+          mkdir -p "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
+          cd "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
+          echo "[DOCKER] Current directory: $(pwd)" | tee -a "${INTERNAL_DEBUG_LOG}"
 
-export TZ="${DOCKER_ENV_BUILD_TZ:-Asia/Shanghai}"
-ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && echo "$TZ" > /etc/timezone
+          if [ ! -d ".git" ] && [ ! -f "Makefile" ]; then 
+            echo "[DOCKER] Fresh setup or incomplete S3 cache. Checking if current directory '.' is empty before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            if [ "$(ls -A . | wc -l)" -gt 0 ]; then
+              echo "[DOCKER_WARN] Current directory '.' is not empty. Cleaning directory before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
+              echo "[DOCKER_INFO] Contents of '.' before cleaning: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
+              find . -mindepth 1 -delete 
+              if [ "$(ls -A . | wc -l)" -gt 0 ]; then 
+                echo "[DOCKER_ERROR] Failed to clean directory '.'. Aborting." | tee -a "${INTERNAL_DEBUG_LOG}"
+                exit 1
+              fi
+            fi
+            echo "[DOCKER] Cloning OpenWrt into '.' ..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            git clone --depth 1 "${DOCKER_ENV_REPO_URL}" -b "${DOCKER_ENV_REPO_BRANCH}" .
+            if [ $? -ne 0 ]; then echo "[DOCKER_ERROR] git clone failed!" | tee -a "${INTERNAL_DEBUG_LOG}"; exit 1; fi
+            echo "[INFO] Removing .git directory after clone..." | tee -a "${INTERNAL_DEBUG_LOG}"; rm -rf .git
+          else 
+            echo "[DOCKER] Existing OpenWrt tree found (from S3 cache)." | tee -a "${INTERNAL_DEBUG_LOG}"
+            if [ -d ".git" ]; then 
+              echo "[INFO] Removing .git from S3 restored cache..." | tee -a "${INTERNAL_DEBUG_LOG}"; rm -rf .git
+            fi
+          fi
 
-mkdir -p "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
-cd "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
-echo "[DOCKER] Current directory: $(pwd)" | tee -a "${INTERNAL_DEBUG_LOG}"
+          INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL="${DOCKER_ENV_BUILD_STATE_DIR_NAME:-.github_actions_build_state}"
+          INTERNAL_CCACHE_DIR_NAME_ACTUAL="${DOCKER_ENV_CCACHE_DIR_NAME:-.ccache}"
+          mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}" "./${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" "./logs"
+          export CCACHE_DIR="${PWD}/${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" 
+          export CCACHE_LOGFILE="${DOCKER_ENV_CONTAINER_CCACHE_LOG_PATH:-/tmp/container_ccache_detailed.log}"
+          mkdir -p "$(dirname "${CCACHE_LOGFILE}")"; ccache -M 8G; ccache -z
 
-if [ ! -d ".git" ] && [ ! -f "Makefile" ]; then 
-  echo "[DOCKER] Fresh setup or incomplete S3 cache. Checking if current directory '.' is empty before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
-  if [ "$(ls -A . | wc -l)" -gt 0 ]; then
-    echo "[DOCKER_WARN] Current directory '.' is not empty. Cleaning directory before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
-    echo "[DOCKER_INFO] Contents of '.' before cleaning: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
-    find . -mindepth 1 -delete 
-    if [ "$(ls -A . | wc -l)" -gt 0 ]; then 
-       echo "[DOCKER_ERROR] Failed to clean directory '.'. Aborting." | tee -a "${INTERNAL_DEBUG_LOG}"
-       exit 1
-    fi
-  fi
-  echo "[DOCKER] Cloning OpenWrt into '.' ..." | tee -a "${INTERNAL_DEBUG_LOG}"
-  git clone --depth 1 "${DOCKER_ENV_REPO_URL}" -b "${DOCKER_ENV_REPO_BRANCH}" .
-  if [ $? -ne 0 ]; then echo "[DOCKER_ERROR] git clone failed!" | tee -a "${INTERNAL_DEBUG_LOG}"; exit 1; fi
-  echo "[INFO] Removing .git directory after clone..." | tee -a "${INTERNAL_DEBUG_LOG}"; rm -rf .git
-else 
-  echo "[DOCKER] Existing OpenWrt tree found (from S3 cache)." | tee -a "${INTERNAL_DEBUG_LOG}"
-  if [ -d ".git" ]; then 
-    echo "[INFO] Removing .git from S3 restored cache..." | tee -a "${INTERNAL_DEBUG_LOG}"; rm -rf .git
-  fi
-fi
+          INTERNAL_CONFIG_FILE_NAME="${DOCKER_ENV_CONFIG_FILE_NAME_IN_REPO:-增量缓存优化.config}"
+          INTERNAL_DIY_P1_SH_NAME="${DOCKER_ENV_DIY_P1_SH_NAME_IN_REPO:-diy-part1.sh}"
+          INTERNAL_DIY_P2_SH_NAME="${DOCKER_ENV_DIY_P2_SH_NAME_IN_REPO:-diy-part2.sh}"
 
-INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL="${DOCKER_ENV_BUILD_STATE_DIR_NAME:-.github_actions_build_state}"
-INTERNAL_CCACHE_DIR_NAME_ACTUAL="${DOCKER_ENV_CCACHE_DIR_NAME:-.ccache}"
-mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}" "./${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" "./logs"
-export CCACHE_DIR="${PWD}/${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" 
-export CCACHE_LOGFILE="${DOCKER_ENV_CONTAINER_CCACHE_LOG_PATH:-/tmp/container_ccache_detailed.log}"
-mkdir -p "$(dirname "${CCACHE_LOGFILE}")"; ccache -M 8G; ccache -z
+          cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_CONFIG_FILE_NAME}" "./.config"
+          cp ./.config ./.config.input
+          cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P1_SH_NAME}" "./${INTERNAL_DIY_P1_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P1_SH_NAME}"
+          cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P2_SH_NAME}" "./${INTERNAL_DIY_P2_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P2_SH_NAME}"
 
-INTERNAL_CONFIG_FILE_NAME="${DOCKER_ENV_CONFIG_FILE_NAME_IN_REPO:-增量缓存优化.config}"
-INTERNAL_DIY_P1_SH_NAME="${DOCKER_ENV_DIY_P1_SH_NAME_IN_REPO:-diy-part1.sh}"
-INTERNAL_DIY_P2_SH_NAME="${DOCKER_ENV_DIY_P2_SH_NAME_IN_REPO:-diy-part2.sh}"
+          "./${INTERNAL_DIY_P1_SH_NAME}"
 
-cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_CONFIG_FILE_NAME}" "./.config"
-cp ./.config ./.config.input
-cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P1_SH_NAME}" "./${INTERNAL_DIY_P1_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P1_SH_NAME}"
-cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P2_SH_NAME}" "./${INTERNAL_DIY_P2_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P2_SH_NAME}"
+          if [ -f "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" ]; then cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" "./feeds.conf.default"; elif [ ! -f "./feeds.conf.default" ] && [ -f "./feeds.conf.default.sample" ]; then cp feeds.conf.default.sample feeds.conf.default; fi
+          ./scripts/feeds update -a; ./scripts/feeds install -a; "./${INTERNAL_DIY_P2_SH_NAME}"
 
-"./${INTERNAL_DIY_P1_SH_NAME}"
+          echo "CONFIG_AUTOREMOVE=y" >> .config; echo "CONFIG_AUTOREBUILD=y" >> .config
+          if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config; fi
+          if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config; fi
 
-if [ -f "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" ]; then cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" "./feeds.conf.default"; elif [ ! -f "./feeds.conf.default" ] && [ -f "./feeds.conf.default.sample" ]; then cp feeds.conf.default.sample feeds.conf.default; fi
-./scripts/feeds update -a; ./scripts/feeds install -a; "./${INTERNAL_DIY_P2_SH_NAME}"
+          make defconfig
 
-echo "CONFIG_AUTOREMOVE=y" >> .config; echo "CONFIG_AUTOREBUILD=y" >> .config
-if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config; fi
-if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config; fi
+          TOOLCHAIN_CONFIG_SUBSET_FOR_MD5=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort)
+          TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
+          PREVIOUS_TOOLCHAIN_MD5=$(cat "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5" 2>/dev/null || echo "not_found_in_build_state")
+          PACKAGE_CONFIG_SUBSET_FOR_MD5=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort)
+          PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
+          PREVIOUS_PACKAGE_MD5=$(cat "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5" 2>/dev/null || echo "not_found_in_build_state")
 
-make defconfig
+          echo "==== 缓存命中分析 ====" | tee -a "${INTERNAL_DEBUG_LOG}"
+          echo "当前 .config 生成的 toolchain.md5: $TOOLCHAIN_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
+          echo "S3 还原的 toolchain.md5: $PREVIOUS_TOOLCHAIN_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
+          echo "当前 .config 生成的 package.md5: $PACKAGE_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
+          echo "S3 还原的 package.md5: $PREVIOUS_PACKAGE_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
 
-TOOLCHAIN_CONFIG_SUBSET_FOR_MD5=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort)
-TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
-PREVIOUS_TOOLCHAIN_MD5=$(cat "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5" 2>/dev/null || echo "not_found_in_build_state")
-PACKAGE_CONFIG_SUBSET_FOR_MD5=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort)
-PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
-PREVIOUS_PACKAGE_MD5=$(cat "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5" 2>/dev/null || echo "not_found_in_build_state")
+          DO_FULL_BUILD_DOCKER=0; DO_PACKAGE_BUILD_DOCKER=0
+          if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ]; then
+            echo "[缓存未命中] 触发了 clean_build，强制全量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            DO_FULL_BUILD_DOCKER=1
+          elif [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ]; then
+            echo "[缓存未命中] S3 缓存未还原成功，必须全量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            DO_FULL_BUILD_DOCKER=1
+          elif [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ]; then
+            echo "[缓存未命中] 找不到上次的 toolchain.md5，无法增量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            DO_FULL_BUILD_DOCKER=1
+          elif [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
+            echo "[缓存未命中] 当前 toolchain.md5($TOOLCHAIN_MD5) 与缓存($PREVIOUS_TOOLCHAIN_MD5) 不一致！" | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "可能原因：.config 里 target/arch/toolchain 改变，或缓存缺失。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            DO_FULL_BUILD_DOCKER=1
+          elif [ "$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ]; then
+            echo "[缓存未命中] 找不到上次的 package.md5，无法增量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            DO_PACKAGE_BUILD_DOCKER=1
+          elif [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
+            echo "[缓存未命中] 当前 package.md5($PACKAGE_MD5) 与缓存($PREVIOUS_PACKAGE_MD5) 不一致！" | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "可能原因：.config 里勾选的软件包有变化，或缓存缺失。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            DO_PACKAGE_BUILD_DOCKER=1
+          elif [ "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" = "true" ]; then
+            echo "[缓存未命中] feeds 变动，需重新打包。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            DO_PACKAGE_BUILD_DOCKER=1
+          else
+            echo "[缓存命中] 缓存完全命中，将增量/秒编！" | tee -a "${INTERNAL_DEBUG_LOG}"
+          fi
+          echo "==== 缓存分析完毕 ====" | tee -a "${INTERNAL_DEBUG_LOG}"
 
-echo "==== 缓存命中分析 ====" | tee -a "${INTERNAL_DEBUG_LOG}"
-echo "当前 .config 生成的 toolchain.md5: $TOOLCHAIN_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
-echo "S3 还原的 toolchain.md5: $PREVIOUS_TOOLCHAIN_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
-echo "当前 .config 生成的 package.md5: $PACKAGE_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
-echo "S3 还原的 package.md5: $PREVIOUS_PACKAGE_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
+          MAKE_JOBS_NPROC=$(nproc); MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false"
+          MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
+          MAKE_OPTS_FALLBACK="-j1 V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
+          MAKE_OPTS_SINGLE_JOB="-j1 ${MAKE_OPTS_COMMON_GOFLAGS}"
+          COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_$(date +%Y%m%d_%H%M%S).log"
+          if [ $DO_FULL_BUILD_DOCKER -eq 1 ]; then
+            echo "[DOCKER] Full Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            make tools/compile ${MAKE_OPTS_FALLBACK} || make tools/compile ${MAKE_OPTS_FALLBACK}
+            make toolchain/compile ${MAKE_OPTS_FALLBACK} || make toolchain/compile ${MAKE_OPTS_FALLBACK}
+            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+          elif [ $DO_PACKAGE_BUILD_DOCKER -eq 1 ]; then
+            echo "[DOCKER] Package Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            make package/clean V=s || true
+            if ! make package/compile ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+            make package/index ${MAKE_OPTS_SINGLE_JOB} || make package/index ${MAKE_OPTS_SINGLE_JOB}
+          else
+            echo "[DOCKER] Minimal Incremental Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+          fi
+          make target/install ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; final_install_status_docker=$?
+          make prepare ${MAKE_OPTS_MAIN} || make prepare ${MAKE_OPTS_FALLBACK}
+          make tools/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make tools/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
+          make toolchain/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make toolchain/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
 
-DO_FULL_BUILD_DOCKER=0; DO_PACKAGE_BUILD_DOCKER=0
-if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ]; then
-    echo "[缓存未命中] 触发了 clean_build，强制全量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
-    DO_FULL_BUILD_DOCKER=1
-elif [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ]; then
-    echo "[缓存未命中] S3 缓存未还原成功，必须全量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
-    DO_FULL_BUILD_DOCKER=1
-elif [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ]; then
-    echo "[缓存未命中] 找不到上次的 toolchain.md5，无法增量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
-    DO_FULL_BUILD_DOCKER=1
-elif [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
-    echo "[缓存未命中] 当前 toolchain.md5($TOOLCHAIN_MD5) 与缓存($PREVIOUS_TOOLCHAIN_MD5) 不一致！" | tee -a "${INTERNAL_DEBUG_LOG}"
-    echo "可能原因：.config 里 target/arch/toolchain 改变，或缓存缺失。" | tee -a "${INTERNAL_DEBUG_LOG}"
-    DO_FULL_BUILD_DOCKER=1
-elif [ "$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ]; then
-    echo "[缓存未命中] 找不到上次的 package.md5，无法增量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
-    DO_PACKAGE_BUILD_DOCKER=1
-elif [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
-    echo "[缓存未命中] 当前 package.md5($PACKAGE_MD5) 与缓存($PREVIOUS_PACKAGE_MD5) 不一致！" | tee -a "${INTERNAL_DEBUG_LOG}"
-    echo "可能原因：.config 里勾选的软件包有变化，或缓存缺失。" | tee -a "${INTERNAL_DEBUG_LOG}"
-    DO_PACKAGE_BUILD_DOCKER=1
-elif [ "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" = "true" ]; then
-    echo "[缓存未命中] feeds 变动，需重新打包。" | tee -a "${INTERNAL_DEBUG_LOG}"
-    DO_PACKAGE_BUILD_DOCKER=1
-else
-    echo "[缓存命中] 缓存完全命中，将增量/秒编！" | tee -a "${INTERNAL_DEBUG_LOG}"
-fi
-echo "==== 缓存分析完毕 ====" | tee -a "${INTERNAL_DEBUG_LOG}"
-
-MAKE_JOBS_NPROC=$(nproc); MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false"
-MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
-MAKE_OPTS_FALLBACK="-j1 V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
-MAKE_OPTS_SINGLE_JOB="-j1 ${MAKE_OPTS_COMMON_GOFLAGS}"
-COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_$(date +%Y%m%d_%H%M%S).log"
-if [ $DO_FULL_BUILD_DOCKER -eq 1 ]; then
-  echo "[DOCKER] Full Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
-  make tools/compile ${MAKE_OPTS_FALLBACK} || make tools/compile ${MAKE_OPTS_FALLBACK}
-  make toolchain/compile ${MAKE_OPTS_FALLBACK} || make toolchain/compile ${MAKE_OPTS_FALLBACK}
-  if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
-elif [ $DO_PACKAGE_BUILD_DOCKER -eq 1 ]; then
-  echo "[DOCKER] Package Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
-  make package/clean V=s || true
-  if ! make package/compile ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
-  make package/index ${MAKE_OPTS_SINGLE_JOB} || make package/index ${MAKE_OPTS_SINGLE_JOB}
-else
-  echo "[DOCKER] Minimal Incremental Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
-  if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
-fi
-make target/install ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; final_install_status_docker=$?
-make prepare ${MAKE_OPTS_MAIN} || make prepare ${MAKE_OPTS_FALLBACK}
-make tools/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make tools/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
-make toolchain/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make toolchain/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
-
-mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}"; cp .config "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/config_from_compile_step.txt"
-echo "$TOOLCHAIN_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5"; echo "$PACKAGE_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5"
-echo "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/last_feeds_changed_status.txt"
-find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/current_feeds.sha256"
-ccache -s | tee -a "${INTERNAL_DEBUG_LOG}"
-if [ ${final_install_status_docker} -eq 0 ] && [ -n "$(find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print -quit)" ]; then
-  touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_success"
-else
-  touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_failure"
-fi
-cp "${INTERNAL_DEBUG_LOG}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_build_debug_summary.log" || true
-cp "${CCACHE_LOGFILE}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_ccache_detailed.log" || true
-if [ -f "${COMPILE_OUTPUT_LOG_DOCKER}" ]; then cp "${COMPILE_OUTPUT_LOG_DOCKER}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_compile_output.log" || true; fi
-echo "[DOCKER] Build script finished." | tee -a "${INTERNAL_DEBUG_LOG}"
-DOCKER_SCRIPT_EOF
+          mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}"; cp .config "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/config_from_compile_step.txt"
+          echo "$TOOLCHAIN_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5"; echo "$PACKAGE_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5"
+          echo "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/last_feeds_changed_status.txt"
+          find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/current_feeds.sha256"
+          ccache -s | tee -a "${INTERNAL_DEBUG_LOG}"
+          if [ ${final_install_status_docker} -eq 0 ] && [ -n "$(find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print -quit)" ]; then
+            touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_success"
+          else
+            touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_failure"
+          fi
+          cp "${INTERNAL_DEBUG_LOG}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_build_debug_summary.log" || true
+          cp "${CCACHE_LOGFILE}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_ccache_detailed.log" || true
+          if [ -f "${COMPILE_OUTPUT_LOG_DOCKER}" ]; then cp "${COMPILE_OUTPUT_LOG_DOCKER}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_compile_output.log" || true; fi
+          echo "[DOCKER] Build script finished." | tee -a "${INTERNAL_DEBUG_LOG}"
+          DOCKER_SCRIPT_EOF
 
           chmod +x "${RUNNER_SCRIPT_PATH}"
           docker run --rm \
@@ -435,7 +433,7 @@ DOCKER_SCRIPT_EOF
               aws s3 cp "${chunk_tmp_dir}/${manifest_filename_local}" "s3://${S3_BUCKET_NAME}/${manifest_s3_key}" --quiet || \
                 echo "WARN: Failed to upload manifest for ${s3_archive_basename}" | tee -a "$DEBUG_LOG_FILE"
             elif [ ${#chunk_s3_keys_for_manifest[@]} -eq 0 ] && [ "$all_chunks_uploaded" = true ]; then
-               echo "No chunks were uploaded for ${dir_to_archive_relative} (dir was empty). No manifest needed." | tee -a "$DEBUG_LOG_FILE"
+              echo "No chunks were uploaded for ${dir_to_archive_relative} (dir was empty). No manifest needed." | tee -a "$DEBUG_LOG_FILE"
             else
               echo "ERROR: Not all chunks for ${dir_to_archive_relative} uploaded. Manifest not created." | tee -a "$DEBUG_LOG_FILE"
             fi
@@ -452,7 +450,7 @@ DOCKER_SCRIPT_EOF
           if [ -n "$TOOLCHAIN_DIR_ACTUAL_NAME" ] && [ -d "$TOOLCHAIN_DIR_ACTUAL_NAME" ]; then
             archive_and_upload_s3_parts "$TOOLCHAIN_DIR_ACTUAL_NAME" "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}"
           else
-             echo "Warning: Toolchain build directory (build_dir/toolchain-*) not found." | tee -a "$DEBUG_LOG_FILE"
+            echo "Warning: Toolchain build directory (build_dir/toolchain-*) not found." | tee -a "$DEBUG_LOG_FILE"
           fi
           TARGET_DIR_PATTERN="build_dir/target-*"
           ACTUAL_TARGET_BUILD_SUBDIR=$(ls -d ${TARGET_DIR_PATTERN} 2>/dev/null | head -n 1)
