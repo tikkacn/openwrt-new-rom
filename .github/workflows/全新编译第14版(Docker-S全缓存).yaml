@@ -548,6 +548,7 @@ jobs:
           else
               echo "警告: 最终固件收集目录 (${FIRMWARE_COLLECTION_DIR_PATH}) 未有效设置、不是目录或为空，无法创建 firmware.zip。" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
               echo "FIRMWARE_ZIP=/tmp/no_firmware_to_zip_$(date +%N).zip" >> $GITHUB_ENV
+          fi
 
       - name: 上传固件 (Artifact)
         uses: actions/upload-artifact@main
