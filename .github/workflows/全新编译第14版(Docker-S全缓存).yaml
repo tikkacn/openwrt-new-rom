@@ -1,4 +1,4 @@
-name: 全新编译第14版(Docker-S全缓存-修正版)
+name: 全新编译第14版(Docker-S全缓存-增强诊断版)
 
 on:
   workflow_dispatch:
@@ -99,22 +99,21 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: 下载并恢复S3各部分缓存到临时目录
+      - name: S3 缓存还原与关键目录检查
         if: inputs.clean_build != 'true'
         env:
           S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
           DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }}
         run: |
+          echo "==========[TIMESTAMP][S3缓存还原前] $(date '+%F %T')=========="
           echo "S3_EFFECTIVE_PATH_PREFIX in download step: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}" | tee -a "$DEBUG_LOG_FILE"
           if [ -z "$S3_BUCKET_NAME" ]; then
             echo "[WARN] AWS_S3_BUCKET_NAME secret 未设置。跳过S3缓存恢复。" | tee -a "$DEBUG_LOG_FILE"
             mkdir -p "$RUNNER_OPENWRT_WORKSPACE"
             exit 0
           fi
-          # 清理主工作区，避免污染
           rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/*
           rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/.[!.]* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/..?* 2>/dev/null || true
-          # 恢复到临时目录
           RESTORE_TMP=/workdir/openwrt_s3cache_restore_tmp
           mkdir -p "$RESTORE_TMP"
           s3_download_and_extract_parts() {
@@ -138,7 +137,6 @@ jobs:
                 cat ${downloaded_chunk_paths_ordered[@]} | zstd -d -T0 - | tar -xf - -C "${target_extract_path}"
               fi
             else
-              # 单文件模式
               local single_archive_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}"
               local single_local_archive="${chunk_restore_tmp_dir}/${archive_s3_basename}"
               if aws s3 cp "s3://${S3_BUCKET_NAME}/${single_archive_s3_key}" "${single_local_archive}" --no-progress --quiet; then
@@ -157,6 +155,21 @@ jobs:
           s3_download_and_extract_parts "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
           echo "S3_CACHE_RESTORE_ATTEMPTED=true" >> $GITHUB_ENV
 
+          echo "==========[TIMESTAMP][S3缓存还原后] $(date '+%F %T')=========="
+          echo "S3缓存目录结构如下："
+          find $RESTORE_TMP | head -100
+          for d in dl staging_dir build_dir .ccache; do
+            path="$RESTORE_TMP/$d"
+            if [ ! -d "$path" ] || [ -z "$(ls -A $path 2>/dev/null)" ]; then
+              echo "::error file=$0,line=$LINENO::[S3缓存目录 $d 未成功恢复或为空!]"
+              exit 2
+            else
+              echo "[OK] S3缓存目录 $d 存在且非空。"
+              du -sh "$path"
+            fi
+          done
+          find $RESTORE_TMP -type f -name '*.tar.zst*' -exec ls -lh {} \;
+
       - name: 检查 S3 缓存还原结果（临时目录）
         run: |
           RESTORE_TMP=/workdir/openwrt_s3cache_restore_tmp
@@ -174,6 +187,7 @@ jobs:
           cat << 'DOCKER_SCRIPT_EOF' > "${RUNNER_SCRIPT_PATH}"
           #!/bin/bash
           set -eo pipefail
+          echo "========== [TIMESTAMP][DOCKER内部准备阶段] $(date '+%F %T') =========="
           export FORCE_UNSAFE_CONFIGURE=1
           export GOFLAGS="-buildvcs=false"
           INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
@@ -189,7 +203,6 @@ jobs:
           export TZ="${DOCKER_ENV_BUILD_TZ:-Asia/Shanghai}"
           ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && echo "$TZ" > /etc/timezone
 
-          # 1. clone 到空目录
           cd "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
           rm -rf ./* .[^.]* .??* 2>/dev/null || true
           echo "[DOCKER] Directory cleaned for git clone. Contents now:"
@@ -200,7 +213,6 @@ jobs:
           if [ $? -ne 0 ]; then echo "[DOCKER_ERROR] git clone failed!"; exit 1; fi
           echo "[INFO] Removing .git directory after clone..."; rm -rf .git
 
-          # 2. 恢复所有 S3 缓存（从 host 的 restore_tmp 挂载目录复制/同步回来）
           if [ -d "/restore_tmp" ]; then
             echo "[DOCKER] Restoring S3 cache directories from /restore_tmp ..."
             for d in .github_actions_build_state .ccache build_dir dl feeds staging_dir; do
@@ -279,6 +291,12 @@ jobs:
           fi
           echo "==== 缓存分析完毕 ===="
 
+          echo "========== [CCACHE STATUS: 编译前] ==========="
+          ccache -s || echo "::warning::ccache不可用"
+          echo "=============================================="
+          start_time=$(date +%s)
+          echo "========== [MAKE START] $(date '+%F %T') =========="
+
           MAKE_JOBS_NPROC=$(nproc); MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false"
           MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
           MAKE_OPTS_FALLBACK="-j1 V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
@@ -302,6 +320,14 @@ jobs:
           make prepare ${MAKE_OPTS_MAIN} || make prepare ${MAKE_OPTS_FALLBACK}
           make tools/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make tools/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
           make toolchain/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make toolchain/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
+
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "========== [MAKE END] $(date '+%F %T')，耗时 $elapsed 秒 =========="
+
+          echo "========== [CCACHE STATUS: 编译后] ==========="
+          ccache -s || echo "::warning::ccache不可用"
+          echo "=============================================="
 
           mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}"; cp .config "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/config_from_compile_step.txt"
           echo "$TOOLCHAIN_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5"; echo "$PACKAGE_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5"
