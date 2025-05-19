@@ -209,7 +209,14 @@ jobs:
             if [ "$(ls -A . | wc -l)" -gt 0 ]; then
               echo "[DOCKER_WARN] Current directory '.' is not empty. Cleaning directory before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
               echo "[DOCKER_INFO] Contents of '.' before cleaning: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
-              find . -mindepth 1 ! -name '.github_actions_build_state' -delete
+              # 彻底只保留 .github_actions_build_state 目录，其余全部删除（包括隐藏文件/目录）
+              shopt -s dotglob
+              for entry in ./* ./.*; do
+                [ "$(basename "$entry")" = "." ] || [ "$(basename "$entry")" = ".." ] || [ "$(basename "$entry")" = ".github_actions_build_state" ] || rm -rf "$entry"
+              done
+              shopt -u dotglob
+              # 再次检查
+              echo "[DOCKER_INFO] Contents of '.' after cleaning: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
               if [ "$(ls -A . | grep -v '^\.github_actions_build_state$' | wc -l)" -gt 0 ]; then 
                 echo "[DOCKER_ERROR] Failed to clean directory '.' (except .github_actions_build_state). Aborting." | tee -a "${INTERNAL_DEBUG_LOG}"
                 exit 1
@@ -371,8 +378,6 @@ jobs:
             cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" "/tmp/docker_compile_output_runner.log" 2>/dev/null || true
           fi
           rm -f "${RUNNER_SCRIPT_PATH}"
-
-      # 其余整理、打包、上传、发布等步骤同上次，无需更改
 
       - name: 修正工作区文件权限 (Correct Workspace Permissions)
         if: always()
