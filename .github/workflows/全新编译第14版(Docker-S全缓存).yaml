@@ -1,4 +1,4 @@
-name: 全新编译第14版(Docker-S全缓存)
+name: 全新编译第14版(Docker-S全缓存-修正版)
 
 on:
   workflow_dispatch:
@@ -99,7 +99,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: 下载并恢复S3各部分缓存 (Download & Restore S3 Chunked Caches)
+      - name: 下载并恢复S3各部分缓存到临时目录
         if: inputs.clean_build != 'true'
         env:
           S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
@@ -109,12 +109,14 @@ jobs:
           if [ -z "$S3_BUCKET_NAME" ]; then
             echo "[WARN] AWS_S3_BUCKET_NAME secret 未设置。跳过S3缓存恢复。" | tee -a "$DEBUG_LOG_FILE"
             mkdir -p "$RUNNER_OPENWRT_WORKSPACE"
-            rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/.[!.]* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/..?* 2>/dev/null || true
             exit 0
           fi
-          mkdir -p "$RUNNER_OPENWRT_WORKSPACE"
-          echo "Cleaning workspace $RUNNER_OPENWRT_WORKSPACE before restoring S3 cache chunks..." | tee -a "$DEBUG_LOG_FILE"
-          rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/.[!.]* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/..?* 2>/dev/null || true
+          # 清理主工作区，避免污染
+          rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/*
+          rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/.[!.]* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/..?* 2>/dev/null || true
+          # 恢复到临时目录
+          RESTORE_TMP=/workdir/openwrt_s3cache_restore_tmp
+          mkdir -p "$RESTORE_TMP"
           s3_download_and_extract_parts() {
             local archive_s3_basename="$1"
             local target_extract_path="$2"
@@ -122,70 +124,60 @@ jobs:
             mkdir -p "${chunk_restore_tmp_dir}"
             local manifest_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}.manifest"
             local local_manifest_file="${chunk_restore_tmp_dir}/${archive_s3_basename}.manifest"
-            echo "Attempting to download manifest: s3://${S3_BUCKET_NAME}/${manifest_s3_key}" | tee -a "$DEBUG_LOG_FILE"
             if aws s3 cp "s3://${S3_BUCKET_NAME}/${manifest_s3_key}" "${local_manifest_file}" --no-progress --quiet; then
-              echo "Manifest ${archive_s3_basename}.manifest downloaded. Processing chunked restore." | tee -a "$DEBUG_LOG_FILE"
               mapfile -t chunk_files_to_download < "${local_manifest_file}"
-              if [ ${#chunk_files_to_download[@]} -eq 0 ]; then echo "Manifest empty for ${archive_s3_basename}. Skipping." | tee -a "$DEBUG_LOG_FILE"; rm -rf "${chunk_restore_tmp_dir}"; return; fi
+              if [ ${#chunk_files_to_download[@]} -eq 0 ]; then rm -rf "${chunk_restore_tmp_dir}"; return; fi
               local all_chunks_downloaded=true; declare -a downloaded_chunk_paths_ordered
               for chunk_filename_dirty in "${chunk_files_to_download[@]}"; do
                 local chunk_filename=$(echo "$chunk_filename_dirty" | tr -d '\r\n'); if [ -z "$chunk_filename" ]; then continue; fi
                 local chunk_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${chunk_filename}"; local local_chunk_path="${chunk_restore_tmp_dir}/${chunk_filename}"
-                echo "Downloading chunk ${chunk_filename} from s3://${S3_BUCKET_NAME}/${chunk_s3_key}..." | tee -a "$DEBUG_LOG_FILE"
-                if ! aws s3 cp "s3://${S3_BUCKET_NAME}/${chunk_s3_key}" "${local_chunk_path}" --no-progress --quiet; then echo "ERROR: Failed to download chunk ${chunk_filename}." | tee -a "$DEBUG_LOG_FILE"; all_chunks_downloaded=false; break; fi
+                aws s3 cp "s3://${S3_BUCKET_NAME}/${chunk_s3_key}" "${local_chunk_path}" --no-progress --quiet || all_chunks_downloaded=false
                 downloaded_chunk_paths_ordered+=("${local_chunk_path}")
               done
               if [ "$all_chunks_downloaded" = true ] && [ ${#downloaded_chunk_paths_ordered[@]} -gt 0 ]; then
-                echo "All chunks for ${archive_s3_basename} downloaded. Combining and extracting to ${target_extract_path}..." | tee -a "$DEBUG_LOG_FILE"
-                paths_to_cat=""; for chunk_path_item in "${downloaded_chunk_paths_ordered[@]}"; do paths_to_cat="${paths_to_cat} ${chunk_path_item}"; done
-                if [ -n "$paths_to_cat" ]; then
-                  if cat $paths_to_cat | zstd -d -T0 - | tar -xf - -C "${target_extract_path}"; then echo "Restored ${archive_s3_basename} from chunks." | tee -a "$DEBUG_LOG_FILE"; else echo "ERROR: Failed to extract chunks for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; fi
-                else echo "No chunk files to cat for ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; fi
-              else echo "Not all chunks for ${archive_s3_basename} downloaded or no chunks listed. Skipping." | tee -a "$DEBUG_LOG_FILE"; fi
+                cat ${downloaded_chunk_paths_ordered[@]} | zstd -d -T0 - | tar -xf - -C "${target_extract_path}"
+              fi
             else
-              echo "Manifest for ${archive_s3_basename} not found. Trying single file restore for ${archive_s3_basename}..." | tee -a "$DEBUG_LOG_FILE"
+              # 单文件模式
               local single_archive_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}"
               local single_local_archive="${chunk_restore_tmp_dir}/${archive_s3_basename}"
               if aws s3 cp "s3://${S3_BUCKET_NAME}/${single_archive_s3_key}" "${single_local_archive}" --no-progress --quiet; then
-                if tar -I "zstd -T0" -xf "${single_local_archive}" -C "${target_extract_path}"; then echo "Extracted single ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; else echo "ERROR: Failed to extract single ${archive_s3_basename}." | tee -a "$DEBUG_LOG_FILE"; fi
-              else echo "Single file ${archive_s3_basename} also not found. No cache for this part." | tee -a "$DEBUG_LOG_FILE"; fi
+                tar -I "zstd -T0" -xf "${single_local_archive}" -C "${target_extract_path}"
+              fi
             fi
             rm -rf "${chunk_restore_tmp_dir}"
           }
-          s3_download_and_extract_parts "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" "$RUNNER_OPENWRT_WORKSPACE"
+          s3_download_and_extract_parts "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          s3_download_and_extract_parts "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          s3_download_and_extract_parts "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          s3_download_and_extract_parts "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          s3_download_and_extract_parts "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
           echo "S3_CACHE_RESTORE_ATTEMPTED=true" >> $GITHUB_ENV
-          df -h | tee -a "$DEBUG_LOG_FILE"
 
-      - name: 检查 S3 缓存还原结果
+      - name: 检查 S3 缓存还原结果（临时目录）
         run: |
-          echo "RUNNER_OPENWRT_WORKSPACE=$RUNNER_OPENWRT_WORKSPACE"
-          ls -lh $RUNNER_OPENWRT_WORKSPACE/.github_actions_build_state || echo "NO .github_actions_build_state DIR"
-          cat $RUNNER_OPENWRT_WORKSPACE/.github_actions_build_state/toolchain.md5 || echo "NO toolchain.md5"
-          cat $RUNNER_OPENWRT_WORKSPACE/.github_actions_build_state/package.md5 || echo "NO package.md5"
+          RESTORE_TMP=/workdir/openwrt_s3cache_restore_tmp
+          echo "Restored S3 cache content:"
+          find $RESTORE_TMP
 
       - name: 运行Docker容器并执行编译 (Run Docker Container & Compile)
         id: compile_in_docker
         env:
           S3_CACHE_RESTORE_ATTEMPTED: ${{ env.S3_CACHE_RESTORE_ATTEMPTED }}
         run: |
-          echo "DEBUG: S3_CACHE_RESTORE_ATTEMPTED=$S3_CACHE_RESTORE_ATTEMPTED"
           RUNNER_SCRIPT_FILENAME="docker_build_script.sh"
           RUNNER_SCRIPT_PATH="${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/${RUNNER_SCRIPT_FILENAME}"
           CONTAINER_SCRIPT_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/${RUNNER_SCRIPT_FILENAME}"
           cat << 'DOCKER_SCRIPT_EOF' > "${RUNNER_SCRIPT_PATH}"
           #!/bin/bash
           set -eo pipefail
-          export FORCE_UNSAFE_CONFIGURE=1 
+          export FORCE_UNSAFE_CONFIGURE=1
           export GOFLAGS="-buildvcs=false"
           INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
-          mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")" 
+          mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")"
           echo "[DOCKER] Starting build script..." | tee -a "${INTERNAL_DEBUG_LOG}"
 
           apt-get update -y && apt-get install -y --no-install-recommends \
@@ -196,47 +188,34 @@ jobs:
           apt-get clean && rm -rf /var/lib/apt/lists/*
           export TZ="${DOCKER_ENV_BUILD_TZ:-Asia/Shanghai}"
           ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && echo "$TZ" > /etc/timezone
-          mkdir -p "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
+
+          # 1. clone 到空目录
           cd "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
-          echo "[DOCKER] Current directory: $(pwd)" | tee -a "${INTERNAL_DEBUG_LOG}"
+          rm -rf ./* .[^.]* .??* 2>/dev/null || true
+          echo "[DOCKER] Directory cleaned for git clone. Contents now:"
+          ls -al
 
-          ls -lh .github_actions_build_state || echo "NO .github_actions_build_state in build dir"
-          cat .github_actions_build_state/toolchain.md5 || echo "NO toolchain.md5 in build dir"
-          cat .github_actions_build_state/package.md5 || echo "NO package.md5 in build dir"
+          echo "[DOCKER] Cloning OpenWrt into '.' ..."
+          git clone --depth 1 "${DOCKER_ENV_REPO_URL}" -b "${DOCKER_ENV_REPO_BRANCH}" .
+          if [ $? -ne 0 ]; then echo "[DOCKER_ERROR] git clone failed!"; exit 1; fi
+          echo "[INFO] Removing .git directory after clone..."; rm -rf .git
 
-          if [ ! -d ".git" ] && [ ! -f "Makefile" ]; then 
-            echo "[DOCKER] Fresh setup or incomplete S3 cache. Checking if current directory '.' is empty before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
-            if [ "$(ls -A . | wc -l)" -gt 0 ]; then
-              echo "[DOCKER_WARN] Current directory '.' is not empty. Cleaning directory before clone..." | tee -a "${INTERNAL_DEBUG_LOG}"
-              echo "[DOCKER_INFO] Contents of '.' before cleaning: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
-              # 彻底只保留 .github_actions_build_state 目录，其余全部删除（包括隐藏文件/目录）
-              shopt -s dotglob
-              for entry in ./* ./.*; do
-                [ "$(basename "$entry")" = "." ] || [ "$(basename "$entry")" = ".." ] || [ "$(basename "$entry")" = ".github_actions_build_state" ] || rm -rf "$entry"
-              done
-              shopt -u dotglob
-              # 再次检查
-              echo "[DOCKER_INFO] Contents of '.' after cleaning: $(ls -A .)" | tee -a "${INTERNAL_DEBUG_LOG}"
-              if [ "$(ls -A . | grep -v '^\.github_actions_build_state$' | wc -l)" -gt 0 ]; then 
-                echo "[DOCKER_ERROR] Failed to clean directory '.' (except .github_actions_build_state). Aborting." | tee -a "${INTERNAL_DEBUG_LOG}"
-                exit 1
+          # 2. 恢复所有 S3 缓存（从 host 的 restore_tmp 挂载目录复制/同步回来）
+          if [ -d "/restore_tmp" ]; then
+            echo "[DOCKER] Restoring S3 cache directories from /restore_tmp ..."
+            for d in .github_actions_build_state .ccache build_dir dl feeds staging_dir; do
+              if [ -d "/restore_tmp/\$d" ]; then
+                echo "[DOCKER] Restoring \$d ..."
+                rm -rf "./\$d"
+                cp -a "/restore_tmp/\$d" "./"
               fi
-            fi
-            echo "[DOCKER] Cloning OpenWrt into '.' ..." | tee -a "${INTERNAL_DEBUG_LOG}"
-            git clone --depth 1 "${DOCKER_ENV_REPO_URL}" -b "${DOCKER_ENV_REPO_BRANCH}" .
-            if [ $? -ne 0 ]; then echo "[DOCKER_ERROR] git clone failed!" | tee -a "${INTERNAL_DEBUG_LOG}"; exit 1; fi
-            echo "[INFO] Removing .git directory after clone..." | tee -a "${INTERNAL_DEBUG_LOG}"; rm -rf .git
-          else 
-            echo "[DOCKER] Existing OpenWrt tree found (from S3 cache)." | tee -a "${INTERNAL_DEBUG_LOG}"
-            if [ -d ".git" ]; then 
-              echo "[INFO] Removing .git from S3 restored cache..." | tee -a "${INTERNAL_DEBUG_LOG}"; rm -rf .git
-            fi
+            done
           fi
 
           INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL=".github_actions_build_state"
           INTERNAL_CCACHE_DIR_NAME_ACTUAL="${DOCKER_ENV_CCACHE_DIR_NAME:-.ccache}"
           mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}" "./${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" "./logs"
-          export CCACHE_DIR="${PWD}/${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" 
+          export CCACHE_DIR="${PWD}/${INTERNAL_CCACHE_DIR_NAME_ACTUAL}"
           export CCACHE_LOGFILE="${DOCKER_ENV_CONTAINER_CCACHE_LOG_PATH:-/tmp/container_ccache_detailed.log}"
           mkdir -p "$(dirname "${CCACHE_LOGFILE}")"; ccache -M 8G; ccache -z
 
@@ -267,40 +246,38 @@ jobs:
           PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
           PREVIOUS_PACKAGE_MD5=$(cat "./.github_actions_build_state/package.md5" 2>/dev/null || echo "not_found_in_build_state")
 
-          echo "==== 缓存命中分析 ====" | tee -a "${INTERNAL_DEBUG_LOG}"
-          echo "当前 .config 生成的 toolchain.md5: $TOOLCHAIN_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
-          echo "S3 还原的 toolchain.md5: $PREVIOUS_TOOLCHAIN_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
-          echo "当前 .config 生成的 package.md5: $PACKAGE_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
-          echo "S3 还原的 package.md5: $PREVIOUS_PACKAGE_MD5" | tee -a "${INTERNAL_DEBUG_LOG}"
+          echo "==== 缓存命中分析 ===="
+          echo "当前 .config 生成的 toolchain.md5: $TOOLCHAIN_MD5"
+          echo "S3 还原的 toolchain.md5: $PREVIOUS_TOOLCHAIN_MD5"
+          echo "当前 .config 生成的 package.md5: $PACKAGE_MD5"
+          echo "S3 还原的 package.md5: $PREVIOUS_PACKAGE_MD5"
 
           DO_FULL_BUILD_DOCKER=0; DO_PACKAGE_BUILD_DOCKER=0
           if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ]; then
-            echo "[缓存未命中] 触发了 clean_build，强制全量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[缓存未命中] 触发了 clean_build，强制全量编译。"
             DO_FULL_BUILD_DOCKER=1
           elif [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ]; then
-            echo "[缓存未命中] S3 缓存未还原成功，必须全量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[缓存未命中] S3 缓存未还原成功，必须全量编译。"
             DO_FULL_BUILD_DOCKER=1
           elif [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ]; then
-            echo "[缓存未命中] 找不到上次的 toolchain.md5，无法增量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[缓存未命中] 找不到上次的 toolchain.md5，无法增量编译。"
             DO_FULL_BUILD_DOCKER=1
           elif [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
-            echo "[缓存未命中] 当前 toolchain.md5($TOOLCHAIN_MD5) 与缓存($PREVIOUS_TOOLCHAIN_MD5) 不一致！" | tee -a "${INTERNAL_DEBUG_LOG}"
-            echo "可能原因：.config 里 target/arch/toolchain 改变，或缓存缺失。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[缓存未命中] 当前 toolchain.md5($TOOLCHAIN_MD5) 与缓存($PREVIOUS_TOOLCHAIN_MD5) 不一致！"
             DO_FULL_BUILD_DOCKER=1
           elif [ "$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ]; then
-            echo "[缓存未命中] 找不到上次的 package.md5，无法增量编译。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[缓存未命中] 找不到上次的 package.md5，无法增量编译。"
             DO_PACKAGE_BUILD_DOCKER=1
           elif [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
-            echo "[缓存未命中] 当前 package.md5($PACKAGE_MD5) 与缓存($PREVIOUS_PACKAGE_MD5) 不一致！" | tee -a "${INTERNAL_DEBUG_LOG}"
-            echo "可能原因：.config 里勾选的软件包有变化，或缓存缺失。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[缓存未命中] 当前 package.md5($PACKAGE_MD5) 与缓存($PREVIOUS_PACKAGE_MD5) 不一致！"
             DO_PACKAGE_BUILD_DOCKER=1
           elif [ "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" = "true" ]; then
-            echo "[缓存未命中] feeds 变动，需重新打包。" | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[缓存未命中] feeds 变动，需重新打包。"
             DO_PACKAGE_BUILD_DOCKER=1
           else
-            echo "[缓存命中] 缓存完全命中，将增量/秒编！" | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[缓存命中] 缓存完全命中，将增量/秒编！"
           fi
-          echo "==== 缓存分析完毕 ====" | tee -a "${INTERNAL_DEBUG_LOG}"
+          echo "==== 缓存分析完毕 ===="
 
           MAKE_JOBS_NPROC=$(nproc); MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false"
           MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
@@ -308,17 +285,17 @@ jobs:
           MAKE_OPTS_SINGLE_JOB="-j1 ${MAKE_OPTS_COMMON_GOFLAGS}"
           COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_$(date +%Y%m%d_%H%M%S).log"
           if [ $DO_FULL_BUILD_DOCKER -eq 1 ]; then
-            echo "[DOCKER] Full Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[DOCKER] Full Build..."
             make tools/compile ${MAKE_OPTS_FALLBACK} || make tools/compile ${MAKE_OPTS_FALLBACK}
             make toolchain/compile ${MAKE_OPTS_FALLBACK} || make toolchain/compile ${MAKE_OPTS_FALLBACK}
             if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
           elif [ $DO_PACKAGE_BUILD_DOCKER -eq 1 ]; then
-            echo "[DOCKER] Package Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[DOCKER] Package Build..."
             make package/clean V=s || true
             if ! make package/compile ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
             make package/index ${MAKE_OPTS_SINGLE_JOB} || make package/index ${MAKE_OPTS_SINGLE_JOB}
           else
-            echo "[DOCKER] Minimal Incremental Build..." | tee -a "${INTERNAL_DEBUG_LOG}"
+            echo "[DOCKER] Minimal Incremental Build..."
             if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
           fi
           make target/install ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; final_install_status_docker=$?
@@ -345,6 +322,7 @@ jobs:
           chmod +x "${RUNNER_SCRIPT_PATH}"
           docker run --rm \
             -v "${{ env.RUNNER_OPENWRT_WORKSPACE }}:${{ env.CONTAINER_BUILD_AREA }}" \
+            -v "/workdir/openwrt_s3cache_restore_tmp:/restore_tmp:ro" \
             -v "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}:${{ env.CONTAINER_REPO_CONFIG_MOUNT }}:ro" \
             -e DOCKER_ENV_REPO_URL="${{ env.REPO_URL }}" \
             -e DOCKER_ENV_REPO_BRANCH="${{ env.REPO_BRANCH }}" \
