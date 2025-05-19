@@ -187,7 +187,14 @@ jobs:
           cat << 'DOCKER_SCRIPT_EOF' > "${RUNNER_SCRIPT_PATH}"
           #!/bin/bash
           set -eo pipefail
-          echo "========== [TIMESTAMP][DOCKER内部准备阶段] $(date '+%F %T') =========="
+
+          # === 诊断日志收集初始化 ===
+          DIAG_DIR="bin/targets/__diagnose"
+          DIAG_FILE="$DIAG_DIR/diagnose_summary.txt"
+          mkdir -p "$DIAG_DIR"
+          : > "$DIAG_FILE"
+          add_diag() { echo -e "$1" | tee -a "$DIAG_FILE"; }
+
           export FORCE_UNSAFE_CONFIGURE=1
           export GOFLAGS="-buildvcs=false"
           INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
@@ -210,7 +217,7 @@ jobs:
 
           echo "[DOCKER] Cloning OpenWrt into '.' ..."
           git clone --depth 1 "${DOCKER_ENV_REPO_URL}" -b "${DOCKER_ENV_REPO_BRANCH}" .
-          if [ $? -ne 0 ]; then echo "[DOCKER_ERROR] git clone failed!"; exit 1; fi
+          if [ $? -ne 0 ]; then add_diag "[DOCKER_ERROR] git clone failed!"; exit 1; fi
           echo "[INFO] Removing .git directory after clone..."; rm -rf .git
 
           if [ -d "/restore_tmp" ]; then
@@ -258,62 +265,55 @@ jobs:
           PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
           PREVIOUS_PACKAGE_MD5=$(cat "./.github_actions_build_state/package.md5" 2>/dev/null || echo "not_found_in_build_state")
 
-          echo "==== 缓存命中分析 ===="
-          echo "当前 .config 生成的 toolchain.md5: $TOOLCHAIN_MD5"
-          echo "S3 还原的 toolchain.md5: $PREVIOUS_TOOLCHAIN_MD5"
-          echo "当前 .config 生成的 package.md5: $PACKAGE_MD5"
-          echo "S3 还原的 package.md5: $PREVIOUS_PACKAGE_MD5"
-
-          DO_FULL_BUILD_DOCKER=0; DO_PACKAGE_BUILD_DOCKER=0
-          if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ]; then
-            echo "[缓存未命中] 触发了 clean_build，强制全量编译。"
-            DO_FULL_BUILD_DOCKER=1
-          elif [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ]; then
-            echo "[缓存未命中] S3 缓存未还原成功，必须全量编译。"
-            DO_FULL_BUILD_DOCKER=1
-          elif [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ]; then
-            echo "[缓存未命中] 找不到上次的 toolchain.md5，无法增量编译。"
-            DO_FULL_BUILD_DOCKER=1
-          elif [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
-            echo "[缓存未命中] 当前 toolchain.md5($TOOLCHAIN_MD5) 与缓存($PREVIOUS_TOOLCHAIN_MD5) 不一致！"
-            DO_FULL_BUILD_DOCKER=1
-          elif [ "$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ]; then
-            echo "[缓存未命中] 找不到上次的 package.md5，无法增量编译。"
-            DO_PACKAGE_BUILD_DOCKER=1
-          elif [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
-            echo "[缓存未命中] 当前 package.md5($PACKAGE_MD5) 与缓存($PREVIOUS_PACKAGE_MD5) 不一致！"
-            DO_PACKAGE_BUILD_DOCKER=1
-          elif [ "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" = "true" ]; then
-            echo "[缓存未命中] feeds 变动，需重新打包。"
-            DO_PACKAGE_BUILD_DOCKER=1
-          else
-            echo "[缓存命中] 缓存完全命中，将增量/秒编！"
+          # === 诊断日志关键点收集 ===
+          if [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ]; then
+            add_diag "原因：S3缓存未还原，必须全量编译。"
           fi
-          echo "==== 缓存分析完毕 ===="
+          if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ]; then
+            add_diag "原因：clean_build触发，强制全量编译。"
+          fi
+          if [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ]; then
+            add_diag "原因：上次toolchain.md5缺失，无法增量。"
+          elif [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
+            add_diag "原因：toolchain.md5变动（本次：$TOOLCHAIN_MD5，上次：$PREVIOUS_TOOLCHAIN_MD5），需全量编译。"
+          fi
+          if [ "$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ]; then
+            add_diag "原因：上次package.md5缺失，无法增量。"
+          elif [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
+            add_diag "原因：package.md5变动（本次：$PACKAGE_MD5，上次：$PREVIOUS_PACKAGE_MD5），需包编译。"
+          fi
+          if [ -f .github_actions_build_state/config_from_compile_step.txt ]; then
+            if ! diff .config .github_actions_build_state/config_from_compile_step.txt >/dev/null; then
+              add_diag "config变动:\n$(diff .config .github_actions_build_state/config_from_compile_step.txt | head -20)"
+            fi
+          fi
+          if [ -f feeds.conf.default ] && [ -f .github_actions_build_state/feeds.conf.default ]; then
+            if ! diff feeds.conf.default .github_actions_build_state/feeds.conf.default >/dev/null; then
+              add_diag "feeds.conf.default变动:\n$(diff feeds.conf.default .github_actions_build_state/feeds.conf.default | head -20)"
+            fi
+          fi
+          CCACHE_STATS=$(ccache -s 2>/dev/null || true)
+          CCACHE_HIT=$(echo "$CCACHE_STATS" | grep "hit rate" | awk '{print $3}')
+          add_diag "ccache命中率: $CCACHE_HIT"
+          if [ "$CCACHE_HIT" = "0.0%" ]; then
+            add_diag "原因：ccache未命中，建议检查CCACHE_DIR和主机时钟/文件戳。"
+          fi
 
-          echo "========== [CCACHE STATUS: 编译前] ==========="
-          ccache -s || echo "::warning::ccache不可用"
-          echo "=============================================="
           start_time=$(date +%s)
-          echo "========== [MAKE START] $(date '+%F %T') =========="
-
           MAKE_JOBS_NPROC=$(nproc); MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false"
           MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
           MAKE_OPTS_FALLBACK="-j1 V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
-          MAKE_OPTS_SINGLE_JOB="-j1 ${MAKE_OPTS_COMMON_GOFLAGS}"
           COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_$(date +%Y%m%d_%H%M%S).log"
+          final_install_status_docker=0
           if [ $DO_FULL_BUILD_DOCKER -eq 1 ]; then
-            echo "[DOCKER] Full Build..."
             make tools/compile ${MAKE_OPTS_FALLBACK} || make tools/compile ${MAKE_OPTS_FALLBACK}
             make toolchain/compile ${MAKE_OPTS_FALLBACK} || make toolchain/compile ${MAKE_OPTS_FALLBACK}
             if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
           elif [ $DO_PACKAGE_BUILD_DOCKER -eq 1 ]; then
-            echo "[DOCKER] Package Build..."
             make package/clean V=s || true
             if ! make package/compile ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
-            make package/index ${MAKE_OPTS_SINGLE_JOB} || make package/index ${MAKE_OPTS_SINGLE_JOB}
+            make package/index -j1 || make package/index -j1
           else
-            echo "[DOCKER] Minimal Incremental Build..."
             if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
           fi
           make target/install ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; final_install_status_docker=$?
@@ -323,11 +323,13 @@ jobs:
 
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
-          echo "========== [MAKE END] $(date '+%F %T')，耗时 $elapsed 秒 =========="
 
-          echo "========== [CCACHE STATUS: 编译后] ==========="
-          ccache -s || echo "::warning::ccache不可用"
-          echo "=============================================="
+          # 编译失败诊断
+          if [ "$final_install_status_docker" != "0" ]; then
+            add_diag "原因：make出错，详见compile日志。"
+          fi
+
+          add_diag "本次make耗时: ${elapsed}秒"
 
           mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}"; cp .config "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/config_from_compile_step.txt"
           echo "$TOOLCHAIN_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5"; echo "$PACKAGE_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5"
@@ -389,6 +391,14 @@ jobs:
           echo "Adjusting ownership of ${{ env.RUNNER_OPENWRT_WORKSPACE }} to runner user..."
           sudo chown -R $(id -u):$(id -g) "${{ env.RUNNER_OPENWRT_WORKSPACE }}"
           echo "Ownership adjustment complete."
+
+      # === 新增步骤：上传诊断日志 ===
+      - name: 上传诊断日志到Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnose_summary
+          path: ${{ env.RUNNER_OPENWRT_WORKSPACE }}/bin/targets/__diagnose/diagnose_summary.txt
 
       - name: 打包并上传S3各部分缓存 (Pack & Upload S3 Chunked Caches)
         if: steps.compile_in_docker.outputs.status == 'success' && !cancelled()
