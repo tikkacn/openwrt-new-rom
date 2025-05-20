@@ -1,4 +1,4 @@
-name: 检查CloudFront缓存结构及常见增量错误
+name: 检查CloudFront缓存结构及空间利用（仿主编译脚本）
 
 on:
   workflow_dispatch:
@@ -19,18 +19,37 @@ jobs:
   check_cache:
     runs-on: ubuntu-22.04
     steps:
+      - name: 最大化Runner空间
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 20480
+          swap-size-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'false'
+          build-mount-path: '/workdir'
+
+      - name: Space check (before restore)
+        run: |
+          echo "== RUNNER DISK USAGE (BEFORE) =="
+          df -h
+          echo "== /workdir USAGE (BEFORE) =="
+          du -sh /workdir/* || true
+
       - name: 还原CloudFront缓存到临时目录
         env:
           CF_EFFECTIVE_URL_PREFIX: ${{ env.CF_CDN_DOMAIN }}/${{ env.S3_EFFECTIVE_PATH_PREFIX }}
         run: |
           set -e
-          RESTORE_TMP="${{ github.workspace }}/cloudfront_cache_check_tmp"
+          RESTORE_TMP=/workdir/cloudfront_cache_check_tmp
           mkdir -p "$RESTORE_TMP"
 
           cf_download_and_extract_parts() {
             local archive_basename="$1"
             local target_extract_path="$2"
-            local chunk_restore_tmp_dir="${RUNNER_TEMP:-/tmp}/cf_restore_chunks_$(echo "$archive_basename" | tr -dc 'a-zA-Z0-9_')"
+            local chunk_restore_tmp_dir="/tmp/cf_restore_chunks_$(echo "$archive_basename" | tr -dc 'a-zA-Z0-9_')"
             mkdir -p "${chunk_restore_tmp_dir}"
             local manifest_url="${CF_EFFECTIVE_URL_PREFIX}/${archive_basename}.manifest"
             local local_manifest_file="${chunk_restore_tmp_dir}/${archive_basename}.manifest"
@@ -66,68 +85,27 @@ jobs:
           cf_download_and_extract_parts "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
           echo "CloudFront缓存全部还原完毕于 $RESTORE_TMP"
 
-      - name: 检查关键目录、文件及常见增量错误
+      - name: 空间检查与关键目录检测
         run: |
-          RESTORE_TMP="${{ github.workspace }}/cloudfront_cache_check_tmp"
-          echo "== 关键目录结构预览 =="
+          RESTORE_TMP=/workdir/cloudfront_cache_check_tmp
+          echo "== RUNNER DISK USAGE (AFTER RESTORE) =="
+          df -h
+          echo "== /workdir USAGE (AFTER RESTORE) =="
+          du -sh /workdir/* || true
+          echo "== 缓存目录结构预览 =="
           find $RESTORE_TMP | head -100
-
-          echo "== 检查关键目录是否存在且非空 =="
-          for d in dl staging_dir build_dir feeds .ccache; do
-            if [ ! -d "$RESTORE_TMP/$d" ]; then
-              echo "::error::[致命] 关键缓存目录 $d 缺失，增量必定失败！"
-            elif [ -z "$(ls -A $RESTORE_TMP/$d 2>/dev/null)" ]; then
-              echo "::warning::[警告] 关键缓存目录 $d 存在但内容为空，增量可能失败！"
+          for d in dl staging_dir build_dir .ccache; do
+            path="$RESTORE_TMP/$d"
+            if [ ! -d "$path" ] || [ -z "$(ls -A $path 2>/dev/null)" ]; then
+              echo "::error::[致命] CDN缓存目录 $d 未成功恢复或为空!"
+              exit 2
             else
-              echo "[OK] $d 目录存在且非空"
-              ls -lh "$RESTORE_TMP/$d" | head -10
+              echo "[OK] CDN缓存目录 $d 存在且非空。"
+              du -sh "$path"
             fi
           done
-
-          echo "== 检查 build_dir/toolchain-* 子目录 =="
-          ls -ld "$RESTORE_TMP"/build_dir/toolchain-* 2>/dev/null || echo "::warning::未找到 build_dir/toolchain-* 子目录"
-
-          echo "== 检查关键文件 =="
-          for f in .config .config.old feeds.conf version.number; do
-            if [ -f "$RESTORE_TMP/$f" ]; then
-              echo "[OK] $f 存在"
-            else
-              echo "::warning::[警告] $f 缺失"
-            fi
-          done
-
-          echo "== 检查 .manifest 文件 =="
-          find $RESTORE_TMP -name '*.manifest' | head -10
-
-          echo "== toolchain.md5 检查 =="
-          FOUND_TOOLCHAIN_MD5="$(find $RESTORE_TMP -name 'toolchain.md5' | head -1)"
-          if [ -z "$FOUND_TOOLCHAIN_MD5" ]; then
-            echo "::error::[致命] toolchain.md5 未找到，增量 toolchain 必定失效！"
-          else
-            echo "[OK] toolchain.md5 存在于: $FOUND_TOOLCHAIN_MD5"
-            ls -lh "$FOUND_TOOLCHAIN_MD5"
-          fi
-
-          echo "== 检查 stamp 相关文件 =="
-          find $RESTORE_TMP -type f -name 'stamp.*' | head -10
-
-          echo "== 检查归档文件大小 =="
-          for file in "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}"; do
-            url="${{ env.CF_CDN_DOMAIN }}/${{ env.S3_EFFECTIVE_PATH_PREFIX }}/$file"
-            size=$(curl -sI "$url" | grep -i Content-Length | awk '{print $2}' | tr -d '\r\n')
-            echo "$file\t$size"
-            if [ -z "$size" ] || [ "$size" -lt 10240 ]; then
-              echo "::warning::[警告] $file 尺寸异常，可能包损坏或内容丢失"
-            fi
-          done
-
-          echo "== 检查软链接 =="
-          find $RESTORE_TMP -type l | head -10
-
-          echo "== 检查目录权限 =="
-          find $RESTORE_TMP -type d -exec ls -ld {} \; | head -10
 
       - name: 自动清理检查目录
         run: |
-          rm -rf "${{ github.workspace }}/cloudfront_cache_check_tmp"
+          rm -rf /workdir/cloudfront_cache_check_tmp
           echo "已自动清理本地检查目录"
