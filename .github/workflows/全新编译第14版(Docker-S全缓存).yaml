@@ -547,6 +547,21 @@ jobs:
           tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
           body_path: release_body.txt
           files: ${{ env.FIRMWARE_ZIP }}
+      # ======= 新增：刷新 CloudFront CDN 缓存 =======
+      - name: 刷新 CloudFront CDN 缓存 (CloudFront Invalidate Cache)
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          CF_DISTRIBUTION_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
+          S3_EFFECTIVE_PATH_PREFIX: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}
+        run: |
+          echo "开始刷新 CloudFront CDN 缓存: /${S3_EFFECTIVE_PATH_PREFIX}/*"
+          aws cloudfront create-invalidation \
+            --distribution-id "$CF_DISTRIBUTION_ID" \
+            --paths "/${S3_EFFECTIVE_PATH_PREFIX}/*"
+          echo "CloudFront CDN 缓存刷新请求已提交"          
 
       - name: 删除旧的Releases (Delete Old Releases)
         uses: dev-drprasad/delete-older-releases@master
