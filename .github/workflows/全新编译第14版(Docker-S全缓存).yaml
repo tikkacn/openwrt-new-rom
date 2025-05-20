@@ -261,17 +261,10 @@ jobs:
           elif [ ! -f "./feeds.conf.default" ] && [ -f "./feeds.conf.default.sample" ]; then 
             cp feeds.conf.default.sample feeds.conf.default
           fi
-          
-          # ===== 添加的修复代码：禁用PassWall feeds =====
-          echo "[DEBUG] 原始 feeds.conf.default 内容:"
-          cat feeds.conf.default
 
-          echo "[DEBUG] 暂时禁用PassWall feeds进行首次构建..."
-          sed -i '/passwall/s/^/#/' feeds.conf.default
-
-          echo "[DEBUG] 修改后的feeds.conf.default内容:"
-          cat feeds.conf.default
-          # ===== 添加的修复代码结束 =====
+          # ==== 不屏蔽任何feeds ====
+          # 之前有 sed '/passwall/s/^/#/' feeds.conf.default
+          # 现在已去除，不屏蔽任何内容
 
           # 设置git网络参数，增加超时容忍度
           git config --global http.lowSpeedLimit 1000
@@ -328,7 +321,6 @@ jobs:
           if [ -d "package/lean" ]; then
             THIRD_PARTY_CHECKSUM+=$(find package/lean -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
           fi
-          # 添加其他第三方包目录检查
           if [ -d "package/lienol" ]; then
             THIRD_PARTY_CHECKSUM+=$(find package/lienol -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
           fi
