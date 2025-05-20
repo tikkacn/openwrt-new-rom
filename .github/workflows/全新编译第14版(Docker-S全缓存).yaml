@@ -50,6 +50,8 @@ env:
   RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env
   CONTAINER_BUILD_AREA: /workdir/openwrt_s3_env
 
+  CF_CDN_DOMAIN: https://d16xdi3lv2va77.cloudfront.net
+
 jobs:
   build_in_docker:
     runs-on: ubuntu-22.04
@@ -63,7 +65,7 @@ jobs:
         with:
           path: ${{ env.RUNNER_CHECKOUT_SUBDIR }}
 
-      - name: 设置 S3 缓存的完整路径前缀 (Set Full S3 Cache Path Prefix)
+      - name: 设置 S3/CloudFront 缓存完整路径前缀 (Set Full S3/CF Cache Path Prefix)
         id: set_s3_vars
         run: |
           s3_prefix_from_secret="${{ secrets.S3_CACHE_PATH_PREFIX }}"
@@ -77,6 +79,7 @@ jobs:
             final_s3_prefix="$default_prefix"
           fi
           echo "S3_EFFECTIVE_PATH_PREFIX=${final_s3_prefix}" >> $GITHUB_ENV
+          echo "CF_EFFECTIVE_URL_PREFIX=${{ env.CF_CDN_DOMAIN }}/${final_s3_prefix}" >> $GITHUB_ENV
           echo "s3_prefix_out=${final_s3_prefix}" >> $GITHUB_OUTPUT
           echo "DEBUG_LOG_ON_RUNNER=${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/build_debug_summary_runner.log" >> $GITHUB_ENV
 
@@ -99,81 +102,76 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: S3 缓存还原与关键目录检查
+      - name: CloudFront CDN 缓存还原与关键目录检查 (Restore Cache from CloudFront CDN)
         if: inputs.clean_build != 'true'
         env:
-          S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
+          CF_EFFECTIVE_URL_PREFIX: ${{ env.CF_EFFECTIVE_URL_PREFIX }}
           DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }}
         run: |
-          echo "==========[TIMESTAMP][S3缓存还原前] $(date '+%F %T')=========="
-          echo "S3_EFFECTIVE_PATH_PREFIX in download step: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}" | tee -a "$DEBUG_LOG_FILE"
-          if [ -z "$S3_BUCKET_NAME" ]; then
-            echo "[WARN] AWS_S3_BUCKET_NAME secret 未设置。跳过S3缓存恢复。" | tee -a "$DEBUG_LOG_FILE"
-            mkdir -p "$RUNNER_OPENWRT_WORKSPACE"
-            exit 0
-          fi
-          rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/*
-          rm -rf "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/.[!.]* "${RUNNER_OPENWRT_WORKSPACE:?Error...}"/..?* 2>/dev/null || true
+          set -e
+          echo "==========[TIMESTAMP][CloudFront缓存还原前] $(date '+%F %T')=========="
+          echo "CF_EFFECTIVE_URL_PREFIX in download step: $CF_EFFECTIVE_URL_PREFIX" | tee -a "$DEBUG_LOG_FILE"
           RESTORE_TMP=/workdir/openwrt_s3cache_restore_tmp
           mkdir -p "$RESTORE_TMP"
-          s3_download_and_extract_parts() {
-            local archive_s3_basename="$1"
+
+          cf_download_and_extract_parts() {
+            local archive_basename="$1"
             local target_extract_path="$2"
-            local chunk_restore_tmp_dir="/tmp/s3_restore_chunks_$(echo "$archive_s3_basename" | tr -dc 'a-zA-Z0-9_')"
+            local chunk_restore_tmp_dir="/tmp/cf_restore_chunks_$(echo "$archive_basename" | tr -dc 'a-zA-Z0-9_')"
             mkdir -p "${chunk_restore_tmp_dir}"
-            local manifest_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}.manifest"
-            local local_manifest_file="${chunk_restore_tmp_dir}/${archive_s3_basename}.manifest"
-            if aws s3 cp "s3://${S3_BUCKET_NAME}/${manifest_s3_key}" "${local_manifest_file}" --no-progress --quiet; then
+            local manifest_url="${CF_EFFECTIVE_URL_PREFIX}/${archive_basename}.manifest"
+            local local_manifest_file="${chunk_restore_tmp_dir}/${archive_basename}.manifest"
+            if curl -fsSL --retry 3 -o "${local_manifest_file}" "${manifest_url}"; then
               mapfile -t chunk_files_to_download < "${local_manifest_file}"
               if [ ${#chunk_files_to_download[@]} -eq 0 ]; then rm -rf "${chunk_restore_tmp_dir}"; return; fi
               local all_chunks_downloaded=true; declare -a downloaded_chunk_paths_ordered
               for chunk_filename_dirty in "${chunk_files_to_download[@]}"; do
-                local chunk_filename=$(echo "$chunk_filename_dirty" | tr -d '\r\n'); if [ -z "$chunk_filename" ]; then continue; fi
-                local chunk_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${chunk_filename}"; local local_chunk_path="${chunk_restore_tmp_dir}/${chunk_filename}"
-                aws s3 cp "s3://${S3_BUCKET_NAME}/${chunk_s3_key}" "${local_chunk_path}" --no-progress --quiet || all_chunks_downloaded=false
+                local chunk_filename=$(echo "$chunk_filename_dirty" | tr -d '\r\n'); [ -z "$chunk_filename" ] && continue
+                local chunk_url="${CF_EFFECTIVE_URL_PREFIX}/${chunk_filename}"; local local_chunk_path="${chunk_restore_tmp_dir}/${chunk_filename}"
+                if ! curl -fSL --retry 3 -o "${local_chunk_path}" "${chunk_url}"; then all_chunks_downloaded=false; fi
                 downloaded_chunk_paths_ordered+=("${local_chunk_path}")
               done
               if [ "$all_chunks_downloaded" = true ] && [ ${#downloaded_chunk_paths_ordered[@]} -gt 0 ]; then
                 cat ${downloaded_chunk_paths_ordered[@]} | zstd -d -T0 - | tar -xf - -C "${target_extract_path}"
               fi
             else
-              local single_archive_s3_key="${{ env.S3_EFFECTIVE_PATH_PREFIX }}/${archive_s3_basename}"
-              local single_local_archive="${chunk_restore_tmp_dir}/${archive_s3_basename}"
-              if aws s3 cp "s3://${S3_BUCKET_NAME}/${single_archive_s3_key}" "${single_local_archive}" --no-progress --quiet; then
+              local single_archive_url="${CF_EFFECTIVE_URL_PREFIX}/${archive_basename}"
+              local single_local_archive="${chunk_restore_tmp_dir}/${archive_basename}"
+              if curl -fSL --retry 3 -o "${single_local_archive}" "${single_archive_url}"; then
                 tar -I "zstd -T0" -xf "${single_local_archive}" -C "${target_extract_path}"
               fi
             fi
             rm -rf "${chunk_restore_tmp_dir}"
           }
-          s3_download_and_extract_parts "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
-          s3_download_and_extract_parts "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
-          s3_download_and_extract_parts "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
-          s3_download_and_extract_parts "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
-          s3_download_and_extract_parts "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
           echo "S3_CACHE_RESTORE_ATTEMPTED=true" >> $GITHUB_ENV
 
-          echo "==========[TIMESTAMP][S3缓存还原后] $(date '+%F %T')=========="
-          echo "S3缓存目录结构如下："
+          echo "==========[TIMESTAMP][CloudFront缓存还原后] $(date '+%F %T')=========="
+          echo "CDN缓存目录结构如下："
           find $RESTORE_TMP | head -100
           for d in dl staging_dir build_dir .ccache; do
             path="$RESTORE_TMP/$d"
             if [ ! -d "$path" ] || [ -z "$(ls -A $path 2>/dev/null)" ]; then
-              echo "::error file=$0,line=$LINENO::[S3缓存目录 $d 未成功恢复或为空!]"
+              echo "::error file=$0,line=$LINENO::[CDN缓存目录 $d 未成功恢复或为空!]"
               exit 2
             else
-              echo "[OK] S3缓存目录 $d 存在且非空。"
+              echo "[OK] CDN缓存目录 $d 存在且非空。"
               du -sh "$path"
             fi
           done
           find $RESTORE_TMP -type f -name '*.tar.zst*' -exec ls -lh {} \;
 
-      - name: 检查 S3 缓存还原结果（临时目录）
+      - name: 检查 CDN 缓存还原结果（临时目录）
         run: |
           RESTORE_TMP=/workdir/openwrt_s3cache_restore_tmp
-          echo "Restored S3 cache content:"
+          echo "Restored CDN cache content:"
           find $RESTORE_TMP
 
       - name: 运行Docker容器并执行编译 (Run Docker Container & Compile)
