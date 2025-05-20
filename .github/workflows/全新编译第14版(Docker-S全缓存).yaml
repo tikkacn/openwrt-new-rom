@@ -257,9 +257,35 @@ jobs:
             cp feeds.conf.default.sample feeds.conf.default
           fi
           
-          # 更新并安装feeds
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          # ===== 添加的修复代码：禁用PassWall feeds =====
+          echo "[DEBUG] 原始 feeds.conf.default 内容:"
+          cat feeds.conf.default
+
+          echo "[DEBUG] 暂时禁用PassWall feeds进行首次构建..."
+          sed -i '/passwall/s/^/#/' feeds.conf.default
+
+          echo "[DEBUG] 修改后的feeds.conf.default内容:"
+          cat feeds.conf.default
+          # ===== 添加的修复代码结束 =====
+
+          # 设置git网络参数，增加超时容忍度
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 300
+          git config --global core.compression 9
+          git config --global http.connectTimeout 180
+
+          echo "[DEBUG] 更新feeds (可能需要一些时间)..."
+          ./scripts/feeds update -a || { 
+            echo "[ERROR] feeds update命令失败，但仍继续尝试"; 
+            add_diag "警告：feeds更新命令失败，但仍继续";
+          }
+
+          echo "[DEBUG] 安装feeds..."
+          ./scripts/feeds install -a || {
+            echo "[ERROR] feeds install命令失败，但仍继续尝试";
+            add_diag "警告：feeds安装命令失败，但仍继续"; 
+          }
+
           "./${INTERNAL_DIY_P2_SH_NAME}"
 
           echo "CONFIG_AUTOREMOVE=y" >> .config
@@ -503,7 +529,6 @@ jobs:
             cp "${COMPILE_OUTPUT_LOG_DOCKER}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_compile_output.log" || true
           fi
 
-          echo "[DOCKER] Build script finished." | tee -a "${INTERNAL_DEBUG_LOG}"
           DOCKER_SCRIPT_EOF
 
           chmod +x "${RUNNER_SCRIPT_PATH}"
@@ -564,23 +589,6 @@ jobs:
         with:
           name: diagnose_summary
           path: ${{ env.RUNNER_OPENWRT_WORKSPACE }}/bin/targets/__diagnose/diagnose_summary.txt
-
-      - name: Upload Debug Logs (from Runner and potentially Docker)
-        if: always()
-        uses: actions/upload-artifact@main
-        with:
-          name: build-debug-logs-${{ github.run_id }}
-          path: |
-            ${{ env.DEBUG_LOG_ON_RUNNER }}
-            ${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_build_debug_summary.log
-            ${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log
-            ${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log
-            ${{ env.RUNNER_OPENWRT_WORKSPACE }}/config_diff.txt
-            ${{ env.RUNNER_OPENWRT_WORKSPACE }}/.config
-            ${{ env.RUNNER_OPENWRT_WORKSPACE }}/.config.input
-            ${{ env.RUNNER_OPENWRT_WORKSPACE }}/logs/
-          if-no-files-found: ignore
-          retention-days: 7
 
       - name: 整理文件 (Organize Firmware Files)
         id: organize
@@ -717,9 +725,7 @@ jobs:
           body_path: release_body.txt
           files: ${{ env.FIRMWARE_ZIP }}
           
-      # S3/CloudFront 缓存部分保留原有逻辑...
-          
-      # 刷新CDN缓存
+      # ======= 新增：刷新 CloudFront CDN 缓存 =======
       - name: 刷新 CloudFront CDN 缓存 (CloudFront Invalidate Cache)
         if: always()
         env:
