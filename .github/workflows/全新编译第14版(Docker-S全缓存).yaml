@@ -1,11 +1,32 @@
-name: 检查CloudFront缓存结构及常见增量错误
+name: 全新编译第14版(Docker-S全缓存-增强诊断版)
 
 on:
   workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH调试 (在Docker容器内部)'
+        required: false
+        default: 'false'
+      clean_build:
+        description: '全新编译，不使用S3恢复的环境。仍会打包上传新环境到S3。首次S3填充时应为false并预清空S3。'
+        required: false
+        default: 'false'
 
 env:
-  CF_CDN_DOMAIN: https://d16xdi3lv2va77.cloudfront.net
-  S3_EFFECTIVE_PATH_PREFIX: openwrt-s3chunks-v3/master # 如有分支或自定义路径请更改
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF_URL: https://github.com/tikkacn/openwrt-new-rom/raw/main/feeds.conf.default
+  CONFIG_FILE_IN_REPO: 增量缓存优化.config
+  DIY_P1_SH_IN_REPO: diy-part1.sh
+  DIY_P2_SH_IN_REPO: diy-part2.sh
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+  RUNNER_CHECKOUT_SUBDIR: 'repo_files'
+  CONTAINER_REPO_CONFIG_MOUNT: /repo_config
+  DOCKER_IMAGE: ubuntu:22.04
+
   S3_DL_DIR_ARCHIVE_BASENAME: openwrt_dl_cache.tar.zst
   S3_STAGING_DIR_ARCHIVE_BASENAME: openwrt_staging_dir_cache.tar.zst
   S3_BUILD_DIR_HOST_ARCHIVE_BASENAME: openwrt_build_dir_host_cache.tar.zst
@@ -14,23 +35,89 @@ env:
   S3_FEEDS_CACHE_ARCHIVE_BASENAME: openwrt_feeds_cache.tar.zst
   S3_CCACHE_ARCHIVE_BASENAME: openwrt_ccache.tar.zst
   S3_BUILD_STATE_ARCHIVE_BASENAME: openwrt_build_state.tar.zst
+  S3_DOT_CONFIG_FILENAME: dot_config_snapshot
+
+  CONTAINER_DL_DIR_RELPATH: "dl"
+  CONTAINER_STAGING_DIR_RELPATH: "staging_dir"
+  CONTAINER_BUILD_DIR_HOST_RELPATH: "build_dir/host"
+  CONTAINER_FEEDS_DIR_RELPATH: "feeds"
+  CONTAINER_CCACHE_DIR_RELPATH: ".ccache"
+  CONTAINER_BUILD_STATE_DIR_RELPATH: ".github_actions_build_state"
+
+  CONTAINER_CCACHE_LOGFILE_PATH: /tmp/ccache_detailed.log
+  CONTAINER_DEBUG_LOG_FILE_PATH: /tmp/build_debug_summary.log
+
+  RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env
+  CONTAINER_BUILD_AREA: /workdir/openwrt_s3_env
+
+  CF_CDN_DOMAIN: https://d16xdi3lv2va77.cloudfront.net
 
 jobs:
-  check_cache:
+  build_in_docker:
     runs-on: ubuntu-22.04
+    name: Build OpenWrt in Docker with S3 Chunked Env Cache
+    env:
+      RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env
+      CONTAINER_BUILD_AREA: /workdir/openwrt_s3_env
     steps:
-      - name: 还原CloudFront缓存到临时目录
+      - name: 检出仓库代码 (Checkout Repository Code)
+        uses: actions/checkout@v4
+        with:
+          path: ${{ env.RUNNER_CHECKOUT_SUBDIR }}
+
+      - name: 设置 S3/CloudFront 缓存完整路径前缀 (Set Full S3/CF Cache Path Prefix)
+        id: set_s3_vars
+        run: |
+          s3_prefix_from_secret="${{ secrets.S3_CACHE_PATH_PREFIX }}"
+          repo_branch_for_path="${{ env.REPO_BRANCH }}"
+          repo_branch_for_path_sanitized=$(echo "$repo_branch_for_path" | sed 's/\//-/g')
+          final_s3_prefix=""
+          if [ -n "$s3_prefix_from_secret" ]; then
+            final_s3_prefix="$s3_prefix_from_secret"
+          else
+            default_prefix="openwrt-s3chunks-v3/${repo_branch_for_path_sanitized}"
+            final_s3_prefix="$default_prefix"
+          fi
+          echo "S3_EFFECTIVE_PATH_PREFIX=${final_s3_prefix}" >> $GITHUB_ENV
+          echo "CF_EFFECTIVE_URL_PREFIX=${{ env.CF_CDN_DOMAIN }}/${final_s3_prefix}" >> $GITHUB_ENV
+          echo "s3_prefix_out=${final_s3_prefix}" >> $GITHUB_OUTPUT
+          echo "DEBUG_LOG_ON_RUNNER=${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/build_debug_summary_runner.log" >> $GITHUB_ENV
+
+      - name: 优化Runner磁盘空间 (Maximize Runner Build Space)
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 20480
+          swap-size-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'false'
+          build-mount-path: '/workdir'
+
+      - name: 配置 AWS 凭证 (Configure AWS Credentials)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: CloudFront CDN 缓存还原与关键目录检查 (Restore Cache from CloudFront CDN)
+        if: inputs.clean_build != 'true'
         env:
-          CF_EFFECTIVE_URL_PREFIX: ${{ env.CF_CDN_DOMAIN }}/${{ env.S3_EFFECTIVE_PATH_PREFIX }}
+          CF_EFFECTIVE_URL_PREFIX: ${{ env.CF_EFFECTIVE_URL_PREFIX }}
+          DEBUG_LOG_FILE: ${{ env.DEBUG_LOG_ON_RUNNER }}
         run: |
           set -e
-          RESTORE_TMP="${{ github.workspace }}/cloudfront_cache_check_tmp"
+          echo "==========[TIMESTAMP][CloudFront缓存还原前] $(date '+%F %T')=========="
+          echo "CF_EFFECTIVE_URL_PREFIX in download step: $CF_EFFECTIVE_URL_PREFIX" | tee -a "$DEBUG_LOG_FILE"
+          RESTORE_TMP=/workdir/openwrt_s3cache_restore_tmp
           mkdir -p "$RESTORE_TMP"
 
           cf_download_and_extract_parts() {
             local archive_basename="$1"
             local target_extract_path="$2"
-            local chunk_restore_tmp_dir="${RUNNER_TEMP:-/tmp}/cf_restore_chunks_$(echo "$archive_basename" | tr -dc 'a-zA-Z0-9_')"
+            local chunk_restore_tmp_dir="/tmp/cf_restore_chunks_$(echo "$archive_basename" | tr -dc 'a-zA-Z0-9_')"
             mkdir -p "${chunk_restore_tmp_dir}"
             local manifest_url="${CF_EFFECTIVE_URL_PREFIX}/${archive_basename}.manifest"
             local local_manifest_file="${chunk_restore_tmp_dir}/${archive_basename}.manifest"
@@ -64,70 +151,424 @@ jobs:
           cf_download_and_extract_parts "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
           cf_download_and_extract_parts "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
           cf_download_and_extract_parts "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
-          echo "CloudFront缓存全部还原完毕于 $RESTORE_TMP"
+          echo "S3_CACHE_RESTORE_ATTEMPTED=true" >> $GITHUB_ENV
 
-      - name: 检查关键目录、文件及常见增量错误
-        run: |
-          RESTORE_TMP="${{ github.workspace }}/cloudfront_cache_check_tmp"
-          echo "== 关键目录结构预览 =="
+          echo "==========[TIMESTAMP][CloudFront缓存还原后] $(date '+%F %T')=========="
+          echo "CDN缓存目录结构如下："
           find $RESTORE_TMP | head -100
-
-          echo "== 检查关键目录是否存在且非空 =="
-          for d in dl staging_dir build_dir feeds .ccache; do
-            if [ ! -d "$RESTORE_TMP/$d" ]; then
-              echo "::error::[致命] 关键缓存目录 $d 缺失，增量必定失败！"
-            elif [ -z "$(ls -A $RESTORE_TMP/$d 2>/dev/null)" ]; then
-              echo "::warning::[警告] 关键缓存目录 $d 存在但内容为空，增量可能失败！"
+          for d in dl staging_dir build_dir .ccache; do
+            path="$RESTORE_TMP/$d"
+            if [ ! -d "$path" ] || [ -z "$(ls -A $path 2>/dev/null)" ]; then
+              echo "::error file=$0,line=$LINENO::[CDN缓存目录 $d 未成功恢复或为空!]"
+              exit 2
             else
-              echo "[OK] $d 目录存在且非空"
-              ls -lh "$RESTORE_TMP/$d" | head -10
+              echo "[OK] CDN缓存目录 $d 存在且非空。"
+              du -sh "$path"
             fi
           done
+          find $RESTORE_TMP -type f -name '*.tar.zst*' -exec ls -lh {} \;
 
-          echo "== 检查 build_dir/toolchain-* 子目录 =="
-          ls -ld "$RESTORE_TMP"/build_dir/toolchain-* 2>/dev/null || echo "::warning::未找到 build_dir/toolchain-* 子目录"
+      - name: 检查 CDN 缓存还原结果（临时目录）
+        run: |
+          RESTORE_TMP=/workdir/openwrt_s3cache_restore_tmp
+          echo "Restored CDN cache content:"
+          find $RESTORE_TMP
 
-          echo "== 检查关键文件 =="
-          for f in .config .config.old feeds.conf version.number; do
-            if [ -f "$RESTORE_TMP/$f" ]; then
-              echo "[OK] $f 存在"
-            else
-              echo "::warning::[警告] $f 缺失"
-            fi
-          done
+      - name: 运行Docker容器并执行编译 (Run Docker Container & Compile)
+        id: compile_in_docker
+        env:
+          S3_CACHE_RESTORE_ATTEMPTED: ${{ env.S3_CACHE_RESTORE_ATTEMPTED }}
+        run: |
+          RUNNER_SCRIPT_FILENAME="docker_build_script.sh"
+          RUNNER_SCRIPT_PATH="${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/${RUNNER_SCRIPT_FILENAME}"
+          CONTAINER_SCRIPT_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}/${RUNNER_SCRIPT_FILENAME}"
+          cat << 'DOCKER_SCRIPT_EOF' > "${RUNNER_SCRIPT_PATH}"
+          #!/bin/bash
+          set -eo pipefail
 
-          echo "== 检查 .manifest 文件 =="
-          find $RESTORE_TMP -name '*.manifest' | head -10
+          # === 诊断日志收集初始化（修正版，先确保目录存在） ===
+          DIAG_DIR="bin/targets/__diagnose"
+          DIAG_FILE="$DIAG_DIR/diagnose_summary.txt"
+          mkdir -p "$DIAG_DIR"
+          : > "$DIAG_FILE"
+          add_diag() { echo -e "$1" | tee -a "$DIAG_FILE"; }
 
-          echo "== toolchain.md5 检查 =="
-          FOUND_TOOLCHAIN_MD5="$(find $RESTORE_TMP -name 'toolchain.md5' | head -1)"
-          if [ -z "$FOUND_TOOLCHAIN_MD5" ]; then
-            echo "::error::[致命] toolchain.md5 未找到，增量 toolchain 必定失效！"
-          else
-            echo "[OK] toolchain.md5 存在于: $FOUND_TOOLCHAIN_MD5"
-            ls -lh "$FOUND_TOOLCHAIN_MD5"
+          export FORCE_UNSAFE_CONFIGURE=1
+          export GOFLAGS="-buildvcs=false"
+          INTERNAL_DEBUG_LOG="${DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH:-/tmp/container_build_debug.log}"
+          mkdir -p "$(dirname "${INTERNAL_DEBUG_LOG}")"
+          echo "[DOCKER] Starting build script..." | tee -a "${INTERNAL_DEBUG_LOG}"
+
+          apt-get update -y && apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential libncurses5-dev libncursesw5-dev zlib1g-dev libssl-dev \
+            subversion gawk wget curl python3 python3-distutils unzip file patch rsync util-linux procps \
+            ccache libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libreadline-dev libtool llvm p7zip p7zip-full xsltproc xxd gettext autopoint time
+          apt-get clean && rm -rf /var/lib/apt/lists/*
+          export TZ="${DOCKER_ENV_BUILD_TZ:-Asia/Shanghai}"
+          ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && echo "$TZ" > /etc/timezone
+
+          cd "${DOCKER_ENV_CONTAINER_BUILD_AREA}"
+          rm -rf ./* .[^.]* .??* 2>/dev/null || true
+          echo "[DOCKER] Directory cleaned for git clone. Contents now:"
+          ls -al
+
+          echo "[DOCKER] Cloning OpenWrt into '.' ..."
+          git clone --depth 1 "${DOCKER_ENV_REPO_URL}" -b "${DOCKER_ENV_REPO_BRANCH}" .
+          if [ $? -ne 0 ]; then add_diag "[DOCKER_ERROR] git clone failed!"; exit 1; fi
+          echo "[INFO] Removing .git directory after clone..."; rm -rf .git
+
+          if [ -d "/restore_tmp" ]; then
+            echo "[DOCKER] Restoring S3 cache directories from /restore_tmp ..."
+            for d in .github_actions_build_state .ccache build_dir dl feeds staging_dir; do
+              if [ -d "/restore_tmp/\$d" ]; then
+                echo "[DOCKER] Restoring \$d ..."
+                rm -rf "./\$d"
+                cp -a "/restore_tmp/\$d" "./"
+              fi
+            done
           fi
 
-          echo "== 检查 stamp 相关文件 =="
-          find $RESTORE_TMP -type f -name 'stamp.*' | head -10
+          INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL=".github_actions_build_state"
+          INTERNAL_CCACHE_DIR_NAME_ACTUAL="${DOCKER_ENV_CCACHE_DIR_NAME:-.ccache}"
+          mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}" "./${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" "./logs"
+          export CCACHE_DIR="${PWD}/${INTERNAL_CCACHE_DIR_NAME_ACTUAL}"
+          export CCACHE_LOGFILE="${DOCKER_ENV_CONTAINER_CCACHE_LOG_PATH:-/tmp/container_ccache_detailed.log}"
+          mkdir -p "$(dirname "${CCACHE_LOGFILE}")"; ccache -M 8G; ccache -z
 
-          echo "== 检查归档文件大小 =="
-          for file in "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}"; do
-            url="${{ env.CF_CDN_DOMAIN }}/${{ env.S3_EFFECTIVE_PATH_PREFIX }}/$file"
-            size=$(curl -sI "$url" | grep -i Content-Length | awk '{print $2}' | tr -d '\r\n')
-            echo "$file\t$size"
-            if [ -z "$size" ] || [ "$size" -lt 10240 ]; then
-              echo "::warning::[警告] $file 尺寸异常，可能包损坏或内容丢失"
+          INTERNAL_CONFIG_FILE_NAME="${DOCKER_ENV_CONFIG_FILE_NAME_IN_REPO:-增量缓存优化.config}"
+          INTERNAL_DIY_P1_SH_NAME="${DOCKER_ENV_DIY_P1_SH_NAME_IN_REPO:-diy-part1.sh}"
+          INTERNAL_DIY_P2_SH_NAME="${DOCKER_ENV_DIY_P2_SH_NAME_IN_REPO:-diy-part2.sh}"
+
+          cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_CONFIG_FILE_NAME}" "./.config"
+          cp ./.config ./.config.input
+          cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P1_SH_NAME}" "./${INTERNAL_DIY_P1_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P1_SH_NAME}"
+          cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/${INTERNAL_DIY_P2_SH_NAME}" "./${INTERNAL_DIY_P2_SH_NAME}" && chmod +x "./${INTERNAL_DIY_P2_SH_NAME}"
+
+          "./${INTERNAL_DIY_P1_SH_NAME}"
+
+          if [ -f "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" ]; then cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" "./feeds.conf.default"; elif [ ! -f "./feeds.conf.default" ] && [ -f "./feeds.conf.default.sample" ]; then cp feeds.conf.default.sample feeds.conf.default; fi
+          ./scripts/feeds update -a; ./scripts/feeds install -a; "./${INTERNAL_DIY_P2_SH_NAME}"
+
+          echo "CONFIG_AUTOREMOVE=y" >> .config; echo "CONFIG_AUTOREBUILD=y" >> .config
+          if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config; fi
+          if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config; fi
+
+          make defconfig
+
+          TOOLCHAIN_CONFIG_SUBSET_FOR_MD5=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort)
+          TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
+          PREVIOUS_TOOLCHAIN_MD5=$(cat "./.github_actions_build_state/toolchain.md5" 2>/dev/null || echo "not_found_in_build_state")
+          PACKAGE_CONFIG_SUBSET_FOR_MD5=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort)
+          PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
+          PREVIOUS_PACKAGE_MD5=$(cat "./.github_actions_build_state/package.md5" 2>/dev/null || echo "not_found_in_build_state")
+
+          # === 诊断日志关键点收集 ===
+          if [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ]; then
+            add_diag "原因：S3缓存未还原，必须全量编译。"
+          fi
+          if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ]; then
+            add_diag "原因：clean_build触发，强制全量编译。"
+          fi
+          if [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ]; then
+            add_diag "原因：上次toolchain.md5缺失，无法增量。"
+          elif [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
+            add_diag "原因：toolchain.md5变动（本次：$TOOLCHAIN_MD5，上次：$PREVIOUS_TOOLCHAIN_MD5），需全量编译。"
+          fi
+          if [ "$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ]; then
+            add_diag "原因：上次package.md5缺失，无法增量。"
+          elif [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
+            add_diag "原因：package.md5变动（本次：$PACKAGE_MD5，上次：$PREVIOUS_PACKAGE_MD5），需包编译。"
+          fi
+          if [ -f .github_actions_build_state/config_from_compile_step.txt ]; then
+            if ! diff .config .github_actions_build_state/config_from_compile_step.txt >/dev/null; then
+              add_diag "config变动:\n$(diff .config .github_actions_build_state/config_from_compile_step.txt | head -20)"
             fi
-          done
+          fi
+          if [ -f feeds.conf.default ] && [ -f .github_actions_build_state/feeds.conf.default ]; then
+            if ! diff feeds.conf.default .github_actions_build_state/feeds.conf.default >/dev/null; then
+              add_diag "feeds.conf.default变动:\n$(diff feeds.conf.default .github_actions_build_state/feeds.conf.default | head -20)"
+            fi
+          fi
+          CCACHE_STATS=$(ccache -s 2>/dev/null || true)
+          CCACHE_HIT=$(echo "$CCACHE_STATS" | grep "hit rate" | awk '{print $3}')
+          add_diag "ccache命中率: $CCACHE_HIT"
+          if [ "$CCACHE_HIT" = "0.0%" ]; then
+            add_diag "原因：ccache未命中，建议检查CCACHE_DIR和主机时钟/文件戳。"
+          fi
 
-          echo "== 检查软链接 =="
-          find $RESTORE_TMP -type l | head -10
+          start_time=$(date +%s)
+          MAKE_JOBS_NPROC=$(nproc); MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false"
+          MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
+          MAKE_OPTS_FALLBACK="-j1 V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
+          COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_$(date +%Y%m%d_%H%M%S).log"
+          final_install_status_docker=0
+          if [ $DO_FULL_BUILD_DOCKER -eq 1 ]; then
+            make tools/compile ${MAKE_OPTS_FALLBACK} || make tools/compile ${MAKE_OPTS_FALLBACK}
+            make toolchain/compile ${MAKE_OPTS_FALLBACK} || make toolchain/compile ${MAKE_OPTS_FALLBACK}
+            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+          elif [ $DO_PACKAGE_BUILD_DOCKER -eq 1 ]; then
+            make package/clean V=s || true
+            if ! make package/compile ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+            make package/index -j1 || make package/index -j1
+          else
+            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+          fi
+          make target/install ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; final_install_status_docker=$?
+          make prepare ${MAKE_OPTS_MAIN} || make prepare ${MAKE_OPTS_FALLBACK}
+          make tools/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make tools/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
+          make toolchain/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make toolchain/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
 
-          echo "== 检查目录权限 =="
-          find $RESTORE_TMP -type d -exec ls -ld {} \; | head -10
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
 
-      - name: 自动清理检查目录
+          # 编译失败诊断
+          if [ "$final_install_status_docker" != "0" ]; then
+            add_diag "原因：make出错，详见compile日志。"
+          fi
+
+          add_diag "本次make耗时: ${elapsed}秒"
+
+          mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}"; cp .config "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/config_from_compile_step.txt"
+          echo "$TOOLCHAIN_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5"; echo "$PACKAGE_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5"
+          echo "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/last_feeds_changed_status.txt"
+          find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/current_feeds.sha256"
+          ccache -s | tee -a "${INTERNAL_DEBUG_LOG}"
+          if [ ${final_install_status_docker} -eq 0 ] && [ -n "$(find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print -quit)" ]; then
+            touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_success"
+          else
+            touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_failure"
+          fi
+          cp "${INTERNAL_DEBUG_LOG}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_build_debug_summary.log" || true
+          cp "${CCACHE_LOGFILE}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_ccache_detailed.log" || true
+          if [ -f "${COMPILE_OUTPUT_LOG_DOCKER}" ]; then cp "${COMPILE_OUTPUT_LOG_DOCKER}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_compile_output.log" || true; fi
+          echo "[DOCKER] Build script finished." | tee -a "${INTERNAL_DEBUG_LOG}"
+          DOCKER_SCRIPT_EOF
+
+          chmod +x "${RUNNER_SCRIPT_PATH}"
+          docker run --rm \
+            -v "${{ env.RUNNER_OPENWRT_WORKSPACE }}:${{ env.CONTAINER_BUILD_AREA }}" \
+            -v "/workdir/openwrt_s3cache_restore_tmp:/restore_tmp:ro" \
+            -v "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}:${{ env.CONTAINER_REPO_CONFIG_MOUNT }}:ro" \
+            -e DOCKER_ENV_REPO_URL="${{ env.REPO_URL }}" \
+            -e DOCKER_ENV_REPO_BRANCH="${{ env.REPO_BRANCH }}" \
+            -e DOCKER_ENV_FEEDS_CONF_URL="${{ env.FEEDS_CONF_URL }}" \
+            -e DOCKER_ENV_CONFIG_FILE_NAME_IN_REPO="${{ env.CONFIG_FILE_IN_REPO }}" \
+            -e DOCKER_ENV_DIY_P1_SH_NAME_IN_REPO="${{ env.DIY_P1_SH_IN_REPO }}" \
+            -e DOCKER_ENV_DIY_P2_SH_NAME_IN_REPO="${{ env.DIY_P2_SH_IN_REPO }}" \
+            -e DOCKER_ENV_BUILD_STATE_DIR_NAME=".github_actions_build_state" \
+            -e DOCKER_ENV_CCACHE_DIR_NAME="${{ env.CCACHE_DIR_NAME }}" \
+            -e DOCKER_ENV_CONTAINER_DEBUG_LOG_PATH="${{ env.CONTAINER_DEBUG_LOG_FILE_PATH }}" \
+            -e DOCKER_ENV_CONTAINER_CCACHE_LOG_PATH="${{ env.CONTAINER_CCACHE_LOGFILE_PATH }}" \
+            -e DOCKER_ENV_CONTAINER_BUILD_AREA="${{ env.CONTAINER_BUILD_AREA }}" \
+            -e DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}" \
+            -e DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE="${{ github.event.inputs.clean_build }}" \
+            -e DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE="${S3_CACHE_RESTORE_ATTEMPTED:-false}" \
+            -e DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE="true" \
+            -e DOCKER_ENV_BUILD_TZ="${{ env.TZ }}" \
+            -e GOFLAGS="-buildvcs=false" \
+            ${{ env.DOCKER_IMAGE }} \
+            bash -c "cd \"${CONTAINER_BUILD_AREA}\" && \"${CONTAINER_SCRIPT_PATH}\""
+          if [ -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success" ]; then
+            echo "Docker build reported success."
+            echo "status=success" >> $GITHUB_OUTPUT
+            rm -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_success"
+          else
+            echo "Docker build reported failure or marker not found."
+            echo "status=failure" >> $GITHUB_OUTPUT
+            rm -f "${{ env.RUNNER_OPENWRT_WORKSPACE }}/.docker_build_status_failure" 2>/dev/null || true
+            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_build_debug_summary.log" "/tmp/docker_build_debug_summary_runner.log" 2>/dev/null || true
+            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log" "/tmp/docker_ccache_detailed_runner.log" 2>/dev/null || true
+            cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" "/tmp/docker_compile_output_runner.log" 2>/dev/null || true
+          fi
+          rm -f "${RUNNER_SCRIPT_PATH}"
+
+      - name: 修正工作区文件权限 (Correct Workspace Permissions)
+        if: always()
         run: |
-          rm -rf "${{ github.workspace }}/cloudfront_cache_check_tmp"
-          echo "已自动清理本地检查目录"
+          echo "Adjusting ownership of ${{ env.RUNNER_OPENWRT_WORKSPACE }} to runner user..."
+          sudo chown -R $(id -u):$(id -g) "${{ env.RUNNER_OPENWRT_WORKSPACE }}"
+          echo "Ownership adjustment complete."
+
+      - name: 上传诊断日志到Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnose_summary
+          path: ${{ env.RUNNER_OPENWRT_WORKSPACE }}/bin/targets/__diagnose/diagnose_summary.txt
+
+      - name: Upload Debug Logs (from Runner and potentially Docker)
+        if: always()
+        uses: actions/upload-artifact@main
+        with:
+          name: build-debug-logs-${{ github.run_id }}
+          path: |
+            ${{ env.DEBUG_LOG_ON_RUNNER }}
+            ${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_build_debug_summary.log
+            ${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_ccache_detailed.log
+            ${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log
+            ${{ env.RUNNER_OPENWRT_WORKSPACE }}/config_diff.txt
+            ${{ env.RUNNER_OPENWRT_WORKSPACE }}/.config
+            ${{ env.RUNNER_OPENWRT_WORKSPACE }}/.config.input
+            ${{ env.RUNNER_OPENWRT_WORKSPACE }}/logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 整理文件 (Organize Firmware Files)
+        id: organize
+        if: steps.compile_in_docker.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        run: |
+          echo "开始整理固件文件 from ${{ env.RUNNER_OPENWRT_WORKSPACE }}/bin ..." | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+          FIRMWARE_COLLECTION_DIR_PATH=""
+          OPENWRT_BUILD_ROOT="${{ env.RUNNER_OPENWRT_WORKSPACE }}"
+          OPENWRT_BIN_DIR="${OPENWRT_BUILD_ROOT}/bin"
+          OPENWRT_TARGETS_DIR="${OPENWRT_BIN_DIR}/targets"
+          if [ ! -d "${OPENWRT_TARGETS_DIR}" ]; then
+            echo "错误：编译目标目录 ${OPENWRT_TARGETS_DIR} 不存在。" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+            FIRMWARE_COLLECTION_DIR_PATH="/tmp/empty_firmware_collection_$(date +%N)"
+            mkdir -p "${FIRMWARE_COLLECTION_DIR_PATH}"
+            echo "FIRMWARE=${FIRMWARE_COLLECTION_DIR_PATH}" >> $GITHUB_ENV
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "FIRMWARE_ZIP=${FIRMWARE_COLLECTION_DIR_PATH}.zip" >> $GITHUB_ENV
+            zip -r9 "${FIRMWARE_COLLECTION_DIR_PATH}.zip" "${FIRMWARE_COLLECTION_DIR_PATH}"
+            exit 0
+          fi
+          DEEPEST_TARGET_SUBDIRS=$(find "${OPENWRT_TARGETS_DIR}" -mindepth 2 -maxdepth 2 -type d ! -name "packages" -print)
+          if [ -z "${DEEPEST_TARGET_SUBDIRS}" ]; then
+              echo "警告：在 ${OPENWRT_TARGETS_DIR} 下未找到标准的目标架构子目录。尝试直接在 ${OPENWRT_TARGETS_DIR} 搜索。" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+              DEEPEST_TARGET_SUBDIRS="${OPENWRT_TARGETS_DIR}"
+          fi
+          FINAL_FIRMWARE_OUTPUT_BASE="/tmp/firmware_output_collections"
+          mkdir -p "$FINAL_FIRMWARE_OUTPUT_BASE"
+          for CURRENT_IMG_SOURCE_DIR in $DEEPEST_TARGET_SUBDIRS; do
+              echo "检查目录: ${CURRENT_IMG_SOURCE_DIR} 中的固件文件..." | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+              COLLECTED_FIRMWARE_OUTPUT_DIR="${FINAL_FIRMWARE_OUTPUT_BASE}/firmware_collection_$(basename "${CURRENT_IMG_SOURCE_DIR}")_$(date +%N)"
+              mkdir -p "${COLLECTED_FIRMWARE_OUTPUT_DIR}"
+              FILES_COPIED_COUNT=0
+              cd "${CURRENT_IMG_SOURCE_DIR}"
+              for pattern in "*combined.img.gz" "*sysupgrade.img.gz" "*combined-efi.img.gz" "*kernel.bin" "*.img" "*.bin"; do
+                  find . -maxdepth 1 -type f -name "$pattern" ! -path "./packages/*" -print0 | while IFS= read -r -d $'\0' found_file; do
+                      cp -v -f "${found_file}" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/"
+                      FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1))
+                  done
+              done
+              if [ $FILES_COPIED_COUNT -eq 0 ]; then
+                  echo "在 ${CURRENT_IMG_SOURCE_DIR} 中未找到标准模式的固件，尝试复制其他可能的文件..." | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+                  find . -maxdepth 1 -type f \
+                    ! -name "*.manifest" ! -name "*.txt" ! -name "*.json" ! -name "*.buildinfo" ! -name "sha256sums" \
+                    ! -path "./packages/*" \
+                    -print0 | while IFS= read -r -d $'\0' found_file; do
+                      cp -v -f "${found_file}" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/"
+                      FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1))
+                  done
+              fi
+              cd "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}"
+              if [ $FILES_COPIED_COUNT -gt 0 ]; then
+                  echo "成功从 ${CURRENT_IMG_SOURCE_DIR} 复制 $FILES_COPIED_COUNT 个文件到 ${COLLECTED_FIRMWARE_OUTPUT_DIR}" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+                  if [ -f "${OPENWRT_BUILD_ROOT}/.config" ]; then
+                    cp -v -f "${OPENWRT_BUILD_ROOT}/.config" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/config.txt"
+                  fi
+                  ls -lh "${COLLECTED_FIRMWARE_OUTPUT_DIR}" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+                  FIRMWARE_COLLECTION_DIR_PATH="${COLLECTED_FIRMWARE_OUTPUT_DIR}"
+                  break
+              else
+                  echo "警告: 在 ${CURRENT_IMG_SOURCE_DIR} 中未找到可用固件文件可收集。" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+                  rm -rf "${COLLECTED_FIRMWARE_OUTPUT_DIR}"
+              fi
+          done
+          if [ -z "${FIRMWARE_COLLECTION_DIR_PATH}" ]; then
+              echo "警告：未能在任何标准目标子目录中收集到固件文件。启用紧急备用收集逻辑。" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+              FIRMWARE_COLLECTION_DIR_PATH="${FINAL_FIRMWARE_OUTPUT_BASE}/firmware_fallback_collection_$(date +%N)"
+              mkdir -p "${FIRMWARE_COLLECTION_DIR_PATH}"
+              find "${OPENWRT_TARGETS_DIR}" -type f \( -name "*.bin" -o -name "*.img" -o -name "*.img.gz" \) ! -path "*/packages/*" ! -path "*/firmware_collection_*" -exec cp -v -f {} "${FIRMWARE_COLLECTION_DIR_PATH}/" \;
+              if [ -f "${OPENWRT_BUILD_ROOT}/.config" ]; then
+                  cp -v -f "${OPENWRT_BUILD_ROOT}/.config" "${FIRMWARE_COLLECTION_DIR_PATH}/config.txt";
+              else
+                  echo "# Fallback .config - actual .config not found" > "${FIRMWARE_COLLECTION_DIR_PATH}/config.txt";
+              fi
+          fi
+          echo "FIRMWARE=${FIRMWARE_COLLECTION_DIR_PATH}" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+          if [ -n "${FIRMWARE_COLLECTION_DIR_PATH}" ] && [ -d "${FIRMWARE_COLLECTION_DIR_PATH}" ] && [ "$(ls -A "${FIRMWARE_COLLECTION_DIR_PATH}")" ]; then
+              FIRMWARE_PARENT_DIR=$(dirname "${FIRMWARE_COLLECTION_DIR_PATH}")
+              FIRMWARE_BASENAME=$(basename "${FIRMWARE_COLLECTION_DIR_PATH}")
+              ZIP_FILENAME="${FIRMWARE_BASENAME}.zip"
+              echo "创建固件压缩包 ${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME} 从目录 ${FIRMWARE_BASENAME}" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+              cd "${FIRMWARE_PARENT_DIR}" && zip -r9 "${ZIP_FILENAME}" "${FIRMWARE_BASENAME}"
+              if [ -f "${ZIP_FILENAME}" ]; then
+                  echo "FIRMWARE_ZIP=${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME}" >> $GITHUB_ENV
+                  ls -lh "${FIRMWARE_PARENT_DIR}/${ZIP_FILENAME}" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+              else
+                  echo "错误：压缩包 ${ZIP_FILENAME} 未能成功创建。" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+                  echo "FIRMWARE_ZIP=/tmp/zip_creation_failed_$(date +%N).zip" >> $GITHUB_ENV
+              fi
+          else
+              echo "警告: 最终固件收集目录 (${FIRMWARE_COLLECTION_DIR_PATH}) 未有效设置、不是目录或为空，无法创建 firmware.zip。" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
+              echo "FIRMWARE_ZIP=/tmp/no_firmware_to_zip_$(date +%N).zip" >> $GITHUB_ENV
+
+      - name: 上传固件 (Artifact)
+        uses: actions/upload-artifact@main
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        with:
+          name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: ${{ env.FIRMWARE_ZIP }}
+          if-no-files-found: warn
+
+      - name: 生成发布标签 (Generate Release Tag)
+        id: tag
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+        run: |
+          RELEASE_TAG_BASE=$(date +"%Y.%m.%d-%H%M")
+          DEVICE_TAG_PART=$(echo "${{ env.DEVICE_NAME }}" | sed 's/^_//;s/_$//' | sed 's/[^a-zA-Z0-9._-]/-/g' )
+          if [ -n "$DEVICE_TAG_PART" ] && [ "$DEVICE_TAG_PART" != "-" ]; then FINAL_RELEASE_TAG="${RELEASE_TAG_BASE}_${DEVICE_TAG_PART}"; else FINAL_RELEASE_TAG="${RELEASE_TAG_BASE}"; fi
+          echo "RELEASE_TAG=${FINAL_RELEASE_TAG}" >> $GITHUB_OUTPUT
+          echo "## OpenWrt Firmware Build ($(date +"%Y-%m-%d %H:%M %Z")) 📦" > release_body.txt
+          echo "" >> release_body.txt
+          echo "**Branch:** \`${{ env.REPO_BRANCH }}\`" >> release_body.txt
+          echo "**Config:** \`${{ env.CONFIG_FILE_IN_REPO }}\`" >> release_body.txt
+          if [ -n "$DEVICE_TAG_PART" ] && [ "$DEVICE_TAG_PART" != "-" ]; then echo "**Device:** \`${{ env.DEVICE_NAME }}\`" >> release_body.txt; fi
+          echo "" >> release_body.txt
+          echo "### 固件下载 (Firmware Download)" >> release_body.txt
+          echo "请在下方 Assets 中找到固件文件 (通常是一个 .zip 压缩包)。" >> release_body.txt
+          echo "Please find firmware files (usually a .zip archive) in the Assets section below." >> release_body.txt
+          echo "" >> release_body.txt; echo "---" >> release_body.txt
+          echo "⚠️ **刷机前请务必备份重要数据！**" >> release_body.txt
+          echo "⚠️ **Backup your important data before flashing!**" >> release_body.txt
+          echo "" >> release_body.txt
+          echo "_Built by GitHub Actions - Workflow: [${{ github.workflow }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})_" >> release_body.txt
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 上传固件到Releases (Upload Firmware to Releases)
+        uses: softprops/action-gh-release@v2
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
+          body_path: release_body.txt
+          files: ${{ env.FIRMWARE_ZIP }}
+          
+      # ======= 新增：刷新 CloudFront CDN 缓存 =======
+      - name: 刷新 CloudFront CDN 缓存 (CloudFront Invalidate Cache)
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          CF_DISTRIBUTION_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
+          S3_EFFECTIVE_PATH_PREFIX: ${{ env.S3_EFFECTIVE_PATH_PREFIX }}
+        run: |
+          echo "开始刷新 CloudFront CDN 缓存: /${S3_EFFECTIVE_PATH_PREFIX}/*"
+          aws cloudfront create-invalidation \
+            --distribution-id "$CF_DISTRIBUTION_ID" \
+            --paths "/${S3_EFFECTIVE_PATH_PREFIX}/*"
+          echo "CloudFront CDN 缓存刷新请求已提交"          
+
+      - name: 删除旧的Releases (Delete Old Releases)
+        uses: dev-drprasad/delete-older-releases@master
+        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+        with:
+          keep_latest: 3
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
