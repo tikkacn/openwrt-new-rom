@@ -24,13 +24,13 @@ jobs:
           CF_EFFECTIVE_URL_PREFIX: ${{ env.CF_CDN_DOMAIN }}/${{ env.S3_EFFECTIVE_PATH_PREFIX }}
         run: |
           set -e
-          RESTORE_TMP=/workdir/cloudfront_cache_check_tmp
+          RESTORE_TMP="${{ github.workspace }}/cloudfront_cache_check_tmp"
           mkdir -p "$RESTORE_TMP"
 
           cf_download_and_extract_parts() {
             local archive_basename="$1"
             local target_extract_path="$2"
-            local chunk_restore_tmp_dir="/tmp/cf_restore_chunks_$(echo "$archive_basename" | tr -dc 'a-zA-Z0-9_')"
+            local chunk_restore_tmp_dir="${RUNNER_TEMP:-/tmp}/cf_restore_chunks_$(echo "$archive_basename" | tr -dc 'a-zA-Z0-9_')"
             mkdir -p "${chunk_restore_tmp_dir}"
             local manifest_url="${CF_EFFECTIVE_URL_PREFIX}/${archive_basename}.manifest"
             local local_manifest_file="${chunk_restore_tmp_dir}/${archive_basename}.manifest"
@@ -68,7 +68,7 @@ jobs:
 
       - name: 检查关键目录、文件及常见增量错误
         run: |
-          RESTORE_TMP=/workdir/cloudfront_cache_check_tmp
+          RESTORE_TMP="${{ github.workspace }}/cloudfront_cache_check_tmp"
           echo "== 关键目录结构预览 =="
           find $RESTORE_TMP | head -100
 
@@ -129,5 +129,5 @@ jobs:
 
       - name: 自动清理检查目录
         run: |
-          rm -rf /workdir/cloudfront_cache_check_tmp
+          rm -rf "${{ github.workspace }}/cloudfront_cache_check_tmp"
           echo "已自动清理本地检查目录"
