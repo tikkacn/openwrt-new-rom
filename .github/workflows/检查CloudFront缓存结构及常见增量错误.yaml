@@ -1,0 +1,133 @@
+name: 检查CloudFront缓存结构及常见增量错误
+
+on:
+  workflow_dispatch:
+
+env:
+  CF_CDN_DOMAIN: https://d16xdi3lv2va77.cloudfront.net
+  S3_EFFECTIVE_PATH_PREFIX: openwrt-s3chunks-v3/master # 如有分支或自定义路径请更改
+  S3_DL_DIR_ARCHIVE_BASENAME: openwrt_dl_cache.tar.zst
+  S3_STAGING_DIR_ARCHIVE_BASENAME: openwrt_staging_dir_cache.tar.zst
+  S3_BUILD_DIR_HOST_ARCHIVE_BASENAME: openwrt_build_dir_host_cache.tar.zst
+  S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME: openwrt_build_dir_toolchain_cache.tar.zst
+  S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME: openwrt_build_dir_target.tar.zst
+  S3_FEEDS_CACHE_ARCHIVE_BASENAME: openwrt_feeds_cache.tar.zst
+  S3_CCACHE_ARCHIVE_BASENAME: openwrt_ccache.tar.zst
+  S3_BUILD_STATE_ARCHIVE_BASENAME: openwrt_build_state.tar.zst
+
+jobs:
+  check_cache:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 还原CloudFront缓存到临时目录
+        env:
+          CF_EFFECTIVE_URL_PREFIX: ${{ env.CF_CDN_DOMAIN }}/${{ env.S3_EFFECTIVE_PATH_PREFIX }}
+        run: |
+          set -e
+          RESTORE_TMP=/workdir/cloudfront_cache_check_tmp
+          mkdir -p "$RESTORE_TMP"
+
+          cf_download_and_extract_parts() {
+            local archive_basename="$1"
+            local target_extract_path="$2"
+            local chunk_restore_tmp_dir="/tmp/cf_restore_chunks_$(echo "$archive_basename" | tr -dc 'a-zA-Z0-9_')"
+            mkdir -p "${chunk_restore_tmp_dir}"
+            local manifest_url="${CF_EFFECTIVE_URL_PREFIX}/${archive_basename}.manifest"
+            local local_manifest_file="${chunk_restore_tmp_dir}/${archive_basename}.manifest"
+            if curl -fsSL --retry 3 -o "${local_manifest_file}" "${manifest_url}"; then
+              mapfile -t chunk_files_to_download < "${local_manifest_file}"
+              if [ ${#chunk_files_to_download[@]} -eq 0 ]; then rm -rf "${chunk_restore_tmp_dir}"; return; fi
+              local all_chunks_downloaded=true; declare -a downloaded_chunk_paths_ordered
+              for chunk_filename_dirty in "${chunk_files_to_download[@]}"; do
+                local chunk_filename=$(echo "$chunk_filename_dirty" | tr -d '\r\n'); [ -z "$chunk_filename" ] && continue
+                local chunk_url="${CF_EFFECTIVE_URL_PREFIX}/${chunk_filename}"; local local_chunk_path="${chunk_restore_tmp_dir}/${chunk_filename}"
+                if ! curl -fSL --retry 3 -o "${local_chunk_path}" "${chunk_url}"; then all_chunks_downloaded=false; fi
+                downloaded_chunk_paths_ordered+=("${local_chunk_path}")
+              done
+              if [ "$all_chunks_downloaded" = true ] && [ ${#downloaded_chunk_paths_ordered[@]} -gt 0 ]; then
+                cat ${downloaded_chunk_paths_ordered[@]} | zstd -d -T0 - | tar -xf - -C "${target_extract_path}"
+              fi
+            else
+              local single_archive_url="${CF_EFFECTIVE_URL_PREFIX}/${archive_basename}"
+              local single_local_archive="${chunk_restore_tmp_dir}/${archive_basename}"
+              if curl -fSL --retry 3 -o "${single_local_archive}" "${single_archive_url}"; then
+                tar -I "zstd -T0" -xf "${single_local_archive}" -C "${target_extract_path}"
+              fi
+            fi
+            rm -rf "${chunk_restore_tmp_dir}"
+          }
+          cf_download_and_extract_parts "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          cf_download_and_extract_parts "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}" "$RESTORE_TMP"
+          echo "CloudFront缓存全部还原完毕于 $RESTORE_TMP"
+
+      - name: 检查关键目录、文件及常见增量错误
+        run: |
+          RESTORE_TMP=/workdir/cloudfront_cache_check_tmp
+          echo "== 关键目录结构预览 =="
+          find $RESTORE_TMP | head -100
+
+          echo "== 检查关键目录是否存在且非空 =="
+          for d in dl staging_dir build_dir feeds .ccache; do
+            if [ ! -d "$RESTORE_TMP/$d" ]; then
+              echo "::error::[致命] 关键缓存目录 $d 缺失，增量必定失败！"
+            elif [ -z "$(ls -A $RESTORE_TMP/$d 2>/dev/null)" ]; then
+              echo "::warning::[警告] 关键缓存目录 $d 存在但内容为空，增量可能失败！"
+            else
+              echo "[OK] $d 目录存在且非空"
+              ls -lh "$RESTORE_TMP/$d" | head -10
+            fi
+          done
+
+          echo "== 检查 build_dir/toolchain-* 子目录 =="
+          ls -ld "$RESTORE_TMP"/build_dir/toolchain-* 2>/dev/null || echo "::warning::未找到 build_dir/toolchain-* 子目录"
+
+          echo "== 检查关键文件 =="
+          for f in .config .config.old feeds.conf version.number; do
+            if [ -f "$RESTORE_TMP/$f" ]; then
+              echo "[OK] $f 存在"
+            else
+              echo "::warning::[警告] $f 缺失"
+            fi
+          done
+
+          echo "== 检查 .manifest 文件 =="
+          find $RESTORE_TMP -name '*.manifest' | head -10
+
+          echo "== toolchain.md5 检查 =="
+          FOUND_TOOLCHAIN_MD5="$(find $RESTORE_TMP -name 'toolchain.md5' | head -1)"
+          if [ -z "$FOUND_TOOLCHAIN_MD5" ]; then
+            echo "::error::[致命] toolchain.md5 未找到，增量 toolchain 必定失效！"
+          else
+            echo "[OK] toolchain.md5 存在于: $FOUND_TOOLCHAIN_MD5"
+            ls -lh "$FOUND_TOOLCHAIN_MD5"
+          fi
+
+          echo "== 检查 stamp 相关文件 =="
+          find $RESTORE_TMP -type f -name 'stamp.*' | head -10
+
+          echo "== 检查归档文件大小 =="
+          for file in "${{ env.S3_DL_DIR_ARCHIVE_BASENAME }}" "${{ env.S3_STAGING_DIR_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_DIR_HOST_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_DIR_TOOLCHAIN_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_DIR_TARGET_ARCHIVE_BASENAME }}" "${{ env.S3_FEEDS_CACHE_ARCHIVE_BASENAME }}" "${{ env.S3_CCACHE_ARCHIVE_BASENAME }}" "${{ env.S3_BUILD_STATE_ARCHIVE_BASENAME }}"; do
+            url="${{ env.CF_CDN_DOMAIN }}/${{ env.S3_EFFECTIVE_PATH_PREFIX }}/$file"
+            size=$(curl -sI "$url" | grep -i Content-Length | awk '{print $2}' | tr -d '\r\n')
+            echo "$file\t$size"
+            if [ -z "$size" ] || [ "$size" -lt 10240 ]; then
+              echo "::warning::[警告] $file 尺寸异常，可能包损坏或内容丢失"
+            fi
+          done
+
+          echo "== 检查软链接 =="
+          find $RESTORE_TMP -type l | head -10
+
+          echo "== 检查目录权限 =="
+          find $RESTORE_TMP -type d -exec ls -ld {} \; | head -10
+
+      - name: 自动清理检查目录
+        run: |
+          rm -rf /workdir/cloudfront_cache_check_tmp
+          echo "已自动清理本地检查目录"
