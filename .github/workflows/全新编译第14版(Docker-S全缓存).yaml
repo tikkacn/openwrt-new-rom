@@ -11,6 +11,10 @@ on:
         description: '全新编译，不使用S3恢复的环境。仍会打包上传新环境到S3。首次S3填充时应为false并预清空S3。'
         required: false
         default: 'false'
+      force_update:
+        description: '强制更新feeds和第三方包，但保留缓存优势'
+        required: false
+        default: 'false'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
@@ -221,10 +225,10 @@ jobs:
           if [ -d "/restore_tmp" ]; then
             echo "[DOCKER] Restoring S3 cache directories from /restore_tmp ..."
             for d in .github_actions_build_state .ccache build_dir dl feeds staging_dir; do
-              if [ -d "/restore_tmp/\$d" ]; then
-                echo "[DOCKER] Restoring \$d ..."
-                rm -rf "./\$d"
-                cp -a "/restore_tmp/\$d" "./"
+              if [ -d "/restore_tmp/$d" ]; then
+                echo "[DOCKER] Restoring $d ..."
+                rm -rf "./$d"
+                cp -a "/restore_tmp/$d" "./"
               fi
             done
           fi
@@ -234,7 +238,7 @@ jobs:
           mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}" "./${INTERNAL_CCACHE_DIR_NAME_ACTUAL}" "./logs"
           export CCACHE_DIR="${PWD}/${INTERNAL_CCACHE_DIR_NAME_ACTUAL}"
           export CCACHE_LOGFILE="${DOCKER_ENV_CONTAINER_CCACHE_LOG_PATH:-/tmp/container_ccache_detailed.log}"
-          mkdir -p "$(dirname "${CCACHE_LOGFILE}")"; ccache -M 8G; ccache -z
+          mkdir -p "$(dirname "${CCACHE_LOGFILE}")"; ccache -M 20G; ccache -z
 
           INTERNAL_CONFIG_FILE_NAME="${DOCKER_ENV_CONFIG_FILE_NAME_IN_REPO:-增量缓存优化.config}"
           INTERNAL_DIY_P1_SH_NAME="${DOCKER_ENV_DIY_P1_SH_NAME_IN_REPO:-diy-part1.sh}"
@@ -247,74 +251,170 @@ jobs:
 
           "./${INTERNAL_DIY_P1_SH_NAME}"
 
-          if [ -f "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" ]; then cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" "./feeds.conf.default"; elif [ ! -f "./feeds.conf.default" ] && [ -f "./feeds.conf.default.sample" ]; then cp feeds.conf.default.sample feeds.conf.default; fi
-          ./scripts/feeds update -a; ./scripts/feeds install -a; "./${INTERNAL_DIY_P2_SH_NAME}"
+          if [ -f "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" ]; then 
+            cp "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/feeds.conf.default" "./feeds.conf.default"
+          elif [ ! -f "./feeds.conf.default" ] && [ -f "./feeds.conf.default.sample" ]; then 
+            cp feeds.conf.default.sample feeds.conf.default
+          fi
+          
+          # 更新并安装feeds
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          "./${INTERNAL_DIY_P2_SH_NAME}"
 
-          echo "CONFIG_AUTOREMOVE=y" >> .config; echo "CONFIG_AUTOREBUILD=y" >> .config
+          echo "CONFIG_AUTOREMOVE=y" >> .config
+          echo "CONFIG_AUTOREBUILD=y" >> .config
           if ! grep -q "CONFIG_TARGET_ROOTFS_SQUASHFS=y" .config; then echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config; fi
           if ! grep -q "CONFIG_TARGET_IMAGES_GZIP=y" .config; then echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config; fi
 
           make defconfig
 
-          TOOLCHAIN_CONFIG_SUBSET_FOR_MD5=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort)
-          TOOLCHAIN_MD5=$(echo "$TOOLCHAIN_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
-          PREVIOUS_TOOLCHAIN_MD5=$(cat "./.github_actions_build_state/toolchain.md5" 2>/dev/null || echo "not_found_in_build_state")
-          PACKAGE_CONFIG_SUBSET_FOR_MD5=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort)
-          PACKAGE_MD5=$(echo "$PACKAGE_CONFIG_SUBSET_FOR_MD5" | md5sum | awk '{print $1}')
-          PREVIOUS_PACKAGE_MD5=$(cat "./.github_actions_build_state/package.md5" 2>/dev/null || echo "not_found_in_build_state")
+          # =====================
+          # 改进的智能编译决策系统
+          # =====================
 
-          # === 诊断日志关键点收集 ===
-          if [ "${DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE}" != "true" ]; then
-            add_diag "原因：S3缓存未还原，必须全量编译。"
+          # 1. 检查核心配置变化 (TARGET/ARCH相关配置)
+          CONFIG_CORE=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH" .config | sort)
+          CONFIG_CORE_MD5=$(echo "$CONFIG_CORE" | md5sum | awk '{print $1}')
+          PREVIOUS_CONFIG_CORE_MD5=$(cat "./.github_actions_build_state/config_core.md5" 2>/dev/null || echo "not_found")
+
+          # 2. 检查工具链配置变化
+          CONFIG_TOOLCHAIN=$(grep -E "^CONFIG_TOOLCHAIN|^CONFIG_GCC_VERSION|^CONFIG_LIBC" .config | grep -v "NOT_SET" | sort)
+          TOOLCHAIN_MD5=$(echo "$CONFIG_TOOLCHAIN" | md5sum | awk '{print $1}')
+          PREVIOUS_TOOLCHAIN_MD5=$(cat "./.github_actions_build_state/toolchain.md5" 2>/dev/null || echo "not_found")
+
+          # 3. 检查包配置变化
+          CONFIG_PACKAGES=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort)
+          PACKAGES_MD5=$(echo "$CONFIG_PACKAGES" | md5sum | awk '{print $1}')
+          PREVIOUS_PACKAGES_MD5=$(cat "./.github_actions_build_state/packages.md5" 2>/dev/null || echo "not_found")
+
+          # 4. 检查feeds变化
+          FEEDS_CHECKSUM=$(find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+          PREVIOUS_FEEDS_CHECKSUM=$(cat "./.github_actions_build_state/feeds_checksum.txt" 2>/dev/null || echo "not_found")
+
+          # 5. 检查第三方包变化 (假设位于package/lean目录)
+          THIRD_PARTY_CHECKSUM=""
+          if [ -d "package/lean" ]; then
+            THIRD_PARTY_CHECKSUM+=$(find package/lean -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
           fi
+          # 添加其他第三方包目录检查
+          if [ -d "package/lienol" ]; then
+            THIRD_PARTY_CHECKSUM+=$(find package/lienol -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+          fi
+          PREVIOUS_THIRD_PARTY_CHECKSUM=$(cat "./.github_actions_build_state/third_party_checksum.txt" 2>/dev/null || echo "not_found")
+
+          # 保存当前状态以供下次比较
+          mkdir -p "./.github_actions_build_state"
+          echo "$CONFIG_CORE_MD5" > "./.github_actions_build_state/config_core.md5"
+          echo "$TOOLCHAIN_MD5" > "./.github_actions_build_state/toolchain.md5"
+          echo "$PACKAGES_MD5" > "./.github_actions_build_state/packages.md5"
+          echo "$FEEDS_CHECKSUM" > "./.github_actions_build_state/feeds_checksum.txt"
+          echo "$THIRD_PARTY_CHECKSUM" > "./.github_actions_build_state/third_party_checksum.txt"
+          cp .config "./.github_actions_build_state/config_from_compile_step.txt"
+          if [ -f "feeds.conf.default" ]; then
+            cp feeds.conf.default "./.github_actions_build_state/feeds.conf.default"
+          fi
+
+          # 设置构建策略
+          DO_FULL_BUILD=0
+          DO_TOOLCHAIN_BUILD=0
+          DO_PACKAGE_BUILD=0
+          DO_MINIMAL_BUILD=0
+
+          # 决策逻辑
           if [ "${DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE}" = "true" ]; then
             add_diag "原因：clean_build触发，强制全量编译。"
-          fi
-          if [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found_in_build_state" ]; then
-            add_diag "原因：上次toolchain.md5缺失，无法增量。"
-          elif [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
-            add_diag "原因：toolchain.md5变动（本次：$TOOLCHAIN_MD5，上次：$PREVIOUS_TOOLCHAIN_MD5），需全量编译。"
-          fi
-          if [ "$PREVIOUS_PACKAGE_MD5" = "not_found_in_build_state" ]; then
-            add_diag "原因：上次package.md5缺失，无法增量。"
-          elif [ "$PACKAGE_MD5" != "$PREVIOUS_PACKAGE_MD5" ]; then
-            add_diag "原因：package.md5变动（本次：$PACKAGE_MD5，上次：$PREVIOUS_PACKAGE_MD5），需包编译。"
-          fi
-          if [ -f .github_actions_build_state/config_from_compile_step.txt ]; then
-            if ! diff .config .github_actions_build_state/config_from_compile_step.txt >/dev/null; then
-              add_diag "config变动:\n$(diff .config .github_actions_build_state/config_from_compile_step.txt | head -20)"
+            DO_FULL_BUILD=1
+          elif [ "${DOCKER_ENV_FORCE_UPDATE_FROM_OUTSIDE}" = "true" ]; then
+            add_diag "原因：force_update触发，强制更新并重新编译包。"
+            DO_PACKAGE_BUILD=1
+          elif [ "$CONFIG_CORE_MD5" != "$PREVIOUS_CONFIG_CORE_MD5" ] || [ "$PREVIOUS_CONFIG_CORE_MD5" = "not_found" ]; then
+            if [ "$PREVIOUS_CONFIG_CORE_MD5" = "not_found" ]; then
+              add_diag "原因：首次编译或核心配置状态文件缺失。"
+            else
+              add_diag "原因：核心配置变化 (当前: $CONFIG_CORE_MD5, 上次: $PREVIOUS_CONFIG_CORE_MD5)。"
             fi
-          fi
-          if [ -f feeds.conf.default ] && [ -f .github_actions_build_state/feeds.conf.default ]; then
-            if ! diff feeds.conf.default .github_actions_build_state/feeds.conf.default >/dev/null; then
-              add_diag "feeds.conf.default变动:\n$(diff feeds.conf.default .github_actions_build_state/feeds.conf.default | head -20)"
+            DO_TOOLCHAIN_BUILD=1
+          elif [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ] || [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found" ]; then
+            if [ "$PREVIOUS_TOOLCHAIN_MD5" = "not_found" ]; then
+              add_diag "原因：首次编译或工具链配置状态文件缺失。"
+            else
+              add_diag "原因：工具链配置变化 (当前: $TOOLCHAIN_MD5, 上次: $PREVIOUS_TOOLCHAIN_MD5)。"
             fi
+            DO_TOOLCHAIN_BUILD=1
+          elif [ "$FEEDS_CHECKSUM" != "$PREVIOUS_FEEDS_CHECKSUM" ] || [ "$PREVIOUS_FEEDS_CHECKSUM" = "not_found" ]; then
+            if [ "$PREVIOUS_FEEDS_CHECKSUM" = "not_found" ]; then
+              add_diag "原因：首次编译或feeds状态文件缺失。"
+            else
+              add_diag "原因：feeds有更新 (当前: $FEEDS_CHECKSUM, 上次: $PREVIOUS_FEEDS_CHECKSUM)。"
+            fi
+            DO_PACKAGE_BUILD=1
+          elif [ "$THIRD_PARTY_CHECKSUM" != "$PREVIOUS_THIRD_PARTY_CHECKSUM" ] && [ "$PREVIOUS_THIRD_PARTY_CHECKSUM" != "not_found" ]; then
+            add_diag "原因：第三方包有更新 (当前: $THIRD_PARTY_CHECKSUM, 上次: $PREVIOUS_THIRD_PARTY_CHECKSUM)。"
+            DO_PACKAGE_BUILD=1
+          elif [ "$PACKAGES_MD5" != "$PREVIOUS_PACKAGES_MD5" ] || [ "$PREVIOUS_PACKAGES_MD5" = "not_found" ]; then
+            if [ "$PREVIOUS_PACKAGES_MD5" = "not_found" ]; then
+              add_diag "原因：首次编译或包配置状态文件缺失。"
+            else
+              add_diag "原因：包配置变化 (当前: $PACKAGES_MD5, 上次: $PREVIOUS_PACKAGES_MD5)。"
+            fi
+            DO_PACKAGE_BUILD=1
+          else
+            add_diag "原因：配置无变化，执行最小增量编译。"
+            DO_MINIMAL_BUILD=1
           fi
+
+          # 检查ccache命中情况
           CCACHE_STATS=$(ccache -s 2>/dev/null || true)
           CCACHE_HIT=$(echo "$CCACHE_STATS" | grep "hit rate" | awk '{print $3}')
           add_diag "ccache命中率: $CCACHE_HIT"
-          if [ "$CCACHE_HIT" = "0.0%" ]; then
-            add_diag "原因：ccache未命中，建议检查CCACHE_DIR和主机时钟/文件戳。"
-          fi
 
+          # 记录诊断信息
+          add_diag "编译策略：FULL=$DO_FULL_BUILD, TOOLCHAIN=$DO_TOOLCHAIN_BUILD, PACKAGE=$DO_PACKAGE_BUILD, MINIMAL=$DO_MINIMAL_BUILD"
+
+          # 根据策略执行编译
           start_time=$(date +%s)
-          MAKE_JOBS_NPROC=$(nproc); MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false"
+          MAKE_JOBS_NPROC=$(nproc)
+          MAKE_OPTS_COMMON_GOFLAGS="GOFLAGS=-buildvcs=false"
           MAKE_OPTS_MAIN="-j${MAKE_JOBS_NPROC} V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
           MAKE_OPTS_FALLBACK="-j1 V=s ${MAKE_OPTS_COMMON_GOFLAGS}"
           COMPILE_OUTPUT_LOG_DOCKER="logs/compile_output_docker_$(date +%Y%m%d_%H%M%S).log"
           final_install_status_docker=0
-          if [ $DO_FULL_BUILD_DOCKER -eq 1 ]; then
+
+          if [ $DO_FULL_BUILD -eq 1 ]; then
+            # 全量编译（强制清理）
+            make clean V=s
             make tools/compile ${MAKE_OPTS_FALLBACK} || make tools/compile ${MAKE_OPTS_FALLBACK}
             make toolchain/compile ${MAKE_OPTS_FALLBACK} || make toolchain/compile ${MAKE_OPTS_FALLBACK}
-            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
-          elif [ $DO_PACKAGE_BUILD_DOCKER -eq 1 ]; then
+            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then 
+              make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; 
+            fi
+          elif [ $DO_TOOLCHAIN_BUILD -eq 1 ]; then
+            # 工具链重建（保留dl缓存和ccache优势）
+            make tools/compile ${MAKE_OPTS_FALLBACK} || make tools/compile ${MAKE_OPTS_FALLBACK}
+            make toolchain/compile ${MAKE_OPTS_FALLBACK} || make toolchain/compile ${MAKE_OPTS_FALLBACK}
+            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then 
+              make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; 
+            fi
+          elif [ $DO_PACKAGE_BUILD -eq 1 ]; then
+            # 包重建
             make package/clean V=s || true
-            if ! make package/compile ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make package/compile ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+            if ! make package/compile ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then 
+              make package/compile ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; 
+            fi
             make package/index -j1 || make package/index -j1
           else
-            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; fi
+            # 最小增量编译
+            if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then 
+              make ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; 
+            fi
           fi
-          make target/install ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"; final_install_status_docker=$?
+
+          # 确保固件生成
+          make target/install ${MAKE_OPTS_FALLBACK} 2>&1 | tee -a "${COMPILE_OUTPUT_LOG_DOCKER}"
+          final_install_status_docker=$?
+
+          # 准备下次编译环境
           make prepare ${MAKE_OPTS_MAIN} || make prepare ${MAKE_OPTS_FALLBACK}
           make tools/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make tools/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
           make toolchain/install ${MAKE_OPTS_MAIN} IGNORE_ERRORS=m || make toolchain/install ${MAKE_OPTS_FALLBACK} IGNORE_ERRORS=m
@@ -329,82 +429,81 @@ jobs:
 
           add_diag "本次make耗时: ${elapsed}秒"
 
-          mkdir -p "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}"; cp .config "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/config_from_compile_step.txt"
-          echo "$TOOLCHAIN_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/toolchain.md5"; echo "$PACKAGE_MD5" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/package.md5"
-          echo "${DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE}" > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/last_feeds_changed_status.txt"
-          find feeds -type f -name "Makefile" -exec sha256sum {} \; | sort | sha256sum > "./${INTERNAL_BUILD_STATE_DIR_NAME_ACTUAL}/current_feeds.sha256"
-          ccache -s | tee -a "${INTERNAL_DEBUG_LOG}"
+          # 生成增量编译失效诊断报告
+          DIAG_REPORT="${DOCKER_ENV_CONTAINER_BUILD_AREA}/incremental_compile_diagnose.txt"
+          echo "# OpenWrt增量编译诊断报告" > "$DIAG_REPORT"
+          echo "## 1. 编译决策" >> "$DIAG_REPORT"
+          echo "- 全量编译: $DO_FULL_BUILD" >> "$DIAG_REPORT"
+          echo "- 工具链重建: $DO_TOOLCHAIN_BUILD" >> "$DIAG_REPORT"
+          echo "- 包重建: $DO_PACKAGE_BUILD" >> "$DIAG_REPORT"
+          echo "- 最小增量: $DO_MINIMAL_BUILD" >> "$DIAG_REPORT"
+
+          echo "## 2. 核心配置状态" >> "$DIAG_REPORT"
+          if [ "$CONFIG_CORE_MD5" != "$PREVIOUS_CONFIG_CORE_MD5" ]; then
+            echo "- 状态: 变化" >> "$DIAG_REPORT"
+            echo "- 当前: $CONFIG_CORE_MD5" >> "$DIAG_REPORT"
+            echo "- 上次: $PREVIOUS_CONFIG_CORE_MD5" >> "$DIAG_REPORT"
+          else
+            echo "- 状态: 无变化" >> "$DIAG_REPORT"
+          fi
+
+          echo "## 3. 工具链配置状态" >> "$DIAG_REPORT"
+          if [ "$TOOLCHAIN_MD5" != "$PREVIOUS_TOOLCHAIN_MD5" ]; then
+            echo "- 状态: 变化" >> "$DIAG_REPORT"
+            echo "- 当前: $TOOLCHAIN_MD5" >> "$DIAG_REPORT"
+            echo "- 上次: $PREVIOUS_TOOLCHAIN_MD5" >> "$DIAG_REPORT"
+          else
+            echo "- 状态: 无变化" >> "$DIAG_REPORT"
+          fi
+
+          echo "## 4. Feeds状态" >> "$DIAG_REPORT"
+          if [ "$FEEDS_CHECKSUM" != "$PREVIOUS_FEEDS_CHECKSUM" ]; then
+            echo "- 状态: 变化" >> "$DIAG_REPORT"
+            echo "- 当前: $FEEDS_CHECKSUM" >> "$DIAG_REPORT"
+            echo "- 上次: $PREVIOUS_FEEDS_CHECKSUM" >> "$DIAG_REPORT"
+          else
+            echo "- 状态: 无变化" >> "$DIAG_REPORT"
+          fi
+
+          echo "## 5. 第三方包状态" >> "$DIAG_REPORT"
+          if [ "$THIRD_PARTY_CHECKSUM" != "$PREVIOUS_THIRD_PARTY_CHECKSUM" ]; then
+            echo "- 状态: 变化" >> "$DIAG_REPORT"
+            echo "- 当前: $THIRD_PARTY_CHECKSUM" >> "$DIAG_REPORT"
+            echo "- 上次: $PREVIOUS_THIRD_PARTY_CHECKSUM" >> "$DIAG_REPORT"
+          else
+            echo "- 状态: 无变化" >> "$DIAG_REPORT"
+          fi
+
+          echo "## 6. 包配置状态" >> "$DIAG_REPORT"
+          if [ "$PACKAGES_MD5" != "$PREVIOUS_PACKAGES_MD5" ]; then
+            echo "- 状态: 变化" >> "$DIAG_REPORT"
+            echo "- 当前: $PACKAGES_MD5" >> "$DIAG_REPORT"
+            echo "- 上次: $PREVIOUS_PACKAGES_MD5" >> "$DIAG_REPORT"
+          else
+            echo "- 状态: 无变化" >> "$DIAG_REPORT"
+          fi
+
+          echo "## 7. ccache命中率" >> "$DIAG_REPORT"
+          echo "- 命中率: $CCACHE_HIT" >> "$DIAG_REPORT"
+
+          echo "## 8. 编译耗时" >> "$DIAG_REPORT"
+          echo "- 编译时长: ${elapsed}秒" >> "$DIAG_REPORT"
+
+          # 检查编译结果
           if [ ${final_install_status_docker} -eq 0 ] && [ -n "$(find bin/targets -type f \( -name "*.bin" -o -name "*combined*" -o -name "*sysupgrade*" -o -name "*.img.gz" \) -print -quit)" ]; then
             touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_success"
           else
             touch "${DOCKER_ENV_CONTAINER_BUILD_AREA}/.docker_build_status_failure"
           fi
+
+          # 复制诊断日志
           cp "${INTERNAL_DEBUG_LOG}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_build_debug_summary.log" || true
           cp "${CCACHE_LOGFILE}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_ccache_detailed.log" || true
-          if [ -f "${COMPILE_OUTPUT_LOG_DOCKER}" ]; then cp "${COMPILE_OUTPUT_LOG_DOCKER}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_compile_output.log" || true; fi
+          if [ -f "${COMPILE_OUTPUT_LOG_DOCKER}" ]; then 
+            cp "${COMPILE_OUTPUT_LOG_DOCKER}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_compile_output.log" || true
+          fi
+
           echo "[DOCKER] Build script finished." | tee -a "${INTERNAL_DEBUG_LOG}"
-
-          # === 增量编译失效诊断报告生成 ===
-          DIAG_REPORT="${DOCKER_ENV_CONTAINER_BUILD_AREA}/incremental_compile_diagnose.txt"
-          echo "# OpenWrt增量编译失效诊断报告" > "$DIAG_REPORT"
-
-          # 1. toolchain.md5
-          if [ ! -f .github_actions_build_state/toolchain.md5 ]; then
-            echo -e "## [致命] 1. toolchain.md5 缺失" >> "$DIAG_REPORT"
-          else
-            TOOLCHAIN_MD5_NOW=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort | md5sum | awk '{print $1}')
-            TOOLCHAIN_MD5_OLD=$(cat .github_actions_build_state/toolchain.md5)
-            if [ "$TOOLCHAIN_MD5_NOW" != "$TOOLCHAIN_MD5_OLD" ]; then
-              echo -e "## [致命] 1. toolchain.md5 变动\n- 当前: $TOOLCHAIN_MD5_NOW\n- 上次: $TOOLCHAIN_MD5_OLD" >> "$DIAG_REPORT"
-            fi
-          fi
-
-          # 2. package.md5
-          if [ ! -f .github_actions_build_state/package.md5 ]; then
-            echo -e "## [致命] 2. package.md5 缺失" >> "$DIAG_REPORT"
-          else
-            PACKAGE_MD5_NOW=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort | md5sum | awk '{print $1}')
-            PACKAGE_MD5_OLD=$(cat .github_actions_build_state/package.md5)
-            if [ "$PACKAGE_MD5_NOW" != "$PACKAGE_MD5_OLD" ]; then
-              echo -e "## [致命] 2. package.md5 变动\n- 当前: $PACKAGE_MD5_NOW\n- 上次: $PACKAGE_MD5_OLD" >> "$DIAG_REPORT"
-            fi
-          fi
-
-          # 3. .config diff
-          if [ -f .github_actions_build_state/config_from_compile_step.txt ]; then
-            if ! diff .config .github_actions_build_state/config_from_compile_step.txt >/dev/null; then
-              echo -e "## [高] 3. .config 变动\n\`\`\`\n$(diff .config .github_actions_build_state/config_from_compile_step.txt | head -20)\n\`\`\`" >> "$DIAG_REPORT"
-            fi
-          fi
-
-          # 4. feeds.conf.default diff
-          if [ -f feeds.conf.default ] && [ -f .github_actions_build_state/feeds.conf.default ]; then
-            if ! diff feeds.conf.default .github_actions_build_state/feeds.conf.default >/dev/null; then
-              echo -e "## [高] 4. feeds.conf.default 变动\n\`\`\`\n$(diff feeds.conf.default .github_actions_build_state/feeds.conf.default | head -20)\n\`\`\`" >> "$DIAG_REPORT"
-            fi
-          fi
-
-          # 5. ccache命中率
-          CCACHE_STATS=$(ccache -s 2>/dev/null || true)
-          CCACHE_HIT=$(echo "$CCACHE_STATS" | grep "hit rate" | awk '{print $3}')
-          if [ "$CCACHE_HIT" = "0.0%" ]; then
-            echo "## [中] 5. ccache命中率 0.0%（未命中，需排查CCACHE_DIR和时间戳）" >> "$DIAG_REPORT"
-          else
-            echo "## [中] 5. ccache命中率 $CCACHE_HIT" >> "$DIAG_REPORT"
-          fi
-
-          # 6. 关键目录
-          for d in dl staging_dir build_dir; do
-            if [ ! -d "$d" ] || [ -z "$(ls -A $d 2>/dev/null)" ]; then
-              echo "## [高] 6. 关键目录 $d 缺失或为空" >> "$DIAG_REPORT"
-            else
-              echo "## [低] 6. 关键目录 $d 存在且非空" >> "$DIAG_REPORT"
-            fi
-          done
-
-          # 7. make -n 预览
-          echo -e "## [低] 7. make -n 输出预览\n\`\`\`\n$(make -n | head -20)\n\`\`\`" >> "$DIAG_REPORT"
-
           DOCKER_SCRIPT_EOF
 
           chmod +x "${RUNNER_SCRIPT_PATH}"
@@ -425,6 +524,7 @@ jobs:
             -e DOCKER_ENV_CONTAINER_BUILD_AREA="${{ env.CONTAINER_BUILD_AREA }}" \
             -e DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH="${{ env.CONTAINER_REPO_CONFIG_MOUNT }}" \
             -e DOCKER_ENV_CLEAN_BUILD_FROM_OUTSIDE="${{ github.event.inputs.clean_build }}" \
+            -e DOCKER_ENV_FORCE_UPDATE_FROM_OUTSIDE="${{ github.event.inputs.force_update }}" \
             -e DOCKER_ENV_S3_CACHE_RESTORED_FROM_OUTSIDE="${S3_CACHE_RESTORE_ATTEMPTED:-false}" \
             -e DOCKER_ENV_FEEDS_CHANGED_FROM_OUTSIDE="true" \
             -e DOCKER_ENV_BUILD_TZ="${{ env.TZ }}" \
@@ -515,7 +615,7 @@ jobs:
               FILES_COPIED_COUNT=0
               cd "${CURRENT_IMG_SOURCE_DIR}"
               for pattern in "*combined.img.gz" "*sysupgrade.img.gz" "*combined-efi.img.gz" "*kernel.bin" "*.img" "*.bin"; do
-                  find . -maxdepth 1 -type f -name "$pattern" ! -path "./packages/*" -print0 | while IFS= read -r -d $'\0' found_file; do
+                  find . -maxdepth 1 -type f -name "$pattern" ! -path "./packages/*" -print0 | while IFS= read -r -d \0' found_file; do
                       cp -v -f "${found_file}" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/"
                       FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1))
                   done
@@ -525,7 +625,7 @@ jobs:
                   find . -maxdepth 1 -type f \
                     ! -name "*.manifest" ! -name "*.txt" ! -name "*.json" ! -name "*.buildinfo" ! -name "sha256sums" \
                     ! -path "./packages/*" \
-                    -print0 | while IFS= read -r -d $'\0' found_file; do
+                    -print0 | while IFS= read -r -d \0' found_file; do
                       cp -v -f "${found_file}" "${COLLECTED_FIRMWARE_OUTPUT_DIR}/"
                       FILES_COPIED_COUNT=$((FILES_COPIED_COUNT + 1))
                   done
@@ -573,6 +673,7 @@ jobs:
           else
               echo "警告: 最终固件收集目录 (${FIRMWARE_COLLECTION_DIR_PATH}) 未有效设置、不是目录或为空，无法创建 firmware.zip。" | tee -a "${{ env.DEBUG_LOG_ON_RUNNER }}"
               echo "FIRMWARE_ZIP=/tmp/no_firmware_to_zip_$(date +%N).zip" >> $GITHUB_ENV
+          fi
 
       - name: 上传固件 (Artifact)
         uses: actions/upload-artifact@main
@@ -616,7 +717,9 @@ jobs:
           body_path: release_body.txt
           files: ${{ env.FIRMWARE_ZIP }}
           
-      # ======= 新增：刷新 CloudFront CDN 缓存 =======
+      # S3/CloudFront 缓存部分保留原有逻辑...
+          
+      # 刷新CDN缓存
       - name: 刷新 CloudFront CDN 缓存 (CloudFront Invalidate Cache)
         if: always()
         env:
