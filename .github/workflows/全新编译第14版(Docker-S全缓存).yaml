@@ -1,4 +1,4 @@
-name: 全新编译第14版(Docker-S全缓存-增强诊断版)
+name: 全新编译第14版(Docker-S全缓存-增强诊断+增量失效自诊版)
 
 on:
   workflow_dispatch:
@@ -55,7 +55,7 @@ env:
 jobs:
   build_in_docker:
     runs-on: ubuntu-22.04
-    name: Build OpenWrt in Docker with S3 Chunked Env Cache
+    name: Build OpenWrt in Docker with S3 Chunked Env Cache & Diagnosis
     env:
       RUNNER_OPENWRT_WORKSPACE: /workdir/openwrt_s3_env
       CONTAINER_BUILD_AREA: /workdir/openwrt_s3_env
@@ -343,6 +343,68 @@ jobs:
           cp "${CCACHE_LOGFILE}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_ccache_detailed.log" || true
           if [ -f "${COMPILE_OUTPUT_LOG_DOCKER}" ]; then cp "${COMPILE_OUTPUT_LOG_DOCKER}" "${DOCKER_ENV_CONTAINER_REPO_CONFIG_PATH}/docker_compile_output.log" || true; fi
           echo "[DOCKER] Build script finished." | tee -a "${INTERNAL_DEBUG_LOG}"
+
+          # === 增量编译失效诊断报告生成 ===
+          DIAG_REPORT="${DOCKER_ENV_CONTAINER_BUILD_AREA}/incremental_compile_diagnose.txt"
+          echo "# OpenWrt增量编译失效诊断报告" > "$DIAG_REPORT"
+
+          # 1. toolchain.md5
+          if [ ! -f .github_actions_build_state/toolchain.md5 ]; then
+            echo -e "## [致命] 1. toolchain.md5 缺失" >> "$DIAG_REPORT"
+          else
+            TOOLCHAIN_MD5_NOW=$(grep -E "^CONFIG_TARGET|^CONFIG_ARCH|^CONFIG_TOOLCHAIN" .config | grep -v "NOT_SET" | sort | md5sum | awk '{print $1}')
+            TOOLCHAIN_MD5_OLD=$(cat .github_actions_build_state/toolchain.md5)
+            if [ "$TOOLCHAIN_MD5_NOW" != "$TOOLCHAIN_MD5_OLD" ]; then
+              echo -e "## [致命] 1. toolchain.md5 变动\n- 当前: $TOOLCHAIN_MD5_NOW\n- 上次: $TOOLCHAIN_MD5_OLD" >> "$DIAG_REPORT"
+            fi
+          fi
+
+          # 2. package.md5
+          if [ ! -f .github_actions_build_state/package.md5 ]; then
+            echo -e "## [致命] 2. package.md5 缺失" >> "$DIAG_REPORT"
+          else
+            PACKAGE_MD5_NOW=$(grep "^CONFIG_PACKAGE_" .config | grep "=y" | sort | md5sum | awk '{print $1}')
+            PACKAGE_MD5_OLD=$(cat .github_actions_build_state/package.md5)
+            if [ "$PACKAGE_MD5_NOW" != "$PACKAGE_MD5_OLD" ]; then
+              echo -e "## [致命] 2. package.md5 变动\n- 当前: $PACKAGE_MD5_NOW\n- 上次: $PACKAGE_MD5_OLD" >> "$DIAG_REPORT"
+            fi
+          fi
+
+          # 3. .config diff
+          if [ -f .github_actions_build_state/config_from_compile_step.txt ]; then
+            if ! diff .config .github_actions_build_state/config_from_compile_step.txt >/dev/null; then
+              echo -e "## [高] 3. .config 变动\n\`\`\`\n$(diff .config .github_actions_build_state/config_from_compile_step.txt | head -20)\n\`\`\`" >> "$DIAG_REPORT"
+            fi
+          fi
+
+          # 4. feeds.conf.default diff
+          if [ -f feeds.conf.default ] && [ -f .github_actions_build_state/feeds.conf.default ]; then
+            if ! diff feeds.conf.default .github_actions_build_state/feeds.conf.default >/dev/null; then
+              echo -e "## [高] 4. feeds.conf.default 变动\n\`\`\`\n$(diff feeds.conf.default .github_actions_build_state/feeds.conf.default | head -20)\n\`\`\`" >> "$DIAG_REPORT"
+            fi
+          fi
+
+          # 5. ccache命中率
+          CCACHE_STATS=$(ccache -s 2>/dev/null || true)
+          CCACHE_HIT=$(echo "$CCACHE_STATS" | grep "hit rate" | awk '{print $3}')
+          if [ "$CCACHE_HIT" = "0.0%" ]; then
+            echo "## [中] 5. ccache命中率 0.0%（未命中，需排查CCACHE_DIR和时间戳）" >> "$DIAG_REPORT"
+          else
+            echo "## [中] 5. ccache命中率 $CCACHE_HIT" >> "$DIAG_REPORT"
+          fi
+
+          # 6. 关键目录
+          for d in dl staging_dir build_dir; do
+            if [ ! -d "$d" ] || [ -z "$(ls -A $d 2>/dev/null)" ]; then
+              echo "## [高] 6. 关键目录 $d 缺失或为空" >> "$DIAG_REPORT"
+            else
+              echo "## [低] 6. 关键目录 $d 存在且非空" >> "$DIAG_REPORT"
+            fi
+          done
+
+          # 7. make -n 预览
+          echo -e "## [低] 7. make -n 输出预览\n\`\`\`\n$(make -n | head -20)\n\`\`\`" >> "$DIAG_REPORT"
+
           DOCKER_SCRIPT_EOF
 
           chmod +x "${RUNNER_SCRIPT_PATH}"
@@ -382,6 +444,12 @@ jobs:
             cp "${{ github.workspace }}/${{ env.RUNNER_CHECKOUT_SUBDIR }}/docker_compile_output.log" "/tmp/docker_compile_output_runner.log" 2>/dev/null || true
           fi
           rm -f "${RUNNER_SCRIPT_PATH}"
+
+      - name: 上传增量编译诊断报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: incremental_compile_diagnose
+          path: /workdir/openwrt_s3_env/incremental_compile_diagnose.txt
 
       - name: 修正工作区文件权限 (Correct Workspace Permissions)
         if: always()
