@@ -197,7 +197,10 @@ jobs:
           DIAG_FILE="$DIAG_DIR/diagnose_summary.txt"
           mkdir -p "$DIAG_DIR"
           : > "$DIAG_FILE"
-          add_diag() { echo -e "$1" | tee -a "$DIAG_FILE"; }
+          add_diag() {
+            mkdir -p "$(dirname "$DIAG_FILE")"
+            echo -e "$1" | tee -a "$DIAG_FILE"
+          }
 
           export FORCE_UNSAFE_CONFIGURE=1
           export GOFLAGS="-buildvcs=false"
@@ -412,6 +415,7 @@ jobs:
           if [ $DO_FULL_BUILD -eq 1 ]; then
             # 全量编译（强制清理）
             make clean V=s
+            mkdir -p bin/targets/__diagnose  # 再次确保诊断目录在make clean后存在
             make tools/compile ${MAKE_OPTS_FALLBACK} || make tools/compile ${MAKE_OPTS_FALLBACK}
             make toolchain/compile ${MAKE_OPTS_FALLBACK} || make toolchain/compile ${MAKE_OPTS_FALLBACK}
             if ! make ${MAKE_OPTS_MAIN} 2>&1 | tee "${COMPILE_OUTPUT_LOG_DOCKER}"; then 
